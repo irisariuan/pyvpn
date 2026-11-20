@@ -411,61 +411,70 @@ class Logical:
 
 
 def group(lines: Sequence[str]) -> list[Logical]:
-    """Join the lines of multi-line if:/route: rules. Other lines stay as they are."""
+    """Join the lines of multi-line if:/route: rules. Other lines stay as they are.
+
+    One pass: the parenthesis depth is kept per line. Inside open parentheses
+    a line continues the rule only when it reads as more of the expression
+    (the previous line ends in ``(``, ``,`` or ``;``, or it starts with
+    ``)``, ``,``, ``;`` or a branch), so an unclosed ``(`` makes that rule an
+    error instead of swallowing the rest of the list.
+    """
     out: list[Logical] = []
+    n = len(lines)
     i = 0
-    while i < len(lines):
-        if not is_route(strip_comment(lines[i])):
+    while i < n:
+        head = strip_comment(lines[i]).strip()
+        if not is_route(head):
             out.append(Logical(i, lines[i]))
             i += 1
             continue
-        parts = [lines[i]]
-        j = i
-        while j + 1 < len(lines):
-            cur = "\n".join(parts)
+        depth = _depth(head)
+        last = head  # the last non-blank line of the rule, comment stripped
+        end = j = i  # end: index of that line
+        while j + 1 < n:
             nxt = strip_comment(lines[j + 1]).strip()
             if not nxt:
-                if _open(cur):
+                if depth > 0:
                     j += 1
-                    parts.append(lines[j])
                     continue
                 break
-            last = cur.rsplit("\n", 1)[-1]
-            if (
-                _open(cur)
-                or strip_comment(last).strip().endswith(";")
-                or nxt.startswith(";")
-                or _starts_branch(nxt)
-            ):
-                j += 1
-                parts.append(lines[j])
-                continue
-            break
-        out.append(Logical(i, "\n".join(parts)))
-        i = j + 1
+            if depth > 0:
+                more = not is_route(nxt) and (
+                    last.endswith(("(", ",", ";"))
+                    or nxt.startswith((")", ",", ";"))
+                    or _starts_branch(nxt)
+                )
+            else:
+                more = last.endswith(";") or nxt.startswith(";") or _starts_branch(nxt)
+            if not more:
+                break
+            j += 1
+            end = j
+            depth += _depth(nxt)
+            last = nxt
+        out.append(Logical(i, "\n".join(lines[i : end + 1])))
+        i = end + 1
     return out
 
 
-def _open(text: str) -> bool:
-    """Whether ``text`` has unclosed parentheses outside /regexes/."""
+def _depth(line: str) -> int:
+    """Net parentheses one comment-stripped line opens, outside /regexes/."""
     depth = 0
-    for raw in text.split("\n"):
-        line = strip_comment(raw)
-        in_re = False
-        prev = ""
-        for c in line:
-            if in_re:
-                if c == "/" and prev != "\\":
-                    in_re = False
-            elif c == "/" and (prev == "" or prev in "(,: \t"):
-                in_re = True
-            elif c == "(":
-                depth += 1
-            elif c == ")":
-                depth -= 1
-            if c not in " \t":
-                prev = c
-    return depth > 0
+    in_re = False
+    prev = ""
+    for c in line:
+        if in_re:
+            if c == "/" and prev != "\\":
+                in_re = False
+        elif c == "/" and (prev == "" or prev in "(,: \t"):
+            in_re = True
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        if c not in " \t":
+            prev = c
+    return depth
 
 
 def lines(raw_lines: Sequence[str]) -> list[str]:

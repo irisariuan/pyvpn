@@ -328,3 +328,25 @@ def test_expr_ids_are_numbered() -> None:
     assert [a.id for a in r.if_.all()] == [1, 2]
     assert [a.id for a in r.if_.positive()] == [1]
     assert isinstance(r.if_, Expr)
+
+
+def test_unclosed_parenthesis_is_an_error_for_its_rule_only() -> None:
+    src = ["if:or:(a.example, b.example;then:route:c.example", "plain.example", "other.example"]
+    g = group(src)
+    assert [lg.first for lg in g] == [0, 1, 2]
+    s, errs = RuleSet.compile(src)
+    assert [e.index for e in errs] == [0]
+    assert s.match_any("plain.example").matched and s.match_any("x.other.example").matched
+    # Inside open parentheses, expression lines (after "(" or ",", or starting
+    # with ")") still continue the rule; a new if:/route: rule does not.
+    src = ["route:or:(", "a.example,", "b.example", ")", "if:or:(", "if:x.example;then:route:y"]
+    assert [lg.first for lg in group(src)] == [0, 4, 5]
+
+
+def test_group_is_linear() -> None:
+    import time
+
+    big = ["route:or:("] + [f"d{i}.example," for i in range(20000)] + ["z.example)"]
+    start = time.monotonic()
+    g = group(big)
+    assert len(g) == 1 and time.monotonic() - start < 2
