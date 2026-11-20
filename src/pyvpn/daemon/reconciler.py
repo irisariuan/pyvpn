@@ -7,8 +7,15 @@ the latest inputs.
 
 DNS answers take a fast path (``add_dests``): the addresses are recorded and
 pushed with ``Backend.add_to_set`` under the same lock, so a concurrent full
-apply can never drop them. If pushing fails the error propagates to the DNS
-stub, which must answer SERVFAIL instead of releasing the reply.
+apply can never drop them. The callback only returns once the destination is
+governed by the installed rules; in every other case (nothing installed yet,
+disabled, mid-batch, config replaced while waiting, push failed) it raises, so
+the stub answers SERVFAIL instead of releasing the reply.
+
+DNS stubs are tracked separately from the routing plan (``dns_applied``): a
+failed start or update is retried on the next reconcile even when the routing
+plan is unchanged, and a stub whose update failed is stopped so it never keeps
+answering with stale settings.
 """
 
 from __future__ import annotations
@@ -32,6 +39,10 @@ _DNS_FIELDS = ("route", "interface", "gateway", "leak", "dns_stub_port")
 
 def _dns_changed(old: PolicyPlan | None, new: PolicyPlan) -> bool:
     return old is None or any(getattr(old, f) != getattr(new, f) for f in _DNS_FIELDS)
+
+
+class DnsNotGoverned(RuntimeError):
+    """The answered destination is not (yet) covered by installed rules."""
 
 
 class Reconciler:
@@ -60,21 +71,80 @@ class Reconciler:
 
         self.enabled = True
         self.applied: RoutingPlan | None = None
+        self.dns_applied: dict[int, PolicyPlan] = {}
         self.last_error: str | None = None
+        self._generation = 0  # bumped whenever policy ids may change meaning
 
     # --- inputs ---------------------------------------------------------------
 
     async def set_config(self, config: Config, static_sets: Iterable[DestSet] = ()) -> None:
-        """Install a new config. Policy ids may shift, so per-id state is reset;
-        callers rebind apps inside ``batch()`` to avoid an unbound window."""
+        """Install a new config; apply failures are retried in the background.
+
+        Policy ids may shift, so per-id state is reset. Callers rebind apps
+        inside ``batch()`` to avoid an unbound window, or use
+        ``commit_config`` to apply config and bindings in one step."""
+        async with self._lock:
+            self._swap_config(config, static_sets, {})
+        await self.reconcile()
+
+    async def commit_config(
+        self,
+        config: Config,
+        static_sets: Iterable[DestSet],
+        bindings: Mapping[int, AppBinding],
+    ) -> None:
+        """Replace config and bindings and apply them as one step.
+
+        On a backend failure the previous config, bindings and destination
+        sets are restored (the backend keeps the old rules) and the error is
+        raised, so the caller can roll back its own staged changes.
+        """
+        async with self._lock:
+            saved = self._snapshot()
+            self._swap_config(config, static_sets, bindings)
+            if not self.enabled:
+                return
+            plan = self.plan()
+            assert plan is not None
+            try:
+                await self._apply_locked(plan)
+            except Exception:
+                self._restore(saved)
+                raise
+            await self._sync_dns_locked(plan)
+
+    def _swap_config(
+        self,
+        config: Config,
+        static_sets: Iterable[DestSet],
+        bindings: Mapping[int, AppBinding],
+    ) -> None:
         self.config = config
-        self.bindings = {}
+        self.bindings = dict(bindings)
         self.dynamic_dests = {}
         self.static_dests = {}
         for s in static_sets:
             prev = self.static_dests.get(s.policy_id)
             self.static_dests[s.policy_id] = s if prev is None else prev | s
-        await self.reconcile()
+        self._generation += 1
+
+    def _snapshot(self) -> tuple[object, ...]:
+        return (
+            self.config,
+            self.bindings,
+            self.static_dests,
+            self.dynamic_dests,
+            self._generation,
+        )
+
+    def _restore(self, saved: tuple[object, ...]) -> None:
+        (
+            self.config,
+            self.bindings,
+            self.static_dests,
+            self.dynamic_dests,
+            self._generation,
+        ) = saved  # type: ignore[assignment]
 
     async def update_targets(self, statuses: Mapping[str, TargetStatus]) -> None:
         self.statuses = dict(statuses)
@@ -88,18 +158,26 @@ class Reconciler:
         await self.reconcile()
 
     async def add_dests(self, dests: DestSet) -> None:
+        """DNS callback: return only once ``dests`` is governed by installed rules."""
+        generation = self._generation
         async with self._lock:
-            prev = self.dynamic_dests.get(dests.policy_id)
-            self.dynamic_dests[dests.policy_id] = dests if prev is None else prev | dests
+            if generation != self._generation:
+                raise DnsNotGoverned("config changed while the answer was pending")
             if not self.enabled or self.applied is None or self._batch_depth:
-                return
+                raise DnsNotGoverned("no rules installed for this policy yet")
             plans = list(self.applied.policies)
             for i, p in enumerate(plans):
-                if p.policy_id == dests.policy_id and p.dests is not None:
-                    await self._backend.add_to_set(dests)
-                    plans[i] = replace(p, dests=p.dests | dests)
-                    self.applied = RoutingPlan(tuple(plans))
-                    return
+                if p.policy_id != dests.policy_id:
+                    continue
+                if p.dests is None:
+                    return  # the policy already routes every destination
+                await self._backend.add_to_set(dests)
+                prev = self.dynamic_dests.get(dests.policy_id)
+                self.dynamic_dests[dests.policy_id] = dests if prev is None else prev | dests
+                plans[i] = replace(p, dests=p.dests | dests)
+                self.applied = RoutingPlan(tuple(plans))
+                return
+            raise DnsNotGoverned(f"policy {dests.policy_id} is not installed")
 
     @contextlib.asynccontextmanager
     async def batch(self) -> AsyncIterator[None]:
@@ -133,40 +211,54 @@ class Reconciler:
         if not self.enabled:
             return
         plan = self.plan()
-        if plan is None or plan == self.applied:
+        if plan is None:
             return
-        try:
-            await self._backend.apply(plan)
-        except Exception as e:  # backend keeps the previous state on failure
-            self.last_error = f"apply failed: {e}"
-            log.exception("apply failed; retrying")
-            self._schedule_retry()
-            return
-        old = self.applied
+        if plan != self.applied:
+            try:
+                await self._apply_locked(plan)
+            except Exception as e:  # backend keeps the previous state on failure
+                self.last_error = f"apply failed: {e}"
+                log.exception("apply failed; retrying")
+                self._schedule_retry()
+                return
+        await self._sync_dns_locked(plan)
+
+    async def _apply_locked(self, plan: RoutingPlan) -> None:
+        await self._backend.apply(plan)
         self.applied = plan
         self.last_error = None
-        self._retry_delay = self._retry_initial
-        await self._sync_dns(old, plan)
 
-    async def _sync_dns(self, old: RoutingPlan | None, new: RoutingPlan) -> None:
-        if self._dns is None:
-            return
-        before = {p.policy_id: p for p in old.policies} if old else {}
-        for p in new.policies:
-            prev = before.pop(p.policy_id, None)
-            try:
-                if p.dns_stub_port is None:
-                    if prev is not None and prev.dns_stub_port is not None:
-                        await self._dns.stop(p.policy_id)
-                elif _dns_changed(prev, p):
-                    await self._dns.start(p)
-            except Exception as e:
-                self.last_error = f"dns policy {p.policy_id}: {e}"
-                log.exception("dns update failed for policy %d", p.policy_id)
-        for pid, prev in before.items():
-            if prev.dns_stub_port is not None:
-                with contextlib.suppress(Exception):
+    async def _sync_dns_locked(self, plan: RoutingPlan) -> None:
+        """Make the running stubs match ``plan``; retry anything that failed."""
+        ok = True
+        if self._dns is not None:
+            want = {p.policy_id: p for p in plan.policies if p.dns_stub_port is not None}
+            for pid in [pid for pid in self.dns_applied if pid not in want]:
+                try:
                     await self._dns.stop(pid)
+                    del self.dns_applied[pid]
+                except Exception as e:
+                    ok = False
+                    self.last_error = f"dns policy {pid}: stop failed: {e}"
+                    log.exception("dns stop failed for policy %d", pid)
+            for pid, p in want.items():
+                if not _dns_changed(self.dns_applied.get(pid), p):
+                    continue
+                try:
+                    await self._dns.start(p)
+                    self.dns_applied[pid] = p
+                except Exception as e:
+                    ok = False
+                    self.last_error = f"dns policy {pid}: {e}"
+                    log.exception("dns update failed for policy %d", pid)
+                    # Fail closed: never leave a stub running with stale settings.
+                    self.dns_applied.pop(pid, None)
+                    with contextlib.suppress(Exception):
+                        await self._dns.stop(pid)
+        if ok:
+            self._retry_delay = self._retry_initial
+        else:
+            self._schedule_retry()
 
     def _schedule_retry(self) -> None:
         if self._retry_task is not None and not self._retry_task.done():
@@ -186,11 +278,11 @@ class Reconciler:
         async with self._lock:
             self.enabled = False
             self._cancel_retry()
-            if self._dns is not None and self.applied is not None:
-                for p in self.applied.policies:
-                    if p.dns_stub_port is not None:
-                        with contextlib.suppress(Exception):
-                            await self._dns.stop(p.policy_id)
+            if self._dns is not None:
+                for pid in list(self.dns_applied):
+                    with contextlib.suppress(Exception):
+                        await self._dns.stop(pid)
+            self.dns_applied = {}
             await self._backend.teardown()
             self.applied = None
 

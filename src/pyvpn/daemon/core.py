@@ -23,6 +23,7 @@ from pyvpn.daemon.reconciler import Reconciler
 from pyvpn.daemon.server import ApiError, ApiServer, PeerCred
 from pyvpn.platform.base import Backend
 from pyvpn.services import AppManager, DnsService, RuleMatcherFactory, TargetWatcher
+from pyvpn.state import AppBinding
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,9 @@ class Daemon:
         self.server = ApiServer(socket_path, self.handle)
         self._tasks: list[asyncio.Task[None]] = []
         self._stopped = asyncio.Event()
+        # Serializes reloads with pid placement, so a placement always resolves
+        # policy ids against the committed config.
+        self._config_lock = asyncio.Lock()
 
     @property
     def config(self) -> Config:
@@ -72,7 +76,12 @@ class Daemon:
             self.reconciler.enabled = False
         if self._dns is not None:
             self._dns.on_answer(self.reconciler.add_dests)
-        await self._install(config)
+        await self._install(config, rollback=False)
+        if self.reconciler.enabled and self.reconciler.applied is None:
+            log.error(
+                "initial apply failed (%s); pid placement stays unavailable until it succeeds",
+                self.reconciler.last_error,
+            )
         self._spawn(self._watch_targets(), "targets")
         self._spawn(self._watch_bindings(), "bindings")
         await self.server.start()
@@ -94,19 +103,47 @@ class Daemon:
     async def wait_stopped(self) -> None:
         await self._stopped.wait()
 
-    async def _install(self, config: Config) -> None:
-        """Apply a config and (re)bind its apps as one atomic change."""
+    async def _install(self, config: Config, *, rollback: bool) -> None:
+        """Stage a config's bindings, then commit config + bindings in one apply.
+
+        The previous config stays in force (and keeps resolving policy ids)
+        until the commit. With ``rollback``, a failed bind or apply restores the
+        previous bindings and raises; without it (startup), a failed apply is
+        retried by the reconciler.
+        """
         static = self._matcher_factory(config).static_sets() if self._matcher_factory else []
         old = self.reconciler.config
-        async with self.reconciler.batch():
-            if old is not None:
-                for pid in range(1, len(old.policies) + 1):
-                    with contextlib.suppress(Exception):
-                        await self._apps.unbind(pid)
-            await self.reconciler.set_config(config, static)
+        staged: dict[int, AppBinding] = {}
+        try:
             for pid, policy in enumerate(config.policies, start=1):
-                binding = await self._apps.bind(pid, policy, config.app_groups)
-                self.reconciler.bindings[pid] = binding
+                staged[pid] = await self._apps.bind(pid, policy, config.app_groups)
+            if rollback:
+                await self.reconciler.commit_config(config, static, staged)
+            else:
+                async with self.reconciler.batch():  # one apply; failures are retried
+                    await self.reconciler.set_config(config, static)
+                    for binding in staged.values():
+                        await self.reconciler.update_binding(binding)
+        except Exception:
+            if old is not None:
+                # Include the id whose bind failed: it may be half-changed.
+                await self._rebind(old, min(len(staged) + 1, len(config.policies)))
+            raise
+        if old is not None:
+            for pid in range(len(config.policies) + 1, len(old.policies) + 1):
+                with contextlib.suppress(Exception):
+                    await self._apps.unbind(pid)
+
+    async def _rebind(self, old: Config, touched: int) -> None:
+        """Restore the app manager's bindings for the still-active ``old`` config."""
+        for pid in range(1, touched + 1):
+            try:
+                if pid <= len(old.policies):
+                    await self._apps.bind(pid, old.policies[pid - 1], old.app_groups)
+                else:
+                    await self._apps.unbind(pid)
+            except Exception:
+                log.exception("rollback of policy %d binding failed", pid)
 
     def _spawn(self, coro: Awaitable[None], name: str) -> None:
         self._tasks.append(asyncio.ensure_future(coro))
@@ -163,7 +200,9 @@ class Daemon:
 
     @staticmethod
     def _require_admin(peer: PeerCred | None) -> None:
-        if peer is not None and peer.uid not in (0, os.geteuid()):
+        if peer is None:
+            raise ApiError("forbidden", "caller credentials unavailable")
+        if peer.uid not in (0, os.geteuid()):
             raise ApiError("forbidden", "only root may do this")
 
     def status(self) -> StatusResult:
@@ -211,10 +250,16 @@ class Daemon:
             raise ApiError("bad_request", str(e)) from None
         if not isinstance(p.pid, int) or isinstance(p.pid, bool) or p.pid <= 0:
             raise ApiError("bad_request", "pid must be a positive integer")
-        if peer is not None and peer.uid != 0 and peer.pid != p.pid:
+        if peer is None:
+            raise ApiError("forbidden", "caller credentials unavailable")
+        if peer.uid != 0 and peer.pid != p.pid:
             raise ApiError("forbidden", "unprivileged callers may only place their own pid")
-        pid = self._resolve_policy(p.policy)
-        await self._apps.place_pid(p.pid, pid)
+        async with self._config_lock:
+            r = self.reconciler
+            if r.enabled and r.applied is None:
+                raise ApiError("unavailable", "routing rules are not installed yet")
+            pid = self._resolve_policy(p.policy)
+            await self._apps.place_pid(p.pid, pid)
         return {"policy_id": pid}
 
     def _resolve_policy(self, ref: str | int) -> int:
@@ -232,7 +277,12 @@ class Daemon:
             config = self._load()
         except Exception as e:
             raise ApiError("bad_request", f"config: {e}") from None
-        await self._install(config)
+        async with self._config_lock:
+            try:
+                await self._install(config, rollback=True)
+            except Exception as e:
+                log.exception("reload failed; previous config kept")
+                raise ApiError("internal", f"reload failed, previous config kept: {e}") from None
         if not self.reconciler.enabled:
             await self.reconciler.enable()
             self._persist()

@@ -6,8 +6,8 @@ from ipaddress import IPv4Network
 import pytest
 
 from pyvpn.config.models import Config
-from pyvpn.daemon.reconciler import Reconciler
-from pyvpn.state import AppBinding, DestSet
+from pyvpn.daemon.reconciler import DnsNotGoverned, Reconciler
+from pyvpn.state import AppBinding, DestSet, PolicyPlan
 from tests.fakes import FakeBackend, FakeDnsService
 from tests.fakes.targets import down, up
 
@@ -143,3 +143,82 @@ async def test_disable_and_enable(config: Config) -> None:
     assert len(backend.plans) == 1  # nothing applied while disabled
     await r.enable()
     assert len(backend.plans) == 2 and backend.last.policies[1].route == "dev"
+
+
+class FlakyDns(FakeDnsService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_start = 0
+
+    async def start(self, plan: PolicyPlan) -> None:
+        if self.fail_start:
+            self.fail_start -= 1
+            raise RuntimeError("bind 127.0.0.1:53xx: simulated failure")
+        await super().start(plan)
+
+
+async def test_dns_answer_is_refused_until_rules_are_installed(config: Config) -> None:
+    r, backend, _ = make()
+    with pytest.raises(DnsNotGoverned):  # nothing installed yet
+        await r.add_dests(DestSet(3, frozenset({NET_A})))
+    async with r.batch():
+        await r.set_config(config)
+        with pytest.raises(DnsNotGoverned):  # mid-batch: not installed yet
+            await r.add_dests(DestSet(3, frozenset({NET_A})))
+    assert backend.sets == []
+    await r.add_dests(DestSet(3, frozenset({NET_A})))
+    assert backend.sets == [DestSet(3, frozenset({NET_A}))]
+    await r.disable()
+    with pytest.raises(DnsNotGoverned):
+        await r.add_dests(DestSet(3, frozenset({NET_A})))
+
+
+async def test_dns_answer_pending_across_config_change_is_refused(config: Config) -> None:
+    r, backend, _ = make()
+    await r.set_config(config)
+    async with r._lock:  # an apply is in progress; the answer waits for the lock
+        pending = asyncio.ensure_future(r.add_dests(DestSet(3, frozenset({NET_A}))))
+        await asyncio.sleep(0)
+        r._swap_config(config, (), {})  # policy ids may now mean something else
+    with pytest.raises(DnsNotGoverned):
+        await pending
+    assert backend.sets == []
+
+
+async def test_failed_dns_start_is_retried_without_route_change(config: Config) -> None:
+    backend, dns = FakeBackend(), FlakyDns()
+    r = Reconciler(backend, dns, retry_initial=60)
+    dns.fail_start = 1
+    await r.set_config(config)
+    assert 1 not in dns.running and 1 not in r.dns_applied
+    assert r.last_error and "simulated" in r.last_error
+    await r.reconcile()  # same routing plan, but DNS is behind
+    assert len(backend.plans) == 1
+    assert sorted(dns.running) == [1, 2] and sorted(r.dns_applied) == [1, 2]
+    await r.close()
+
+
+async def test_failed_dns_update_stops_stale_stub(config: Config) -> None:
+    backend, dns = FakeBackend(), FlakyDns()
+    r = Reconciler(backend, dns, retry_initial=60)
+    await r.set_config(config)
+    dns.fail_start = 1  # the update for policy 1 fails
+    await r.update_targets({"jp": up("jp", "wg-jp")})
+    assert 1 not in dns.running  # stopped: no stale upstream keeps answering
+    await r.reconcile()
+    assert dns.running[1].interface == "wg-jp"
+    await r.close()
+
+
+async def test_commit_config_failure_restores_previous_state(config: Config) -> None:
+    r, backend, _ = make()
+    await r.set_config(config)
+    await r.add_dests(DestSet(3, frozenset({NET_A})))
+    installed, dests = r.applied, dict(r.dynamic_dests)
+    backend.fail_apply = 1
+    other = config.model_copy(update={"policies": config.policies[:1]})
+    with pytest.raises(RuntimeError):
+        await r.commit_config(other, (), {1: AppBinding(1, cgroup_paths=("x",))})
+    assert r.config is config and r.applied == installed and r.dynamic_dests == dests
+    await r.add_dests(DestSet(3, frozenset({NET_B})))  # old ids still valid
+    await r.close()

@@ -12,6 +12,7 @@ from pyvpn.config.models import Config
 from pyvpn.daemon.core import Daemon
 from pyvpn.daemon.persistence import PersistentState, StateStore
 from pyvpn.daemon.server import ApiError, PeerCred
+from pyvpn.state import AppBinding
 from tests.daemon.conftest import make_config
 from tests.fakes import FakeAppManager, FakeBackend, FakeDnsService, FakeTargetWatcher
 from tests.fakes.targets import up
@@ -60,6 +61,31 @@ def rig(tmp_path: Path, config: Config) -> Rig:
     return Rig(tmp_path, config)
 
 
+def peer_cred_supported() -> bool:
+    import socket
+
+    return hasattr(socket, "SO_PEERCRED")
+
+
+class FailingAppManager(FakeAppManager):
+    """Raises when binding the policy named ``fail_on``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_on: str | None = None
+
+    async def bind(self, policy_id: int, policy: Any, groups: Any) -> AppBinding:
+        if policy.name == self.fail_on:
+            self.fail_on = None  # one-shot, so the rollback bind succeeds
+            raise RuntimeError(f"cgroup for {policy.name}: simulated failure")
+        return await super().bind(policy_id, policy, groups)
+
+
+def reordered(config: Config) -> Config:
+    pols = config.model_dump()["policies"]
+    return make_config(policies=[pols[1], pols[0], pols[2]])
+
+
 ROOT = PeerCred(pid=1, uid=0, gid=0)
 USER = PeerCred(pid=4242, uid=1000, gid=1000)
 
@@ -104,7 +130,7 @@ async def test_reload_has_no_unbound_window(rig: Rig) -> None:
     assert len(new_plans) == 1
     assert len(new_plans[0].policies) == 2
     assert all(p.apps.cgroup_paths for p in new_plans[0].policies)
-    assert rig.apps.unbound == [1, 2, 3]
+    assert rig.apps.unbound == [3]  # only the removed policy; 1-2 were rebound in place
     assert ("stop", 3) not in rig.dns.events  # policy 3 had no stub
     await rig.daemon.stop()
 
@@ -187,7 +213,10 @@ async def test_socket_protocol(rig: Rig) -> None:
     assert resp["result"][0]["cgroup_paths"] == ["pyvpn.slice/p-1"]
 
     resp = await rig.call("place_pid", {"pid": os.getpid(), "policy": "Japan"})
-    assert resp == {"id": 7, "ok": True, "result": {"policy_id": 1}}
+    if peer_cred_supported():
+        assert resp == {"id": 7, "ok": True, "result": {"policy_id": 1}}
+    else:  # no SO_PEERCRED (non-Linux): credentials missing -> rejected
+        assert resp["error"]["code"] == "forbidden"
 
     assert (await rig.call("frobnicate"))["error"]["code"] == "unknown_method"
     assert (await rig.call("audit"))["error"]["code"] == "unavailable"
@@ -199,4 +228,81 @@ async def test_socket_protocol(rig: Rig) -> None:
     assert json.loads(await reader.readline())["error"]["code"] == "bad_request"
     writer.close()
     await writer.wait_closed()
+    await rig.daemon.stop()
+
+
+async def test_failed_initial_apply_keeps_placement_unavailable(rig: Rig) -> None:
+    rig.backend.fail_apply = 1
+    await rig.daemon.start()
+    assert rig.daemon.reconciler.applied is None
+    with pytest.raises(ApiError) as e:
+        await rig.daemon.handle("place_pid", {"pid": 99, "policy": "Torrents"}, ROOT)
+    assert e.value.code == "unavailable"
+    assert rig.apps.placed == []
+    await rig.daemon.reconciler.reconcile()  # what the retry timer does
+    assert rig.daemon.reconciler.applied is not None
+    assert await rig.daemon.handle("place_pid", {"pid": 99, "policy": "Torrents"}, ROOT) == {
+        "policy_id": 2
+    }
+    await rig.daemon.stop()
+
+
+async def test_reload_apply_failure_keeps_old_config_and_bindings(rig: Rig) -> None:
+    await rig.daemon.start()
+    installed = rig.backend.installed
+    rig.config = reordered(rig.config)
+    rig.backend.fail_apply = 1
+    with pytest.raises(ApiError) as e:
+        await rig.daemon.handle("reload", {}, ROOT)
+    assert e.value.code == "internal"
+    assert rig.backend.installed == installed
+    assert rig.daemon.reconciler.applied == installed
+    assert [p.name for p in rig.daemon.config.policies] == ["Japan", "Torrents", "Office"]
+    assert {pid: p.name for pid, p in rig.apps.bound.items()} == {
+        1: "Japan",
+        2: "Torrents",
+        3: "Office",
+    }
+    # Placement still resolves against the config the backend enforces.
+    assert await rig.daemon.handle("place_pid", {"pid": 99, "policy": "Torrents"}, ROOT) == {
+        "policy_id": 2
+    }
+    await rig.daemon.stop()
+
+
+async def test_reload_bind_failure_keeps_old_config_and_bindings(
+    tmp_path: Path, config: Config
+) -> None:
+    rig = Rig(tmp_path, config)
+    rig.apps = FailingAppManager()
+    rig.daemon = rig.new_daemon()
+    await rig.daemon.start()
+    plans = len(rig.backend.plans)
+    rig.config = reordered(rig.config)
+    rig.apps.fail_on = "Japan"  # second policy in the new order
+    with pytest.raises(ApiError):
+        await rig.daemon.handle("reload", {}, ROOT)
+    assert len(rig.backend.plans) == plans
+    assert [p.name for p in rig.daemon.config.policies] == ["Japan", "Torrents", "Office"]
+    assert {pid: p.name for pid, p in rig.apps.bound.items()} == {
+        1: "Japan",
+        2: "Torrents",
+        3: "Office",
+    }
+    await rig.daemon.stop()
+
+
+async def test_missing_peer_credentials_are_rejected(rig: Rig) -> None:
+    await rig.daemon.start()
+    for method, params in [
+        ("reload", {}),
+        ("disable", {}),
+        ("place_pid", {"pid": 99, "policy": 1}),
+    ]:
+        with pytest.raises(ApiError) as e:
+            await rig.daemon.handle(method, params, None)
+        assert e.value.code == "forbidden", method
+    assert rig.apps.placed == []
+    assert rig.daemon.reconciler.enabled
+    await rig.daemon.handle("status", {}, None)  # read-only methods stay open
     await rig.daemon.stop()
