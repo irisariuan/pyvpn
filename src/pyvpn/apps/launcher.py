@@ -58,10 +58,15 @@ def run(
     """Place this process, then replace it with ``command`` via execvp."""
     if not command:
         raise ValueError("a command is required")
-    request_place_pid(policy, socket_path=socket_path)
     if isolation == "netns":
-        from pyvpn.apps.netns import enter_network_namespace
+        # Refuse rather than run unisolated: the unprivileged launcher cannot
+        # create a namespace, and the daemon does not yet prepare one (veth,
+        # routes) and confirm it is ready before exec.
+        from pyvpn.apps.netns import NetworkNamespaceUnavailable
 
-        enter_network_namespace()
+        raise NetworkNamespaceUnavailable(
+            "isolation: netns is not supported yet; the daemon must prepare the namespace"
+        )
+    request_place_pid(policy, socket_path=socket_path)
     os.execvp(command[0], list(command))
     raise AssertionError("execvp returned")

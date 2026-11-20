@@ -30,3 +30,16 @@ async def test_group_uid_is_in_binding(tmp_path: Path) -> None:
     group = AppGroup(name="users", apps=(AppSelector(uid=42),))
     binding = await manager.bind(1, policy, (group,))
     assert binding.uids == (42,)
+
+
+async def test_exclusions_drop_raw_uid_match(tmp_path: Path) -> None:
+    manager = AppManager(CgroupManager(tmp_path))
+    policy = Policy(
+        name="p",
+        targets=("t",),
+        apps=(AppSelector(uid=1001),),
+        exclude_apps=(AppSelector(name="ssh"),),
+    )
+    binding = await manager.bind(1, policy, ())
+    assert binding.uids == ()
+    assert binding.cgroup_paths == ("pyvpn.slice/p-1",)

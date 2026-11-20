@@ -29,3 +29,13 @@ def test_launcher_sends_place_pid_request(tmp_path: Path) -> None:
     thread.join(timeout=2)
     assert seen[0]["method"] == "place_pid"
     assert seen[0]["params"]["policy"] == "JP"  # type: ignore[index]
+
+
+def test_netns_isolation_is_refused_before_placement(tmp_path: Path) -> None:
+    import pytest
+
+    from pyvpn.apps.launcher import run
+    from pyvpn.apps.netns import NetworkNamespaceUnavailable
+
+    with pytest.raises(NetworkNamespaceUnavailable, match="not supported"):
+        run("JP", ["true"], socket_path=tmp_path / "missing.sock", isolation="netns")

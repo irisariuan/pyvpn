@@ -31,6 +31,11 @@ class AppManager:
                     else (ref,)
                 )
                 uids.update(selector.uid for selector in selectors if selector.uid is not None)
+            if policy.exclude_apps:
+                # A raw UID match would also catch excluded apps. Leave those
+                # processes to the exclusion-aware watcher, which places them
+                # in the policy cgroup individually.
+                uids.clear()
             binding = AppBinding(
                 policy_id,
                 cgroup_paths=(policy_cgroup(policy_id),),

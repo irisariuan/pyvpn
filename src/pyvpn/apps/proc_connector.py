@@ -47,18 +47,36 @@ def _exec_pid(datagram: bytes) -> int | None:
     return None
 
 
-async def proc_exec_events() -> AsyncIterator[int]:
-    """Yield process IDs for exec events. Requires Linux proc-connector access."""
-    sock = socket.socket(socket.AF_NETLINK, socket.SOCK_DGRAM, _NETLINK_CONNECTOR)
-    sock.setblocking(False)
-    try:
-        sock.bind((os.getpid(), _CN_IDX_PROC))
+class ProcExecEvents:
+    """A live PROC_EVENT_EXEC subscription.
+
+    The netlink socket is subscribed when ``open()`` returns, so the kernel
+    queues exec events from that moment on, even before iteration starts.
+    """
+
+    def __init__(self, sock: socket.socket) -> None:
+        self._sock = sock
+
+    @classmethod
+    async def open(cls) -> ProcExecEvents:
+        """Subscribe to exec events. Requires Linux proc-connector access."""
+        sock = socket.socket(socket.AF_NETLINK, socket.SOCK_DGRAM, _NETLINK_CONNECTOR)
+        try:
+            sock.setblocking(False)
+            sock.bind((os.getpid(), _CN_IDX_PROC))
+            await asyncio.get_running_loop().sock_sendall(sock, _listen_message())
+        except BaseException:
+            sock.close()
+            raise
+        return cls(sock)
+
+    async def __aiter__(self) -> AsyncIterator[int]:
         loop = asyncio.get_running_loop()
-        await loop.sock_sendall(sock, _listen_message())
         while True:
-            data = await loop.sock_recv(sock, 65536)
+            data = await loop.sock_recv(self._sock, 65536)
             pid = _exec_pid(data)
             if pid is not None:
                 yield pid
-    finally:
-        sock.close()
+
+    def close(self) -> None:
+        self._sock.close()
