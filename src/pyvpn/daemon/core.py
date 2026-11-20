@@ -22,7 +22,13 @@ from pyvpn.daemon.persistence import PersistentState, StateStore
 from pyvpn.daemon.reconciler import Reconciler
 from pyvpn.daemon.server import ApiError, ApiServer, PeerCred, acquire_instance_lock
 from pyvpn.platform.base import Backend
-from pyvpn.services import AppManager, DnsService, RuleMatcherFactory, TargetWatcher
+from pyvpn.services import (
+    AppManager,
+    DnsService,
+    RuleMatcher,
+    RuleMatcherFactory,
+    TargetWatcher,
+)
 from pyvpn.state import AppBinding
 
 log = logging.getLogger(__name__)
@@ -53,6 +59,7 @@ class Daemon:
         self._apps = apps
         self._dns = dns
         self._matcher_factory = matcher_factory
+        self._matcher: RuleMatcher | None = None  # built from the committed config
         self._audit = audit
         self._store = store
         self._teardown_on_stop = teardown_on_stop
@@ -71,6 +78,22 @@ class Daemon:
     def config(self) -> Config:
         assert self.reconciler.config is not None
         return self.reconciler.config
+
+    def active_matcher(self) -> RuleMatcher:
+        """The rule matcher of the committed config, for the DNS stubs.
+
+        The composition root hands this to the DNS service, e.g.
+        ``PolicyDnsService(matcher_factory=lambda: daemon.active_matcher())``
+        (late-bound, since the daemon takes the service), so a stub matches
+        answers against the same config, and policy ids, that the reconciler
+        checks in ``add_dests``. It is replaced in the same
+        event-loop step as the reconciler's commit, so a match and the
+        callback's generation check always see the same config. Raises (the
+        stub answers SERVFAIL) while no matcher is available.
+        """
+        if self._matcher is None:
+            raise RuntimeError("no rule matcher for the active config")
+        return self._matcher
 
     # --- lifecycle --------------------------------------------------------------
 
@@ -146,7 +169,8 @@ class Daemon:
         restores the previous bindings and raises. Startup apply failures
         are retried by the reconciler.
         """
-        static = self._matcher_factory(config).static_sets() if self._matcher_factory else []
+        matcher = self._matcher_factory(config) if self._matcher_factory else None
+        static = matcher.static_sets() if matcher is not None else []
         old = self.reconciler.config
         old_slots = self._cgroup_policy_names
         enabled = self.reconciler.enabled  # reload never changes it (see ``enable``)
@@ -181,6 +205,11 @@ class Daemon:
                 # Include the id whose bind failed: it may be half-changed.
                 await self._rebind(old, min(len(staged) + 1, len(config.policies)))
             raise
+        # On reload nothing awaits between the commit and this line, so DNS
+        # answers switch matchers in the same step as the reconciler's
+        # committed generation. At startup the matcher is unset until here
+        # (stubs answer SERVFAIL, as add_dests refuses before the first apply).
+        self._matcher = matcher
         if old is not None:
             for pid in range(len(config.policies) + 1, len(old.policies) + 1):
                 with contextlib.suppress(Exception):

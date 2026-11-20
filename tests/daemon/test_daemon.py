@@ -14,7 +14,13 @@ from pyvpn.daemon.persistence import PersistentState, StateStore
 from pyvpn.daemon.server import ApiError, PeerCred
 from pyvpn.state import AppBinding, RoutingPlan
 from tests.daemon.conftest import make_config
-from tests.fakes import FakeAppManager, FakeBackend, FakeDnsService, FakeTargetWatcher
+from tests.fakes import (
+    FakeAppManager,
+    FakeBackend,
+    FakeDnsService,
+    FakeRuleMatcher,
+    FakeTargetWatcher,
+)
 from tests.fakes.targets import up
 
 
@@ -646,3 +652,41 @@ async def test_stop_completes_when_teardown_fails(tmp_path: Path, config: Config
     with pytest.raises(RuntimeError, match="teardown failed"):
         await daemon.stop()
     await asyncio.wait_for(daemon.wait_stopped(), 1)
+
+
+async def test_active_matcher_follows_the_committed_config(tmp_path: Path, config: Config) -> None:
+    rig = Rig(tmp_path, config)
+    built: dict[int, FakeRuleMatcher] = {}
+
+    def factory(cfg: Config) -> FakeRuleMatcher:
+        built[id(cfg)] = FakeRuleMatcher({"corp.example": cfg.policy_id("Office")})
+        return built[id(cfg)]
+
+    daemon = Daemon(
+        config_loader=lambda: rig.config,
+        backend=rig.backend,
+        targets=rig.targets,
+        apps=rig.apps,
+        dns=rig.dns,
+        matcher_factory=factory,
+        store=rig.store,
+        socket_path=rig.sock,
+    )
+    with pytest.raises(RuntimeError):  # nothing committed: the stub answers SERVFAIL
+        daemon.active_matcher()
+    await daemon.start()
+    assert daemon.active_matcher() is built[id(config)]
+
+    rig.config = with_changed_target(config)
+    await daemon.handle("reload", {}, ROOT)
+    assert daemon.active_matcher() is built[id(rig.config)]
+
+    # A failed reload keeps the committed config's matcher.
+    committed = daemon.active_matcher()
+    rig.config = make_config()
+    rig.backend.fail_apply = 1
+    with pytest.raises(ApiError):
+        await daemon.handle("reload", {}, ROOT)
+    assert id(rig.config) in built  # a matcher was built for it, but not activated
+    assert daemon.active_matcher() is committed
+    await daemon.stop()
