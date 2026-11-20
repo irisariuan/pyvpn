@@ -74,9 +74,12 @@ class Daemon:
 
     async def start(self) -> None:
         config = self._load()
+        if self._store is not None:
+            state = self._store.load()
+            self.reconciler.enabled = state.enabled
+            # Apps placed by a previous daemon are still in their cgroups.
+            self._cgroup_policy_names.update(state.policy_slots)
         self._validate_policy_slots(config)
-        if self._store is not None and not self._store.load().enabled:
-            self.reconciler.enabled = False
         if self._dns is not None:
             self._dns.on_answer(self.reconciler.add_dests)
         await self._install(config, rollback=False)
@@ -95,17 +98,19 @@ class Daemon:
         blocking across a restart; the next daemon's apply replaces them
         atomically). Only ``disable`` or ``teardown_on_stop`` (uninstall)
         removes them."""
-        await self.server.close()
-        for t in self._tasks:
-            t.cancel()
-        for t in self._tasks:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await t
-        self._tasks.clear()
-        await self.reconciler.close()
-        if self._teardown_on_stop and self.reconciler.enabled:
-            await self.reconciler.disable()
-        self._stopped.set()
+        try:
+            await self.server.close()
+            for t in self._tasks:
+                t.cancel()
+            for t in self._tasks:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await t
+            self._tasks.clear()
+            await self.reconciler.close()
+            if self._teardown_on_stop and self.reconciler.enabled:
+                await self.reconciler.disable()
+        finally:
+            self._stopped.set()  # wait_stopped() must not hang on a failed teardown
 
     async def wait_stopped(self) -> None:
         await self._stopped.wait()
@@ -141,6 +146,7 @@ class Daemon:
             for pid, policy in enumerate(config.policies, start=1)
             if policy.apps or staged[pid].cgroup_paths
         )
+        self._persist()
         if old is not None:
             for pid in range(len(config.policies) + 1, len(old.policies) + 1):
                 with contextlib.suppress(Exception):
@@ -286,7 +292,10 @@ class Daemon:
                 raise ApiError("unavailable", "routing rules are not installed yet")
             pid = self._resolve_policy(p.policy)
             await self._apps.place_pid(p.pid, pid)
-            self._cgroup_policy_names[pid] = self.config.policies[pid - 1].name
+            name = self.config.policies[pid - 1].name
+            if self._cgroup_policy_names.get(pid) != name:
+                self._cgroup_policy_names[pid] = name
+                self._persist()
         return {"policy_id": pid}
 
     def _resolve_policy(self, ref: str | int) -> int:
@@ -321,4 +330,9 @@ class Daemon:
 
     def _persist(self) -> None:
         if self._store is not None:
-            self._store.save(PersistentState(enabled=self.reconciler.enabled))
+            self._store.save(
+                PersistentState(
+                    enabled=self.reconciler.enabled,
+                    policy_slots=tuple(sorted(self._cgroup_policy_names.items())),
+                )
+            )

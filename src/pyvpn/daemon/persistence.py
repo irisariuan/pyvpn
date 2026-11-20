@@ -12,6 +12,25 @@ from pathlib import Path
 @dataclass(frozen=True)
 class PersistentState:
     enabled: bool = True
+    # (policy id, policy name) for every policy cgroup that may hold running
+    # apps. Rules and cgroups outlive the daemon, so a restarted daemon must
+    # not let a reordered config give those apps a different policy.
+    policy_slots: tuple[tuple[int, str], ...] = ()
+
+
+def _slots(raw: object) -> tuple[tuple[int, str], ...]:
+    if not isinstance(raw, list):
+        return ()
+    out: list[tuple[int, str]] = []
+    for item in raw:
+        if (
+            isinstance(item, list)
+            and len(item) == 2
+            and isinstance(item[0], int)
+            and isinstance(item[1], str)
+        ):
+            out.append((item[0], item[1]))
+    return tuple(out)
 
 
 class StateStore:
@@ -26,7 +45,10 @@ class StateStore:
         except (OSError, ValueError):
             # Unreadable state: start enabled; rules then fail closed per policy.
             return PersistentState()
-        return PersistentState(enabled=bool(data.get("enabled", True)))
+        return PersistentState(
+            enabled=bool(data.get("enabled", True)),
+            policy_slots=_slots(data.get("policy_slots")),
+        )
 
     def save(self, state: PersistentState) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -240,8 +240,10 @@ Fail-back hold and the latency-based selection are ported from snake's
 Already-open sockets keep their route; new connections follow the new
 cgroup (as in snake: "connections keep their route").
 
-Policy names are unique. While the daemon is running, reload keeps each
-policy that has used an app cgroup at the same position in the config.
+Policy names are unique. Reload, and a daemon restart, keep each policy
+that has used an app cgroup at the same position in the config (the
+reserved positions are saved in the daemon's state file, since rules and
+cgroups outlive the daemon).
 Existing cgroups can still contain running apps after an app selector is
 changed or removed, so reload rejects changes that would remove or reuse
 those positions. Reload can still update policy settings, append policies,

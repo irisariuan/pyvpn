@@ -266,7 +266,7 @@ async def test_admin_methods_need_root(rig: Rig) -> None:
 async def test_disable_persists_across_restart(rig: Rig) -> None:
     await rig.daemon.start()
     await rig.daemon.handle("disable", {}, ROOT)
-    assert rig.store.load() == PersistentState(enabled=False)
+    assert rig.store.load().enabled is False
     await rig.daemon.stop()
     assert rig.backend.teardowns == 1  # not torn down twice
 
@@ -433,3 +433,70 @@ async def test_place_pid_unavailable_while_disabled(rig: Rig) -> None:
         "policy_id": 2
     }
     await rig.daemon.stop()
+
+
+async def test_policy_slots_survive_restart(rig: Rig) -> None:
+    await rig.daemon.start()
+    await rig.daemon.handle("place_pid", {"pid": 42, "policy": "Office"}, ROOT)
+    assert (3, "Office") in rig.store.load().policy_slots
+    await rig.daemon.stop()  # rules and cgroups stay in force
+
+    committed = rig.config
+    rig.config = committed.model_copy(update={"policies": tuple(reversed(committed.policies))})
+    rig.daemon = rig.new_daemon()
+    with pytest.raises(ApiError, match="keep policy 'Japan' at position 1"):
+        await rig.daemon.start()
+
+    rig.config = committed
+    rig.daemon = rig.new_daemon()
+    await rig.daemon.start()
+    await rig.daemon.stop()
+
+
+def test_unreadable_policy_slots_are_ignored(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"enabled": True, "policy_slots": [[1, "a"], ["x", 2], 3]}))
+    assert StateStore(path).load() == PersistentState(enabled=True, policy_slots=((1, "a"),))
+
+
+async def test_second_daemon_does_not_take_over_the_socket(rig: Rig) -> None:
+    await rig.daemon.start()
+    second = rig.new_daemon()
+    with pytest.raises(RuntimeError, match="another pyvpn daemon"):
+        await second.server.start()
+    assert (await rig.call("status"))["ok"]  # the first daemon still serves
+    await rig.daemon.stop()
+    assert not rig.sock.exists()
+
+
+async def test_close_leaves_a_successors_socket(rig: Rig) -> None:
+    await rig.daemon.start()
+    rig.sock.unlink()  # e.g. removed by hand; a new daemon binds the path
+    successor = rig.new_daemon()
+    await successor.server.start()
+    await rig.daemon.stop()
+    assert rig.sock.exists()
+    await successor.server.close()
+
+
+async def test_stop_completes_when_teardown_fails(tmp_path: Path, config: Config) -> None:
+    rig = Rig(tmp_path, config)
+    daemon = Daemon(
+        config_loader=lambda: rig.config,
+        backend=rig.backend,
+        targets=rig.targets,
+        apps=rig.apps,
+        dns=rig.dns,
+        store=rig.store,
+        socket_path=rig.sock,
+        teardown_on_stop=True,
+    )
+    await daemon.start()
+
+    async def broken() -> None:
+        raise RuntimeError("teardown failed")
+
+    daemon.reconciler.disable = broken  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="teardown failed"):
+        await daemon.stop()
+    await asyncio.wait_for(daemon.wait_stopped(), 1)

@@ -54,23 +54,30 @@ class ApiServer:
         self._handler = handler
         self._mode = mode
         self._server: asyncio.Server | None = None
+        self._inode: int | None = None
 
     async def start(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if await _accepts_connections(self.path):
+            raise RuntimeError(f"another pyvpn daemon is serving {self.path}")
         with contextlib.suppress(FileNotFoundError):
             self.path.unlink()  # stale socket from a previous run
         self._server = await asyncio.start_unix_server(
             self._client, path=str(self.path), limit=MAX_LINE
         )
         os.chmod(self.path, self._mode)
+        self._inode = self.path.stat().st_ino
 
     async def close(self) -> None:
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+        # Remove the socket only if it is still ours, not a successor's.
         with contextlib.suppress(FileNotFoundError):
-            self.path.unlink()
+            if self._inode is not None and self.path.stat().st_ino == self._inode:
+                self.path.unlink()
+        self._inode = None
 
     async def _client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = peer_cred(writer.get_extra_info("socket"))
@@ -117,3 +124,15 @@ class ApiServer:
         except Exception as e:
             log.exception("API handler failed")
             return Response(rid, False, error=Error("internal", str(e)))
+
+
+async def _accepts_connections(path: Path) -> bool:
+    """Whether a live server is listening on the unix socket at ``path``."""
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_unix_connection(str(path)), 1.0)
+    except (OSError, TimeoutError):
+        return False
+    writer.close()
+    with contextlib.suppress(OSError):
+        await writer.wait_closed()
+    return True
