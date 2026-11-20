@@ -204,9 +204,9 @@ A *target* is just an interface name, plus an optional gateway:
   table, or the route NetworkManager installs with a metric), or uses the
   configured `gateway`.
 * `gateway: "auto"` requires a discovered next hop for the target to be usable;
-  when absent, pyvpn can fall back to another target. Family-specific IPv4 and
-  IPv6 gateways are preserved independently. With no configured gateway,
-  point-to-point targets use device-only routes.
+  when absent, pyvpn can fall back to another target. A target reports one next
+  hop (IPv4 preferred); separate IPv4 and IPv6 gateways need a contract change.
+  With no configured gateway, point-to-point targets use device-only routes.
 * **Patterns** (`tun*`, `wg-jp*`): for VPN apps whose interface name changes
   on every reconnect.
 

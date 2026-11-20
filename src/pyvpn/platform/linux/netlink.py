@@ -18,6 +18,9 @@ _RT_TABLE_MAIN = 254
 _IFF_UP = 0x1
 _IFF_RUNNING = 0x40
 _IFF_LOWER_UP = 0x10000
+_RT_SCOPE_LINK = 253  # link (fe80::/10, 169.254/16) and host (loopback) scopes
+_IFA_F_DADFAILED = 0x08
+_IFA_F_TENTATIVE = 0x40
 
 
 class NetlinkEventSource(Protocol):
@@ -29,6 +32,24 @@ def _attribute(message: Mapping[str, Any], name: str) -> Any:
         if key == name:
             return value
     return None
+
+
+def address_is_routable(message: Mapping[str, Any]) -> bool:
+    """Only global-scope, DAD-complete addresses can carry routed traffic.
+
+    A link-local IPv6 address appears as soon as a link has carrier (before
+    DHCP / RA), and a tentative or DAD-failed address cannot be used yet, so
+    neither may make a target usable.
+    """
+    try:
+        scope = int(message.get("scope", 0))
+        flags = int(message.get("flags", 0))
+        extra = _attribute(message, "IFA_FLAGS")
+        if extra is not None:
+            flags |= int(extra)
+    except (TypeError, ValueError):
+        return False
+    return scope < _RT_SCOPE_LINK and not flags & (_IFA_F_TENTATIVE | _IFA_F_DADFAILED)
 
 
 def parse_address(message: Mapping[str, Any]) -> IPAddress | None:
@@ -135,6 +156,8 @@ def _snapshots_from_messages(
         try:
             ifindex = int(message.get("index", 0))
         except (TypeError, ValueError):
+            continue
+        if not address_is_routable(message):
             continue
         address = parse_address(message)
         if address is not None:
@@ -262,19 +285,24 @@ class NetlinkReader:
         stopping: threading.Event,
         publish: Callable[[tuple[InterfaceSnapshot, ...]], None],
     ) -> None:
-        with iproute_type() as ipr:
-            ipr.bind(groups=groups)
-            fd = ipr.socket.fileno()
-            publish(self._read_snapshots(ipr))
+        # Two sockets: dumps must not run on the multicast-bound socket, or
+        # pyroute2 buffers events that arrive mid-dump internally, the fd never
+        # becomes readable for them, and a change during a dump is lost. The
+        # event socket is bound before the first dump, so any change after the
+        # dump starts is seen on it and triggers another dump.
+        with iproute_type() as events, iproute_type() as dumps:
+            events.bind(groups=groups)
+            fd = events.socket.fileno()
+            publish(self._read_snapshots(dumps))
             while not stopping.is_set():
                 if not select.select([fd], [], [], 0.1)[0]:
                     continue
                 received = False
                 while select.select([fd], [], [], 0)[0]:
-                    messages = ipr.get()
+                    messages = events.get()
                     received = received or bool(messages)
                 if received:
-                    publish(self._read_snapshots(ipr))
+                    publish(self._read_snapshots(dumps))
 
 
 class NetlinkTargetWatcher:
@@ -285,8 +313,15 @@ class NetlinkTargetWatcher:
         self._reader = reader or NetlinkReader()
 
     async def statuses(self) -> AsyncIterator[dict[str, TargetStatus]]:
+        # Netlink bursts include changes that do not affect any target (e.g.
+        # routes in pyvpn's own tables after an apply); emitting an identical
+        # map would trigger another reconcile for nothing.
+        last: dict[str, TargetStatus] | None = None
         async for snapshots in self._reader.events():
-            yield self._statuses_for(snapshots)
+            statuses = self._statuses_for(snapshots)
+            if statuses != last:
+                last = statuses
+                yield statuses
 
     def _statuses_for(self, snapshots: tuple[InterfaceSnapshot, ...]) -> dict[str, TargetStatus]:
         return {target.name: status_for_target(target, snapshots) for target in self._targets}

@@ -11,6 +11,7 @@ from pyvpn.platform.linux.netlink import (
     NetlinkTargetWatcher,
     _default_gateways,
     _snapshots_from_messages,
+    address_is_routable,
     link_is_up,
     parse_address,
     parse_gateway,
@@ -84,7 +85,7 @@ def test_status_for_target_resolves_auto_gateway() -> None:
     assert status.interface == "wg-jp"
     assert status.ifindex == 42
     assert status.usable
-    assert status.gateways == (_address("10.0.0.1"),)
+    assert status.gateway == _address("10.0.0.1")
 
 
 def test_auto_gateway_loss_makes_broadcast_target_unusable() -> None:
@@ -94,7 +95,7 @@ def test_auto_gateway_loss_makes_broadcast_target_unusable() -> None:
     status = status_for_target(target, (snapshot,))
 
     assert not status.usable
-    assert status.gateways == ()
+    assert status.gateway is None
 
 
 def test_device_only_target_remains_usable_without_gateway() -> None:
@@ -104,7 +105,7 @@ def test_device_only_target_remains_usable_without_gateway() -> None:
     status = status_for_target(target, (snapshot,))
 
     assert status.usable
-    assert status.gateways == ()
+    assert status.gateway is None
 
 
 def test_status_for_missing_interface_is_down() -> None:
@@ -247,3 +248,59 @@ def test_netlink_target_watcher_emits_reader_events() -> None:
     assert len(statuses) == 2
     assert not statuses[0]["vpn"].usable
     assert statuses[1]["vpn"].usable
+
+
+def test_link_local_and_tentative_addresses_do_not_make_a_target_usable() -> None:
+    link = {"index": 3, "flags": 0x10041, "attrs": [("IFLA_IFNAME", "wlan1")]}
+
+    def addr(value: str, scope: int = 0, flags: int = 0, **attrs: int) -> dict[str, object]:
+        return {
+            "index": 3,
+            "scope": scope,
+            "flags": flags,
+            "attrs": [("IFA_ADDRESS", value), *attrs.items()],
+        }
+
+    assert not address_is_routable(addr("fe80::1", scope=253))
+    assert not address_is_routable(addr("169.254.3.4", scope=253))
+    assert not address_is_routable(addr("2001:db8::5", flags=0x40))  # tentative
+    assert not address_is_routable(addr("2001:db8::5", IFA_FLAGS=0x08))  # dadfailed
+    assert address_is_routable(addr("192.0.2.10"))
+
+    target = Target(name="office", interface="wlan1")
+    carrier_only = _snapshots_from_messages([link], [addr("fe80::1", scope=253)], [])
+    assert carrier_only[0].addresses == ()
+    assert not status_for_target(target, carrier_only).usable
+
+    leased = _snapshots_from_messages([link], [addr("fe80::1", scope=253), addr("192.0.2.10")], [])
+    assert leased[0].addresses == (_address("192.0.2.10"),)
+    assert status_for_target(target, leased).usable
+
+
+def test_watchers_skip_bursts_that_change_no_target() -> None:
+    target = Target(name="vpn", interface="tun0")
+    up = (InterfaceSnapshot("tun0", 1, True, (_address("10.0.0.2"),)),)
+    other = (*up, InterfaceSnapshot("eth0", 2, True, (_address("192.0.2.1"),)))
+
+    async def snapshots() -> AsyncIterator[tuple[InterfaceSnapshot, ...]]:
+        for item in (up, up, other, up):  # e.g. pyvpn's own route changes
+            yield item
+
+    class FakeReader:
+        def events(self) -> AsyncIterator[tuple[InterfaceSnapshot, ...]]:
+            return snapshots()
+
+    async def collect() -> tuple[int, int]:
+        a = [s async for s in NetlinkTargetWatcher((target,), FakeReader()).statuses()]
+        b = [s async for s in TargetWatcher((target,), snapshots()).statuses()]
+        return len(a), len(b)
+
+    assert asyncio.run(collect()) == (1, 1)
+
+
+def test_probe_target_is_unusable_and_warns(caplog: pytest.LogCaptureFixture) -> None:
+    target = Target(name="probed", interface="wg0", probe=True)
+    snapshot = InterfaceSnapshot("wg0", 42, True, (_address("10.0.0.2"),))
+    assert not status_for_target(target, (snapshot,)).usable
+    assert not status_for_target(target, (snapshot,)).usable
+    assert caplog.text.count("probe: true, which is not supported yet") == 1

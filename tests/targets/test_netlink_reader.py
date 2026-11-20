@@ -76,8 +76,64 @@ def test_sync_pyroute_client_runs_off_the_event_loop(monkeypatch: pytest.MonkeyP
             await events.aclose()
 
     assert asyncio.run(read_initial_snapshot()) == ()
-    assert len(constructor_threads) == 1
-    assert constructor_threads[0] != loop_thread
+    assert len(constructor_threads) == 2  # event socket + separate dump socket
+    assert loop_thread not in constructor_threads
+
+
+def test_dumps_never_run_on_the_event_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A change during a dump must not be swallowed by the multicast socket."""
+    instances: list[Any] = []
+
+    class FakeIPRoute:
+        def __init__(self) -> None:
+            self.bound = False
+            self.dumped = 0
+            self.sockets = socket.socketpair()
+            self.socket = self.sockets[0]
+            instances.append(self)
+
+        def __enter__(self) -> FakeIPRoute:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            self.sockets[0].close()
+            self.sockets[1].close()
+
+        def bind(self, *, groups: int) -> None:
+            self.bound = True
+
+        def get(self) -> list[dict[str, Any]]:
+            self.sockets[0].recv(64)
+            return [{"event": "RTM_NEWLINK"}]
+
+        def get_links(self) -> list[dict[str, Any]]:
+            assert not self.bound, "dump ran on the multicast-bound socket"
+            self.dumped += 1
+            return []
+
+        def get_addr(self) -> list[dict[str, Any]]:
+            return []
+
+        def get_routes(self) -> list[dict[str, Any]]:
+            return []
+
+    reader = NetlinkReader()
+    stopping = threading.Event()
+    published: list[object] = []
+
+    def publish(snapshots: object) -> None:
+        published.append(snapshots)
+        if len(published) == 1:
+            events = next(i for i in instances if i.bound)
+            events.sockets[1].send(b"x")  # an event arrives after the first dump
+        else:
+            stopping.set()
+
+    reader._watch(FakeIPRoute, 1, stopping, publish)
+    events = next(i for i in instances if i.bound)
+    dumps = next(i for i in instances if not i.bound)
+    assert len(published) == 2
+    assert dumps.dumped == 2 and events.dumped == 0
 
 
 @pytest.mark.integration

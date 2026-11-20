@@ -17,7 +17,7 @@ def policy(policy_id: int = 1) -> PolicyPlan:
         rule_pref=policy_rule_pref(policy_id),
         route="dev",
         interface="wg-jp",
-        gateways=(),
+        gateway=None,
         apps=AppBinding(policy_id, cgroup_paths=(f"pyvpn.slice/p-{policy_id}",)),
         dests=None,
         leak=LeakSettings(),
@@ -42,7 +42,7 @@ def test_active_target_keeps_a_device_independent_unreachable_default() -> None:
 
 @pytest.mark.parametrize("gateway", [ip_address("192.0.2.1"), ip_address("2001:db8::1")])
 def test_explicit_gateway_routes_only_its_family(gateway: IPAddress) -> None:
-    result = build_route_plan(RoutingPlan((replace(policy(), gateways=(gateway,)),)))
+    result = build_route_plan(RoutingPlan((replace(policy(), gateway=gateway),)))
 
     assert [(r.version, r.kind) for r in result.routes if r.gateway is None] == [
         (4, "unreachable"),
@@ -50,17 +50,6 @@ def test_explicit_gateway_routes_only_its_family(gateway: IPAddress) -> None:
     ]
     (target,) = [r for r in result.routes if r.kind == "unicast"]
     assert (target.version, target.interface, target.gateway) == (gateway.version, "wg-jp", gateway)
-
-
-def test_dual_stack_gateways_create_family_specific_routes() -> None:
-    gateways = (ip_address("192.0.2.1"), ip_address("2001:db8::1"))
-    result = build_route_plan(RoutingPlan((replace(policy(), gateways=gateways),)))
-
-    assert [
-        (route.version, route.kind, route.gateway)
-        for route in result.routes
-        if route.kind == "unicast"
-    ] == [(4, "unicast", gateways[0]), (6, "unicast", gateways[1])]
 
 
 def test_kill_switch_guards_both_families_when_target_is_absent() -> None:

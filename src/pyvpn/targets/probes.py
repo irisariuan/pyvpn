@@ -7,6 +7,10 @@ import ipaddress
 import socket
 from collections.abc import Sequence
 
+# Linux-only socket option (value 25 on Linux); the constant is missing from
+# the ``socket`` module elsewhere, where binding to a device is unsupported.
+_SO_BINDTODEVICE: int = getattr(socket, "SO_BINDTODEVICE", 25)
+
 
 def parse_probe(endpoint: str) -> tuple[str, int]:
     """Parse a probe endpoint in ``host:port`` form."""
@@ -45,7 +49,7 @@ def tcp_probe(interface: str, host: str, port: int, timeout: float = 3.0) -> boo
             try:
                 sock.setsockopt(
                     socket.SOL_SOCKET,
-                    socket.SO_BINDTODEVICE,
+                    _SO_BINDTODEVICE,
                     interface.encode(),
                 )
             except OSError:
