@@ -62,6 +62,8 @@ class Daemon:
         # Serializes reloads with pid placement, so a placement always resolves
         # policy ids against the committed config.
         self._config_lock = asyncio.Lock()
+        # Cgroups may still contain processes after their selectors change.
+        self._cgroup_policy_names: dict[int, str] = {}
 
     @property
     def config(self) -> Config:
@@ -72,6 +74,7 @@ class Daemon:
 
     async def start(self) -> None:
         config = self._load()
+        self._validate_policy_slots(config)
         if self._store is not None and not self._store.load().enabled:
             self.reconciler.enabled = False
         if self._dns is not None:
@@ -133,10 +136,27 @@ class Daemon:
                 # Include the id whose bind failed: it may be half-changed.
                 await self._rebind(old, min(len(staged) + 1, len(config.policies)))
             raise
+        self._cgroup_policy_names.update(
+            (pid, policy.name)
+            for pid, policy in enumerate(config.policies, start=1)
+            if policy.apps or staged[pid].cgroup_paths
+        )
         if old is not None:
             for pid in range(len(config.policies) + 1, len(old.policies) + 1):
                 with contextlib.suppress(Exception):
                     await self._apps.unbind(pid)
+
+    def _validate_policy_slots(self, config: Config) -> None:
+        names = tuple(policy.name for policy in config.policies)
+        if len(set(names)) != len(names):
+            raise ApiError("bad_request", "policy names must be unique")
+        for policy_id, name in self._cgroup_policy_names.items():
+            if policy_id > len(names) or names[policy_id - 1] != name:
+                raise ApiError(
+                    "bad_request",
+                    f"reload must keep policy {name!r} at position {policy_id} "
+                    "because its cgroup may still contain running apps",
+                )
 
     async def _rebind(self, old: Config, touched: int) -> None:
         """Restore the app manager's bindings for the still-active ``old`` config."""
@@ -266,6 +286,7 @@ class Daemon:
                 raise ApiError("unavailable", "routing rules are not installed yet")
             pid = self._resolve_policy(p.policy)
             await self._apps.place_pid(p.pid, pid)
+            self._cgroup_policy_names[pid] = self.config.policies[pid - 1].name
         return {"policy_id": pid}
 
     def _resolve_policy(self, ref: str | int) -> int:
@@ -284,6 +305,7 @@ class Daemon:
         except Exception as e:
             raise ApiError("bad_request", f"config: {e}") from None
         async with self._config_lock:
+            self._validate_policy_slots(config)
             try:
                 await self._install(config, rollback=True)
             except Exception as e:

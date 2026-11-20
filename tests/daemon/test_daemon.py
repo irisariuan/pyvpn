@@ -81,9 +81,10 @@ class FailingAppManager(FakeAppManager):
         return await super().bind(policy_id, policy, groups)
 
 
-def reordered(config: Config) -> Config:
-    pols = config.model_dump()["policies"]
-    return make_config(policies=[pols[1], pols[0], pols[2]])
+def with_changed_target(config: Config) -> Config:
+    first, *remaining = config.policies
+    changed = first.model_copy(update={"targets": ("nl",)})
+    return config.model_copy(update={"policies": (changed, *remaining)})
 
 
 ROOT = PeerCred(pid=1, uid=0, gid=0)
@@ -132,6 +133,87 @@ async def test_reload_has_no_unbound_window(rig: Rig) -> None:
     assert all(p.apps.cgroup_paths for p in new_plans[0].policies)
     assert rig.apps.unbound == [3]  # only the removed policy; 1-2 were rebound in place
     assert ("stop", 3) not in rig.dns.events  # policy 3 had no stub
+    await rig.daemon.stop()
+
+
+@pytest.mark.parametrize("order", [(1, 0, 2), (0, 2), (2, 0, 1)])
+async def test_reload_rejects_reassigning_app_policy_slots(
+    rig: Rig, order: tuple[int, ...]
+) -> None:
+    await rig.daemon.start()
+    await rig.daemon.handle("place_pid", {"pid": 42, "policy": "Torrents"}, ROOT)
+    committed = rig.config
+    installed = rig.backend.installed
+    rig.config = committed.model_copy(
+        update={"policies": tuple(committed.policies[i] for i in order)}
+    )
+
+    with pytest.raises(ApiError, match="cgroup may still contain running apps") as error:
+        await rig.daemon.handle("reload", {}, ROOT)
+
+    assert error.value.code == "bad_request"
+    assert rig.daemon.config is committed
+    assert rig.backend.installed is installed
+    assert rig.backend.last.policies[1].route == "unreachable"
+    assert rig.apps.bound[2].name == "Torrents"
+    assert rig.apps.placed == [(42, 2)] and rig.apps.unbound == []
+    await rig.daemon.stop()
+
+
+async def test_reload_preserves_slots_after_app_selectors_are_removed(rig: Rig) -> None:
+    await rig.daemon.start()
+    japan, torrents, office = rig.config.policies
+    torrents = torrents.model_copy(update={"apps": (), "domains": ("torrent.example",)})
+    rig.config = rig.config.model_copy(update={"policies": (japan, torrents, office)})
+    await rig.daemon.handle("reload", {}, ROOT)
+
+    rig.config = rig.config.model_copy(update={"policies": (japan, office)})
+    with pytest.raises(ApiError, match="keep policy 'Torrents' at position 2"):
+        await rig.daemon.handle("reload", {}, ROOT)
+
+    assert rig.daemon.config.policies[1] == torrents
+    await rig.daemon.stop()
+
+
+async def test_reload_preserves_explicit_placement_in_domain_only_policy(rig: Rig) -> None:
+    await rig.daemon.start()
+    await rig.daemon.handle("place_pid", {"pid": 42, "policy": "Office"}, ROOT)
+    rig.config = rig.config.model_copy(update={"policies": rig.config.policies[:2]})
+
+    with pytest.raises(ApiError, match="keep policy 'Office' at position 3"):
+        await rig.daemon.handle("reload", {}, ROOT)
+
+    assert rig.apps.unbound == []
+    await rig.daemon.stop()
+
+
+async def test_reload_updates_in_place_and_appends_policy(rig: Rig) -> None:
+    await rig.daemon.start()
+    config = with_changed_target(rig.config)
+    added = config.policies[-1].model_copy(
+        update={"name": "Another Office", "domains": ("other.example",)}
+    )
+    rig.config = config.model_copy(update={"policies": (*config.policies, added)})
+
+    await rig.daemon.handle("reload", {}, ROOT)
+
+    assert rig.daemon.config is rig.config
+    assert rig.apps.bound[1].targets == ("nl",)
+    assert rig.apps.bound[2].name == "Torrents"
+    assert rig.apps.bound[4] == added
+    await rig.daemon.stop()
+
+
+async def test_reload_rejects_duplicate_policy_names(rig: Rig) -> None:
+    await rig.daemon.start()
+    first, *remaining = rig.config.policies
+    rig.config = rig.config.model_copy(update={"policies": (first, *remaining, first)})
+
+    with pytest.raises(ApiError, match="policy names must be unique") as error:
+        await rig.daemon.handle("reload", {}, ROOT)
+
+    assert error.value.code == "bad_request"
+    assert len(rig.daemon.config.policies) == 3
     await rig.daemon.stop()
 
 
@@ -250,7 +332,7 @@ async def test_failed_initial_apply_keeps_placement_unavailable(rig: Rig) -> Non
 async def test_reload_apply_failure_keeps_old_config_and_bindings(rig: Rig) -> None:
     await rig.daemon.start()
     installed = rig.backend.installed
-    rig.config = reordered(rig.config)
+    rig.config = with_changed_target(rig.config)
     rig.backend.fail_apply = 1
     with pytest.raises(ApiError) as e:
         await rig.daemon.handle("reload", {}, ROOT)
@@ -278,10 +360,12 @@ async def test_reload_bind_failure_keeps_old_config_and_bindings(
     rig.daemon = rig.new_daemon()
     await rig.daemon.start()
     plans = len(rig.backend.plans)
-    rig.config = reordered(rig.config)
-    rig.apps.fail_on = "Japan"  # second policy in the new order
-    with pytest.raises(ApiError):
+    rig.config = with_changed_target(rig.config)
+    rig.apps.fail_on = "Torrents"  # bind fails after the first policy was staged
+    with pytest.raises(ApiError) as e:
         await rig.daemon.handle("reload", {}, ROOT)
+    assert e.value.code == "internal"
+    assert rig.apps.bound[1].targets == ("jp", "nl")
     assert len(rig.backend.plans) == plans
     assert [p.name for p in rig.daemon.config.policies] == ["Japan", "Torrents", "Office"]
     assert {pid: p.name for pid, p in rig.apps.bound.items()} == {
