@@ -227,6 +227,57 @@ def test_service_binding_endpoint_addresses_are_published(
     ]
 
 
+@pytest.mark.parametrize(("kind", "address"), [("A", "192.0.2.10"), ("AAAA", "2001:db8::2")])
+@pytest.mark.parametrize("with_address", [False, True], ids=["split-answer", "cached-cname"])
+def test_address_followup_uses_cname_origin_until_expiry(
+    monkeypatch: pytest.MonkeyPatch, kind: str, address: str, with_address: bool
+) -> None:
+    clock = Mock(return_value=100.0)
+    monkeypatch.setattr(dns_service, "monotonic", clock)
+
+    async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
+        owner = query.question[0].name
+        reply = dns.message.make_response(query)
+        if owner == dns.name.from_text("selected.example."):
+            reply.answer.append(dns.rrset.from_text(owner, 4, "IN", "CNAME", "edge.example."))
+        if with_address or not reply.answer:
+            reply.answer.append(dns.rrset.from_text("edge.example.", 1, "IN", kind, address))
+        return dns.message.from_wire(reply.to_wire())
+
+    async def run() -> None:
+        matcher = FakeRuleMatcher({"selected.example": 1})
+        service = PolicyDnsService(upstream, matcher_factory=lambda: matcher)
+        backend = FakeBackend()
+        service.on_answer(backend.add_to_set)
+        stub = _Stub(service, replace(_plan(), dests=DestSet(1)))
+
+        async def lookup(name: str) -> dns.message.Message:
+            query = dns.message.make_query(name, kind)
+            return dns.message.from_wire(await stub.answer(query.to_wire(), tcp=False))
+
+        assert (await lookup("selected.example.")).rcode() == dns.rcode.NOERROR
+        clock.return_value = 102.0
+        backend.sets.clear()
+        backend.fail_add = True
+        failed = await lookup("edge.example.")
+        assert failed.rcode() == dns.rcode.SERVFAIL
+        assert not failed.answer
+
+        backend.fail_add = False
+        reply = await lookup("edge.example.")
+        assert reply.answer[0][0].address == address
+        [published] = backend.sets
+        assert published.policy_id == 1
+        assert published.v4 | published.v6 == {ip_network(address)}
+
+        clock.return_value = 104.0
+        backend.sets.clear()
+        assert (await lookup("edge.example.")).rcode() == dns.rcode.NOERROR
+        assert not backend.sets
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("kind", ["HTTPS", "SVCB"])
 def test_service_alias_followups_keep_the_original_policy(
     kind: str, monkeypatch: pytest.MonkeyPatch

@@ -255,7 +255,9 @@ nft sets *before* the reply is released. For HTTPS and SVCB, the stub follows
 alias records included in the response to collect the endpoint addresses and
 hints. It retains the originating names in memory, scoped to the issuing stub
 and the records' TTLs, so separate lookups for aliases and service addresses
-still use the origin's policy. It rechecks those names against the active
+still use the origin's policy. This includes CNAMEs in A and AAAA replies,
+even when the first reply also contains a shorter-lived address. The stub
+rechecks those names against the active
 matcher. If publication fails or the stub cannot keep a new alias reference,
 it returns SERVFAIL. The daemon composition root supplies the active rule
 matcher to all stubs, including app-only stubs.

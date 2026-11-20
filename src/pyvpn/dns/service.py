@@ -156,7 +156,7 @@ class PolicyDnsService:
         for alias, ttl in entries.items():
             known = self._alias_origins.setdefault(alias, {})
             # A zero-TTL binding can still be followed within the same resolution.
-            expires = now + max(ttl, _RESOLVE_TIMEOUT)
+            expires = now + (ttl or _RESOLVE_TIMEOUT)
             for origin in origins:
                 if origin not in known:
                     self._alias_count += 1
@@ -176,9 +176,8 @@ class PolicyDnsService:
         question = response.question[0]
         chain = response.resolve_chaining()
         dests, targets = _destinations(plan.policy_id, response, chain)
-        # Ordinary lookups keep their existing CNAME matching. Remember CNAME
-        # targets across replies only when resolving a service binding.
-        if not inherited and question.rdtype not in _SERVICE_QUERY_TYPES:
+        # A client can follow a CNAME separately or refresh its shorter-lived address.
+        if not inherited and question.rdtype not in _ALIAS_QUERY_TYPES:
             targets.clear()
         if not dests and not targets:
             return None
