@@ -29,7 +29,7 @@ import re
 import re._parser as sre_parse  # type: ignore[import-not-found]
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Any
+from typing import Any, Protocol
 
 from pyvpn.match.opts import (
     OptionError,
@@ -76,7 +76,7 @@ class Pattern:
     # A literal domain suffix every match must end with ("" if none can be
     # derived): steers DNS through the target and is used for pre-resolving.
     base: str = ""
-    regex: re.Pattern[str] | None = field(default=None, compare=False, repr=False)
+    regex: Regex | None = field(default=None, compare=False, repr=False)
 
     def match(self, name: str) -> bool:
         """Whether ``name`` (lowercase, no trailing dot) matches, ignoring ``negate``."""
@@ -232,8 +232,8 @@ def parse(raw: str) -> Pattern:
         if "***" in s:
             raise RuleError("use * (one label) or ** (any labels)")
         try:
-            rx = re.compile(glob_to_regex(s))
-        except re.error as e:
+            rx = _compile(glob_to_regex(s), ignore_case=False)
+        except (re.error, _Re2Error) as e:
             raise RuleError(f"bad wildcard: {e}") from None
         p = Pattern(raw_s, Kind.GLOB, negate, value=s, base=glob_base(s), regex=rx)
     elif s.startswith("."):
@@ -361,6 +361,39 @@ def glob_base(g: str) -> str:
 
 
 # --- regular expressions (RE2 subset of Python's re) ---------------------
+#
+# Rule regexes and wildcards run on the DNS path and may come from imported
+# lists, so they are matched with RE2 (linear time) when the optional
+# ``google-re2`` package is installed (``pip install snakevpn[re2]``). Without
+# it, Python's backtracking ``re`` is used. Syntax is the same either way: the
+# walk below rejects what RE2 lacks before either engine compiles.
+
+
+class Regex(Protocol):
+    def search(self, string: str, /) -> object | None: ...
+
+
+try:
+    import re2 as _re2
+
+    _Re2Error: type[Exception] = _re2.error
+except ImportError:  # optional dependency
+    _re2 = None
+    _Re2Error = re.error
+
+ENGINE = "re" if _re2 is None else "re2"
+"""The regex engine in use: "re2" (linear time) or "re" (backtracking)."""
+
+
+def _compile(expr: str, *, ignore_case: bool) -> Regex:
+    if _re2 is not None:
+        options = _re2.Options()
+        options.case_sensitive = not ignore_case
+        options.log_errors = False
+        rx: Regex = _re2.compile(expr, options)
+        return rx
+    return re.compile(expr, (re.IGNORECASE if ignore_case else 0) | re.ASCII)
+
 
 _UNSUPPORTED = {
     sre_parse.ASSERT: "lookaround",
@@ -395,17 +428,20 @@ def _children(op: Any, av: Any) -> list[Any]:
     return []
 
 
-def compile_regex(expr: str) -> re.Pattern[str]:
+def compile_regex(expr: str) -> Regex:
     """Compile a rule regex: RE2 syntax, case-insensitive (raises RuleError)."""
     try:
         tree = sre_parse.parse(expr)
-        rx = re.compile(expr, re.IGNORECASE | re.ASCII)
+        re.compile(expr, re.IGNORECASE | re.ASCII)
     except (re.error, OverflowError, RecursionError) as e:
         raise RuleError(f"bad regex: {e}") from None
     bad = _walk_unsupported(tree)
     if bad:
         raise RuleError(f"bad regex: {bad} is not supported (RE2 syntax)")
-    return rx
+    try:
+        return _compile(expr, ignore_case=True)
+    except (re.error, _Re2Error) as e:
+        raise RuleError(f"bad regex: {e}") from None
 
 
 def regex_base(expr: str) -> str:

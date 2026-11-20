@@ -190,3 +190,36 @@ def test_drop_rules() -> None:
     assert not plain.needs_inspector()
     assert plain.drop_suffixes(False) == ["ads.example.com"]
     assert plain.native_suffixes() == []
+
+
+def test_regex_engine_matches_the_same_with_and_without_re2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import re
+
+    from pyvpn.match import pattern
+
+    def check() -> None:
+        rx = parse(r"/^ipv4-c\d+\.x\.net$/")
+        assert rx.match("ipv4-c12.x.net") and rx.match("IPV4-C1.X.NET")
+        assert not rx.match("ipv4-c.x.net")
+        glob = parse("a*.**.example")
+        assert glob.match("ab.c.d.example") and not glob.match("b.c.example")
+
+    check()
+    monkeypatch.setattr(pattern, "_re2", None)
+    check()
+    assert isinstance(parse("/x+/").regex, re.Pattern)
+
+
+def test_re2_matches_in_linear_time() -> None:
+    import time
+
+    from pyvpn.match import pattern
+
+    if pattern.ENGINE != "re2":
+        pytest.skip("google-re2 is not installed")
+    rx = parse(r"/^(a+)+$/")
+    start = time.monotonic()
+    assert not rx.match("a" * 64 + "!")  # catastrophic backtracking in Python's re
+    assert time.monotonic() - start < 1
