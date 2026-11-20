@@ -256,3 +256,31 @@ def test_import_and_export() -> None:
     out = commands.export_policy(CFG.policies[1]).output
     assert out.startswith("# snake rules v1\n@name stream\n\nnetflix.com\n")
     assert "asn:2906\n" in out and "cidr:23.246.0.0/18\ncidr:2001:db8::1\n" in out
+
+
+def test_asn_cache_writes_atomically(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
+    c = AsnCache(tmp_path, fetch=lambda url: _ripe("1.2.3.0/24"))
+    synced: list[int] = []
+    real_fsync = os.fsync
+
+    def fsync(fd: int) -> None:
+        synced.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    c.prefixes(1, force=True)
+    c.prefixes(1, force=True)
+    assert c.cached(1) == ["1.2.3.0/24"] and len(synced) == 2
+    name = c._path(1).name
+    assert [p.name for p in tmp_path.iterdir()] == [name]  # no temp files left
+
+    def fail(src: object, dst: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", fail)
+    with pytest.raises(OSError):
+        c.prefixes(1, force=True)
+    assert [p.name for p in tmp_path.iterdir()] == [name]
+    assert c.cached(1) == ["1.2.3.0/24"]

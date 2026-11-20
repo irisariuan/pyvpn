@@ -7,8 +7,10 @@ meant to run off the event loop (e.g. ``asyncio.to_thread``).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import tempfile
 import time
 import urllib.request
 from collections.abc import Callable
@@ -104,8 +106,22 @@ class AsnCache:
             if cached:
                 return Lookup(tuple(cached), f"AS{n} refresh failed, using cache: {e}")
             raise AsnError(f"AS{n}: {e}") from e
-        self.dir.mkdir(parents=True, exist_ok=True)
-        tmp = self._path(n).with_suffix(".tmp")
-        tmp.write_text(json.dumps({"fetched": self._clock(), "prefixes": got}))
-        tmp.replace(self._path(n))
+        self._write(n, json.dumps({"fetched": self._clock(), "prefixes": got}))
         return Lookup(tuple(got))
+
+    def _write(self, n: int, text: str) -> None:
+        """Replace the cache file atomically: a unique temp file in the same
+        directory (concurrent refreshes do not collide), fsynced, renamed."""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        path = self._path(n)
+        fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
