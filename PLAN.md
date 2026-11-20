@@ -251,6 +251,15 @@ process. Domain matches come from the per-policy DNS stub: the answered
 addresses go into nft sets *before* the reply is released, as snake's DNS
 inspector does.
 
+Rule semantics (`match/policy.py`): policies are tried in config order and
+the first whose rules route a name wins; `!rule` exempts a name from that
+policy only. `drop:` rules parse and claim a name for their policy but are
+not enforced yet (that needs a drop set in the backend contract). snake's
+per-device rules (`session:`, `route:`, `drop[...]:`, `if:` branches) parse
+but route nothing; only the names in an `if:` condition are routed, as in
+snake. `pyvpn rules check` warns about these. snake's Domain VPN Routing
+importer is not ported (router-only).
+
 ### 3.5 Per-app DNS and leaks
 
 * Each policy gets its own stub (`127.0.0.1:53<id>`). nft redirects port 53
