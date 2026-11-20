@@ -253,13 +253,20 @@ query name and its CNAME chain. A and AAAA answers, HTTPS/SVCB address hints,
 and additional addresses for referenced names go into the winning policy's
 nft sets *before* the reply is released. For HTTPS and SVCB, the stub follows
 alias records included in the response to collect the endpoint addresses and
-hints. It retains the originating names in memory, scoped to the issuing stub
-and the records' TTLs, so separate lookups for aliases and service addresses
-still use the origin's policy. This includes CNAMEs in A and AAAA replies,
-even when the first reply also contains a shorter-lived address. The stub
-rechecks those names against the active
-matcher. If publication fails or the stub cannot keep a new alias reference,
-it returns SERVFAIL. The daemon composition root supplies the active rule
+hints. Before releasing a cacheable alias, the stub records its name path,
+DNS class, listener policy ID, and expiry in the daemon's private
+`dns-aliases.sqlite3` state file. Tracking follows the records in the reply. This includes SRV, MX and NS
+targets (including nameservers in a referral), plus CNAMEs returned for other query types or alongside NXDOMAIN.
+Bundled endpoint addresses and separate A/AAAA lookups use the same policy.
+Follow-up queries, including those received after a restart, match the
+remembered prefix and the new answer together against the active rules.
+A policy that independently matches the direct lookup must agree with the
+remembered paths before the stub releases an address. Each hop bounds the
+path's TTL. After the durable write, the stub caps each returned alias link's
+TTL at the whole seconds still covered and withholds an expired link.
+If indistinguishable live paths select
+different policies, or publication or alias storage fails, the stub returns
+SERVFAIL. The daemon composition root supplies the active rule
 matcher to all stubs, including app-only stubs.
 
 ### 3.5 Per-app DNS and leaks

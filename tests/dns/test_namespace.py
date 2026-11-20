@@ -253,7 +253,9 @@ async def _probe_client(cert: str, expected: str) -> None:
     upstream = BoundUpstream(bound_dns_socket, tls_context=ssl.create_default_context(cafile=cert))
     backend = FakeBackend()
     matcher = FakeRuleMatcher({name.rstrip("."): 1 for _, _, name in _CASES})
-    service: DnsService = PolicyDnsService(upstream, matcher_factory=lambda: matcher)
+    service: DnsService = PolicyDnsService(
+        upstream, alias_path=Path(cert).with_suffix(".sqlite3"), matcher_factory=lambda: matcher
+    )
     service.on_answer(backend.add_to_set)
     try:
         for protocol, transport, name in _CASES:

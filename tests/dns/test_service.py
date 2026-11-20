@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import replace
 from ipaddress import ip_network
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import dns.flags
@@ -16,6 +17,11 @@ from pyvpn.state import DestSet, PolicyPlan
 from tests.dns._helpers import plan_for_dns as _plan
 from tests.fakes.backend import FakeBackend
 from tests.fakes.rules import FakeRuleMatcher
+
+
+@pytest.fixture(autouse=True)
+def isolated_alias_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dns_service, "_ALIAS_PATH", tmp_path / "dns-aliases.sqlite3")
 
 
 def _answer(query: dns.message.Message, address: str = "192.0.2.10") -> dns.message.Message:
@@ -233,7 +239,7 @@ def test_address_followup_uses_cname_origin_until_expiry(
     monkeypatch: pytest.MonkeyPatch, kind: str, address: str, with_address: bool
 ) -> None:
     clock = Mock(return_value=100.0)
-    monkeypatch.setattr(dns_service, "monotonic", clock)
+    monkeypatch.setattr(dns_service, "time", clock)
 
     async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
         owner = query.question[0].name
@@ -283,8 +289,8 @@ def test_service_alias_followups_keep_the_original_policy(
     kind: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clock = Mock(return_value=100.0)
-    monkeypatch.setattr(dns_service, "monotonic", clock)
-    monkeypatch.setattr(dns_service, "_MAX_ALIAS_ORIGINS", 2)
+    monkeypatch.setattr(dns_service, "time", clock)
+    monkeypatch.setattr(dns_service, "_MAX_ALIAS_ORIGINS", 3)
 
     async def run() -> None:
         answers = {
@@ -324,6 +330,11 @@ def test_service_alias_followups_keep_the_original_policy(
         # An active follow-up must still carry the origin's policy after recreating the listener.
         stub = _Stub(service, plan)
         matcher.domains["svc.example"] = 2
+        conflict = await query(stub, "svc.example.", kind)
+        assert conflict.rcode() == dns.rcode.SERVFAIL
+        assert not conflict.answer
+        assert not backend.sets
+        del matcher.domains["svc.example"]
         assert (await query(stub, "svc.example.", kind)).rcode() == dns.rcode.NOERROR
         assert backend.sets == [DestSet(1, v4=frozenset({ip_network("192.0.2.10")}))]
         full = await query(stub, "second.example.", kind)
@@ -559,3 +570,422 @@ def test_audit_reports_listener_and_requested_packet_blocks_separately() -> None
     assert active.requested_packet_blocks == ("DoH", "QUIC")
     assert not audit_dns(plan, listening=False).firefox_canary
     assert audit_dns(replace(plan, route="main"), listening=True).upstream_interface is None
+
+
+@pytest.mark.parametrize("first_type", ["A", "AAAA", "CNAME"])
+@pytest.mark.parametrize("restart", [False, True], ids=["same-service", "fresh-service"])
+@pytest.mark.parametrize(
+    "excluded", [False, True], ids=["earlier-endpoint-rule", "excluded-endpoint"]
+)
+def test_split_and_combined_chains_select_the_same_policy(
+    tmp_path: Path, first_type: str, restart: bool, excluded: bool
+) -> None:
+    backend = FakeBackend()
+    plan = replace(_plan(), policy_id=2, dests=DestSet(2))
+    endpoint_type, address = ("AAAA", "2001:db8::2") if first_type == "AAAA" else ("A", "192.0.2.1")
+    records = [
+        dns.rrset.from_text("origin.example.", 60, "IN", "CNAME", "middle.example."),
+        dns.rrset.from_text("middle.example.", 60, "IN", "CNAME", "edge.example."),
+        dns.rrset.from_text("edge.example.", 10, "IN", endpoint_type, address),
+    ]
+
+    class Matcher(FakeRuleMatcher):
+        def match_chain(self, *names: str) -> int | None:
+            if excluded:
+                if "origin.example" in names and "edge.example" not in names:
+                    return 1
+            elif "edge.example" in names:
+                return 1
+            return 2 if "origin.example" in names else None
+
+    def listener(path: Path, *, split: bool) -> _Stub:
+        async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
+            response = dns.message.make_response(query)
+            i = next(i for i, rr in enumerate(records) if rr.name == query.question[0].name)
+            response.answer.extend(records[i : i + 1] if split else records[i:])
+            return dns.message.from_wire(response.to_wire())
+
+        service = PolicyDnsService(upstream, alias_path=path, matcher_factory=Matcher)
+        service.on_answer(backend.add_to_set)
+        return _Stub(service, plan)
+
+    async def lookup(stub: _Stub, name: str, kind: str) -> None:
+        request = dns.message.make_query(name, kind)
+        response = dns.message.from_wire(await stub.answer(request.to_wire(), tcp=False))
+        assert response.rcode() == dns.rcode.NOERROR
+        assert response.answer
+
+    async def run() -> None:
+        whole = listener(tmp_path / "whole.db", split=False)
+        await lookup(whole, "origin.example.", endpoint_type)
+        [expected] = backend.sets
+        assert expected.policy_id == (2 if excluded else 1)
+        backend.sets.clear()
+
+        path = tmp_path / "split.db"
+        stub = listener(path, split=True)
+        await lookup(stub, "origin.example.", first_type)
+        if restart:
+            stub = listener(path, split=True)
+        await lookup(stub, "middle.example.", first_type)
+        if restart:
+            stub = listener(path, split=True)
+        await lookup(stub, "edge.example.", endpoint_type)
+        assert backend.sets == [expected]
+
+    asyncio.run(run())
+
+
+def test_unavailable_alias_store_withholds_answer(tmp_path: Path) -> None:
+    path = tmp_path / "aliases.db"
+    service = PolicyDnsService(
+        AsyncMock(side_effect=lambda _, q: _answer(q)),
+        alias_path=path,
+        matcher_factory=lambda: FakeRuleMatcher({"selected.example": 1}),
+    )
+
+    # A database write fails after the query and its origin have been read.
+    async def fail_write(_: DestSet) -> None:
+        path.unlink()
+
+    service.on_answer(fail_write)
+    wire = asyncio.run(
+        _Stub(service, _plan()).answer(
+            dns.message.make_query("selected.example.", "A").to_wire(), tcp=True
+        )
+    )
+    reply = dns.message.from_wire(wire)
+    assert reply.rcode() == dns.rcode.SERVFAIL
+    assert not reply.answer
+
+
+@pytest.mark.parametrize("kind", ["HTTPS", "SVCB"])
+def test_earlier_endpoint_policy_wins_for_bundled_and_split_hints(
+    tmp_path: Path, kind: str
+) -> None:
+    backend = FakeBackend()
+    matcher = FakeRuleMatcher({"office.example": 2, "edge.example": 1})
+    binding = dns.rrset.from_text("edge.example.", 30, "IN", kind, "1 . ipv4hint=192.0.2.8")
+
+    async def run(bundled: bool) -> None:
+        async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
+            reply = dns.message.make_response(query)
+            if query.question[0].name == binding.name:
+                reply.answer.append(binding)
+            else:
+                reply.answer.append(
+                    dns.rrset.from_text("office.example.", 60, "IN", kind, "0 edge.example.")
+                )
+                if bundled:
+                    reply.additional.append(binding)
+            return dns.message.from_wire(reply.to_wire())
+
+        path = tmp_path / f"{bundled}.sqlite3"
+
+        def listener() -> _Stub:
+            service = PolicyDnsService(upstream, alias_path=path, matcher_factory=lambda: matcher)
+            service.on_answer(backend.add_to_set)
+            return _Stub(service, replace(_plan(), policy_id=2, dests=DestSet(2)))
+
+        async def lookup(stub: _Stub, name: str) -> None:
+            wire = await stub.answer(dns.message.make_query(name, kind).to_wire(), tcp=True)
+            assert dns.message.from_wire(wire).rcode() == dns.rcode.NOERROR
+
+        await lookup(listener(), "edge.example.")
+        await lookup(listener(), "office.example.")
+        await lookup(listener(), "edge.example.")
+        expected = DestSet(1, v4=frozenset({ip_network("192.0.2.8")}))
+        assert backend.sets == [expected] * (3 if bundled else 2)
+
+    asyncio.run(run(False))
+    backend.sets.clear()
+    asyncio.run(run(True))
+
+
+@pytest.mark.parametrize("kind", ["A", "AAAA"])
+def test_excluded_alias_cannot_suppress_direct_policy(kind: str) -> None:
+    class Matcher(FakeRuleMatcher):
+        def match_chain(self, *names: str) -> int | None:
+            if "edge.example" in names and "excluded.example" not in names:
+                return 1
+            return None
+
+    async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
+        name = query.question[0].name
+        if name == dns.name.from_text("excluded.example."):
+            data = ("CNAME", "edge.example.")
+        else:
+            data = (kind, "192.0.2.1" if kind == "A" else "2001:db8::1")
+        response = dns.message.make_response(query)
+        response.answer.append(dns.rrset.from_text(name, 60, "IN", *data))
+        return dns.message.from_wire(response.to_wire())
+
+    async def run() -> None:
+        backend = FakeBackend()
+        service = PolicyDnsService(upstream, matcher_factory=Matcher)
+        service.on_answer(backend.add_to_set)
+        stub = _Stub(service, _plan())
+
+        async def lookup(name: str) -> dns.message.Message:
+            wire = await stub.answer(dns.message.make_query(name, kind).to_wire(), tcp=False)
+            return dns.message.from_wire(wire)
+
+        assert (await lookup("edge.example.")).rcode() == dns.rcode.NOERROR
+        assert [ds.policy_id for ds in backend.sets] == [1]
+        backend.sets.clear()
+        assert (await lookup("excluded.example.")).rcode() == dns.rcode.NOERROR
+        reply = await lookup("edge.example.")
+        assert reply.rcode() == dns.rcode.SERVFAIL
+        assert not reply.answer
+        assert not backend.sets
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("delay", [0.0, 1.25, 3.0, 4.0])
+@pytest.mark.parametrize("kind", ["CNAME", "HTTPS", "SVCB"])
+def test_reply_ttl_accounts_for_durable_write(
+    delay: float, kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Mock(return_value=100.0)
+    monkeypatch.setattr(dns_service, "time", clock)
+
+    async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
+        name = query.question[0].name
+        response = dns.message.make_response(query)
+        if name == dns.name.from_text("selected.example."):
+            target = "edge.example." if kind == "CNAME" else "0 edge.example."
+            record = dns.rrset.from_text(name, 3, "IN", kind, target)
+        else:
+            record = dns.rrset.from_text(name, 300, "IN", "A", "192.0.2.1")
+        response.answer.append(record)
+        return dns.message.from_wire(response.to_wire())
+
+    async def run() -> None:
+        service = PolicyDnsService(
+            upstream, matcher_factory=lambda: FakeRuleMatcher({"selected.example": 1})
+        )
+        backend = FakeBackend()
+        service.on_answer(backend.add_to_set)
+        stub = _Stub(service, _plan())
+        remember = service._aliases.remember
+
+        def slow_write(*args: object) -> None:
+            remember(*args)
+            clock.return_value += delay
+
+        monkeypatch.setattr(service._aliases, "remember", slow_write)
+        query = dns.message.make_query("selected.example.", kind)
+        wire = await stub.answer(query.to_wire(), tcp=True)
+        reply = dns.message.from_wire(wire)
+        if delay >= 3:
+            assert reply.rcode() == dns.rcode.SERVFAIL
+            assert not reply.answer
+            return
+        assert reply.rcode() == dns.rcode.NOERROR
+        assert reply.answer[0].ttl == int(3 - delay)
+        query = dns.message.make_query("edge.example.", "A")
+        wire = await stub.answer(query.to_wire(), tcp=True)
+        assert dns.message.from_wire(wire).answer[0].ttl == 300
+        assert [ds.policy_id for ds in backend.sets] == [1]
+
+    asyncio.run(run())
+
+
+def test_alias_ttl_limits_each_link_after_a_split_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = Mock(return_value=100.0)
+    monkeypatch.setattr(dns_service, "time", clock)
+
+    async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
+        name = query.question[0].name
+        reply = dns.message.make_response(query)
+        if name == dns.name.from_text("selected.example."):
+            reply.answer.append(dns.rrset.from_text(name, 10, "IN", "CNAME", "service.example."))
+        else:
+            reply.answer.append(dns.rrset.from_text(name, 60, "IN", "HTTPS", "0 svc.example."))
+            reply.additional.append(
+                dns.rrset.from_text("svc.example.", 2, "IN", "HTTPS", "1 edge.example.")
+            )
+            reply.additional.append(
+                dns.rrset.from_text("edge.example.", 300, "IN", "A", "192.0.2.1")
+            )
+        return dns.message.from_wire(reply.to_wire())
+
+    async def run() -> None:
+        service = PolicyDnsService(
+            upstream, matcher_factory=lambda: FakeRuleMatcher({"selected.example": 1})
+        )
+        backend = FakeBackend()
+        service.on_answer(backend.add_to_set)
+        stub = _Stub(service, _plan())
+
+        async def ask(name: str) -> dns.message.Message:
+            wire = await stub.answer(dns.message.make_query(name, "HTTPS").to_wire(), tcp=False)
+            return dns.message.from_wire(wire)
+
+        assert (await ask("selected.example.")).answer[0].ttl == 10
+        clock.return_value = 106.5
+        reply = await ask("service.example.")
+        assert reply.rcode() == dns.rcode.NOERROR
+        assert reply.answer[0].ttl == 3
+        assert [rr.ttl for rr in reply.additional] == [2, 300]
+        assert [ds.policy_id for ds in backend.sets] == [1]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("query_type", "record_type", "value", "rcode"),
+    [
+        ("SRV", "SRV", "0 5 443 edge.example.", dns.rcode.NOERROR),
+        ("MX", "MX", "10 edge.example.", dns.rcode.NOERROR),
+        ("NS", "NS", "edge.example.", dns.rcode.NOERROR),
+        ("TXT", "CNAME", "edge.example.", dns.rcode.NOERROR),
+        ("A", "CNAME", "edge.example.", dns.rcode.NXDOMAIN),
+    ],
+)
+@pytest.mark.parametrize(("family", "address"), [("A", "192.0.2.1"), ("AAAA", "2001:db8::1")])
+def test_cached_endpoint_keeps_policy_across_query_types(
+    tmp_path: Path,
+    query_type: str,
+    record_type: str,
+    value: str,
+    rcode: int,
+    family: str,
+    address: str,
+) -> None:
+    """Bundled addresses and later lookups must both be governed before release."""
+    origin = "origin.example."
+    endpoint = "edge.example."
+    plan = replace(_plan(), dests=DestSet(1))
+    matcher = FakeRuleMatcher({"origin.example": 1})
+    backend = FakeBackend()
+    expected = DestSet(1, **{"v4" if family == "A" else "v6": frozenset({ip_network(address)})})
+
+    async def exercise(bundled: bool) -> None:
+        path = tmp_path / f"aliases-{bundled}.db"
+
+        async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
+            response = dns.message.make_response(query)
+            addr = dns.rrset.from_text(endpoint, 60, "IN", family, address)
+            if query.question[0].name == dns.name.from_text(origin):
+                response.answer.append(dns.rrset.from_text(origin, 120, "IN", record_type, value))
+                response.set_rcode(rcode)
+                if bundled:
+                    response.additional.append(addr)
+            else:
+                response.answer.append(addr)
+            return dns.message.from_wire(response.to_wire())
+
+        async def query(name: str, kind: str) -> dns.message.Message:
+            service = PolicyDnsService(upstream, alias_path=path, matcher_factory=lambda: matcher)
+            service.on_answer(backend.add_to_set)
+            wire = await _Stub(service, plan).answer(
+                dns.message.make_query(name, kind).to_wire(), tcp=True
+            )
+            return dns.message.from_wire(wire)
+
+        first = await query(origin, query_type)
+        assert first.rcode() == rcode
+        assert first.answer[0].rdtype == dns.rdatatype.from_text(record_type)
+        assert backend.sets == ([expected] if bundled else [])
+        backend.sets.clear()
+
+        backend.fail_add = True
+        failed = await query(endpoint, family)
+        assert failed.rcode() == dns.rcode.SERVFAIL
+        assert not failed.answer
+        backend.fail_add = False
+        final = await query(endpoint, family)
+        assert final.answer[0][0].address == address
+        assert backend.sets == [expected]
+        backend.sets.clear()
+
+    if rcode == dns.rcode.NOERROR:
+        asyncio.run(exercise(True))
+    asyncio.run(exercise(False))
+
+
+@pytest.mark.parametrize("bundled", [False, True], ids=["separate-address", "glue-address"])
+def test_referral_after_cname_uses_origin_policy(
+    tmp_path: Path, bundled: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Mock(return_value=100.0)
+    monkeypatch.setattr(dns_service, "time", clock)
+    backend = FakeBackend()
+    matcher = FakeRuleMatcher({"origin.example": 1})
+    addr = dns.rrset.from_text("ns.zone.example.", 80, "IN", "A", "192.0.2.5")
+
+    async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
+        owner = query.question[0].name
+        response = dns.message.make_response(query)
+        if owner == dns.name.from_text("origin.example."):
+            response.answer.append(
+                dns.rrset.from_text(owner, 10, "IN", "CNAME", "app.zone.example.")
+            )
+        elif owner == dns.name.from_text("app.zone.example."):
+            response.authority.append(
+                dns.rrset.from_text("zone.example.", 60, "IN", "NS", addr.name.to_text())
+            )
+            if bundled:
+                response.additional.append(addr)
+        else:
+            response.answer.append(addr)
+        return dns.message.from_wire(response.to_wire())
+
+    async def ask(name: str, kind: str) -> dns.message.Message:
+        service = PolicyDnsService(
+            upstream, alias_path=tmp_path / "aliases.db", matcher_factory=lambda: matcher
+        )
+        service.on_answer(backend.add_to_set)
+        wire = await _Stub(service, _plan()).answer(
+            dns.message.make_query(name, kind).to_wire(), tcp=True
+        )
+        return dns.message.from_wire(wire)
+
+    assert asyncio.run(ask("origin.example.", "CNAME")).rcode() == dns.rcode.NOERROR
+    clock.return_value += 4
+    referral = asyncio.run(ask("app.zone.example.", "SRV"))
+    assert referral.rcode() == dns.rcode.NOERROR
+    assert referral.authority[0].ttl == 6
+    expected = DestSet(1, v4=frozenset({ip_network("192.0.2.5")}))
+    assert backend.sets == ([expected] if bundled else [])
+    backend.sets.clear()
+    assert asyncio.run(ask("ns.zone.example.", "A")).answer[0][0].address == "192.0.2.5"
+    assert backend.sets == [expected]
+
+
+def test_negative_authority_is_not_a_nameserver_referral(tmp_path: Path) -> None:
+    addr = dns.rrset.from_text("ns.example.", 60, "IN", "A", "192.0.2.10")
+    backend = FakeBackend()
+
+    async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
+        response = dns.message.make_response(query)
+        if query.question[0].name == addr.name:
+            response.answer.append(addr)
+        else:
+            response.authority.extend(
+                [
+                    dns.rrset.from_text(
+                        "example.", 60, "IN", "SOA", "ns.example. hostmaster.example. 1 2 3 4 5"
+                    ),
+                    dns.rrset.from_text("example.", 60, "IN", "NS", "ns.example."),
+                ]
+            )
+            response.additional.append(addr)
+        return dns.message.from_wire(response.to_wire())
+
+    async def run() -> None:
+        service = PolicyDnsService(
+            upstream,
+            alias_path=tmp_path / "aliases.db",
+            matcher_factory=lambda: FakeRuleMatcher({"origin.example": 1}),
+        )
+        service.on_answer(backend.add_to_set)
+        stub = _Stub(service, _plan())
+        for name in ["origin.example.", "ns.example."]:
+            wire = await stub.answer(dns.message.make_query(name, "A").to_wire(), tcp=False)
+            assert dns.message.from_wire(wire).rcode() == dns.rcode.NOERROR
+        assert not backend.sets
+
+    asyncio.run(run())

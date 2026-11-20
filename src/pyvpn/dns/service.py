@@ -7,12 +7,13 @@ import logging
 import secrets
 import struct
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from copy import copy
-from dataclasses import replace
+from dataclasses import dataclass, field
 from ipaddress import IPv4Network, IPv6Network
-from time import monotonic
+from pathlib import Path
+from time import time
 from typing import Protocol, cast, runtime_checkable
 
 import dns.exception
@@ -29,6 +30,8 @@ from dns.rdtypes.IN.SRV import SRV
 from dns.rdtypes.svcbbase import IPv4HintParam, IPv6HintParam, ParamKey, SVCBBase
 from dns.rrset import RRset
 
+from pyvpn.constants import STATE_DIR
+from pyvpn.dns.aliases import AliasKey, AliasRows, AliasStore, DomainChain, Origins
 from pyvpn.dns.upstream import MAX_WIRE_SIZE, BoundUpstream
 from pyvpn.services import DestCallback, RuleMatcher
 from pyvpn.state import DestSet, PolicyPlan
@@ -41,14 +44,10 @@ _MAX_UDP_QUERIES = 256
 _MAX_TCP_CLIENTS = 256
 _LISTEN_ADDRESS = "127.0.0.1"
 _MAX_ALIAS_ORIGINS = 4096
-_SERVICE_QUERY_TYPES = frozenset({dns.rdatatype.HTTPS, dns.rdatatype.SVCB, dns.rdatatype.ANY})
-_ALIAS_QUERY_TYPES = _SERVICE_QUERY_TYPES | {dns.rdatatype.A, dns.rdatatype.AAAA}
+_ALIAS_PATH = Path(STATE_DIR) / "dns-aliases.sqlite3"
 
 Upstream = Callable[[PolicyPlan, dns.message.Message], Awaitable[dns.message.Message]]
 ClientAddress = tuple[str, int]
-DomainChain = tuple[str, ...]
-AliasKey = tuple[int, int, dns.name.Name]
-AliasTargets = dict[dns.name.Name, int]
 
 
 @runtime_checkable
@@ -68,6 +67,7 @@ class PolicyDnsService:
         self,
         upstream: Upstream,
         *,
+        alias_path: Path | None = None,
         matcher_factory: Callable[[], RuleMatcher] | None = None,
     ) -> None:
         """The composition root supplies a factory for the active config's matcher."""
@@ -76,10 +76,8 @@ class PolicyDnsService:
         self._lock = asyncio.Lock()
         self._callback: DestCallback | None = None
         self._matcher_factory = matcher_factory
-        # Clients may use a cached binding after a listener is replaced. Keep the
-        # originating names by stub and recheck them against the committed matcher.
-        self._alias_origins: dict[AliasKey, dict[DomainChain, float]] = {}
-        self._alias_count = 0
+        self._aliases = AliasStore(alias_path if alias_path is not None else _ALIAS_PATH)
+        self._publication_lock = asyncio.Lock()
 
     def on_answer(self, cb: DestCallback) -> None:
         self._callback = cb
@@ -127,83 +125,90 @@ class PolicyDnsService:
     def is_listening(self, policy_id: int) -> bool:
         return policy_id in self._stubs
 
-    def _origins(self, key: AliasKey) -> set[DomainChain]:
-        now = monotonic()
-        return {
-            origin for origin, expires in self._alias_origins.get(key, {}).items() if expires > now
-        }
-
-    def _remember_aliases(
-        self, key: AliasKey, origins: set[DomainChain], targets: AliasTargets
-    ) -> None:
-        policy_id, rdclass, _ = key
-        now = monotonic()
-        entries = {(policy_id, rdclass, name): ttl for name, ttl in targets.items()}
-        if self._alias_count + len(entries) * len(origins) > _MAX_ALIAS_ORIGINS:
-            for alias, known in list(self._alias_origins.items()):
-                live = {origin: expires for origin, expires in known.items() if expires > now}
-                self._alias_count -= len(known) - len(live)
-                if live:
-                    self._alias_origins[alias] = live
-                else:
-                    del self._alias_origins[alias]
-            available = _MAX_ALIAS_ORIGINS - self._alias_count
-            for alias in entries:
-                available -= len(origins.difference(self._alias_origins.get(alias, {})))
-                if available < 0:
-                    raise RuntimeError("DNS alias tracking capacity exceeded")
-
-        for alias, ttl in entries.items():
-            known = self._alias_origins.setdefault(alias, {})
-            # A zero-TTL binding can still be followed within the same resolution.
-            expires = now + (ttl or _RESOLVE_TIMEOUT)
-            for origin in origins:
-                if origin not in known:
-                    self._alias_count += 1
-                known[origin] = max(known.get(origin, 0), expires)
-
     async def _publish(
         self,
         plan: PolicyPlan,
         response: dns.message.Message,
-        inherited: set[DomainChain],
-    ) -> tuple[set[DomainChain], AliasTargets] | None:
-        if (
-            not isinstance(response, dns.message.QueryMessage)
-            or response.rcode() != dns.rcode.NOERROR
+        inherited: Origins,
+        key: AliasKey,
+    ) -> None:
+        if not isinstance(response, dns.message.QueryMessage) or response.rcode() not in (
+            dns.rcode.NOERROR,
+            dns.rcode.NXDOMAIN,
         ):
-            return None
-        question = response.question[0]
+            return
         chain = response.resolve_chaining()
-        dests, targets = _destinations(plan.policy_id, response, chain)
-        # A client can follow a CNAME separately or refresh its shorter-lived address.
-        if not inherited and question.rdtype not in _ALIAS_QUERY_TYPES:
-            targets.clear()
-        if not dests and not targets:
-            return None
+        paths = _answer_paths(response, chain)
+        if not paths.addresses and not paths.aliases:
+            return
         if self._matcher_factory is None:
             if plan.dests is not None:
                 raise RuntimeError("DNS destination matching is unavailable")
-            return None
+            return
         matcher = self._matcher_factory()
         if isinstance(matcher, _ScopedMatcher):
             matcher = matcher.scoped(plan.policy_id)
-        matches: dict[DomainChain, int] = {}
-        for origin in inherited:
-            if (winner := _match_chain(matcher, origin)) is not None:
-                matches[origin] = winner
-        if not matches:
-            domains = _chain_domains(chain)
-            winner = _match_chain(matcher, domains)
-            if winner is None:
-                return None
-            matches[domains] = winner
-            targets.pop(question.name, None)
-        if dests:
+        prefixes = inherited or {(): float("inf")}
+        owners: dict[IPv4Network | IPv6Network, int | None] = {}
+        for path, addresses in paths.addresses.items():
+            winners = {_match_chain(matcher, prefix + path) for prefix in prefixes}
+            # The same question might be a direct lookup. A cached exclusion
+            # must never remove a policy that protects the endpoint on its own.
+            if inherited and (direct := _match_chain(matcher, path)) is not None:
+                winners.add(direct)
+            if len(winners) != 1:
+                raise RuntimeError("shared DNS alias has conflicting routing policies")
+            winner = winners.pop()
+            for address in addresses:
+                if owners.setdefault(address, winner) != winner:
+                    raise RuntimeError("shared DNS address has conflicting routing policies")
+        for policy_id in set(owners.values()):
+            if policy_id is None:
+                continue
             if self._callback is None:
                 raise RuntimeError("DNS destination publication is unavailable")
-            await self._callback(replace(dests, policy_id=min(matches.values())))
-        return (set(matches), targets) if targets else None
+            await self._callback(
+                DestSet(
+                    policy_id,
+                    frozenset(
+                        a
+                        for a, owner in owners.items()
+                        if owner == policy_id and isinstance(a, IPv4Network)
+                    ),
+                    frozenset(
+                        a
+                        for a, owner in owners.items()
+                        if owner == policy_id and isinstance(a, IPv6Network)
+                    ),
+                )
+            )
+
+        # Even an unmatched prefix can contain an exclusion for the next hop.
+        if not paths.aliases:
+            return
+        rows: AliasRows = {}
+        now = time()
+        for path, ttl in paths.aliases.items():
+            if inherited and _match_chain(matcher, path) is not None:
+                # A standalone protected lookup can itself return another alias.
+                rows[path[-1], path[:-1]] = now + ttl
+            for prefix, parent_expires in prefixes.items():
+                combined = prefix + path
+                if len(combined) > 128 or len(set(combined)) != len(combined):
+                    raise RuntimeError("cyclic or oversized DNS alias chain")
+                rows[path[-1], combined[:-1]] = min(now + ttl, parent_expires)
+                if len(rows) > _MAX_ALIAS_ORIGINS:
+                    raise RuntimeError("DNS alias tracking capacity exceeded")
+        await asyncio.to_thread(self._aliases.remember, key, rows, time(), _MAX_ALIAS_ORIGINS)
+        # Cap the actual records that supplied the references, wherever they
+        # appeared in the reply. Clients start their TTL clocks after this write.
+        released = time()
+        inherited_until = min(prefixes.values())
+        for path, rrset in paths.records:
+            expires = min(now + paths.aliases[path], inherited_until)
+            if expires <= released:
+                raise RuntimeError("DNS alias expired before reply")
+            rrset.ttl = min(rrset.ttl, int(expires - released))
 
 
 class _Stub(asyncio.DatagramProtocol):
@@ -290,22 +295,20 @@ class _Stub(asyncio.DatagramProtocol):
         plan = self.plan
         generation = self._generation
         question = query.question[0]
-        key = (plan.policy_id, question.rdclass, question.name)
-        follows_alias = question.rdtype in _ALIAS_QUERY_TYPES
-        inherited = self.service._origins(key) if follows_alias else set()
+        key: AliasKey = (plan.policy_id, question.rdclass, _domain(question.name))
         try:
             async with asyncio.timeout(_RESOLVE_TIMEOUT):
+                inherited = await asyncio.to_thread(self.service._aliases.origins, key, time())
                 response = await self._resolve(plan, query)
-                if self._generation == generation:
-                    if follows_alias:
-                        inherited.update(self.service._origins(key))
-                    aliases = await self.service._publish(plan, response, inherited)
+                async with self.service._publication_lock:
+                    inherited.update(
+                        await asyncio.to_thread(self.service._aliases.origins, key, time())
+                    )
                     if self._generation == generation:
+                        await self.service._publish(plan, response, inherited, key)
                         response.id = query.id
-                        wire = self._to_wire(response, query, tcp)
-                        if aliases is not None:
-                            self.service._remember_aliases(key, *aliases)
-                        return wire
+                        if self._generation == generation:
+                            return self._to_wire(response, query, tcp)
         except asyncio.CancelledError:
             if self._closed or self._generation == generation:
                 raise
@@ -339,12 +342,8 @@ def _error(query: dns.message.Message, code: dns.rcode.Rcode) -> dns.message.Mes
     return response
 
 
-def _chain_domains(chain: dns.message.ChainingResult) -> DomainChain:
-    names = [rrset.name for rrset in chain.cnames]
-    names.append(chain.canonical_name)
-    if chain.answer is not None and chain.answer.rdtype == dns.rdatatype.CNAME:
-        names.extend(record.target for record in chain.answer if isinstance(record, CNAME))
-    return tuple(name.canonicalize().to_text(omit_final_dot=True) for name in names)
+def _domain(name: dns.name.Name) -> str:
+    return name.canonicalize().to_text(omit_final_dot=True)
 
 
 def _match_chain(matcher: RuleMatcher, domains: DomainChain) -> int | None:
@@ -355,106 +354,115 @@ def _match_chain(matcher: RuleMatcher, domains: DomainChain) -> int | None:
     return min((policy_id for policy_id in matches if policy_id is not None), default=None)
 
 
-def _service_bindings(
-    answer: RRset,
-    additional: dict[dns.name.Name, list[RRset]],
-    related: set[dns.name.Name],
-    targets: AliasTargets,
-) -> Iterator[SVCBBase]:
-    """Follow in-message AliasMode and CNAME records to ServiceMode bindings."""
-    pending = [answer.name]
-    visited: set[dns.name.Name] = set()
-    while pending:
-        name = pending.pop()
-        if name in visited:
-            continue
-        visited.add(name)
-        related.add(name)
-        bindings: list[SVCBBase] = []
-        ttl = 0
-        rrsets = [answer] if name == answer.name else additional.get(name, [])
-        for rrset in rrsets:
-            if rrset.rdtype == answer.rdtype:
-                bindings.extend(record for record in rrset if isinstance(record, SVCBBase))
-                ttl = max(ttl, rrset.ttl)
-            elif rrset.rdtype == dns.rdatatype.CNAME:
-                pending.extend(record.target for record in rrset if isinstance(record, CNAME))
+@dataclass
+class _AnswerPaths:
+    # The last name is the target. Every earlier link bounds its lifetime.
+    aliases: dict[DomainChain, float] = field(default_factory=dict)
+    records: list[tuple[DomainChain, RRset]] = field(default_factory=list)
+    addresses: dict[DomainChain, set[IPv4Network | IPv6Network]] = field(
+        default_factory=lambda: defaultdict(set)
+    )
 
-        aliases = [record.target for record in bindings if record.priority == 0]
-        if aliases:
-            # RFC 9460 §2.4.1 gives AliasMode precedence over ServiceMode.
-            for target in aliases:
-                if target != dns.name.root:
-                    targets[target] = max(targets.get(target, 0), ttl)
-                    pending.append(target)
-        else:
-            for record in bindings:
-                target = name if record.target == dns.name.root else record.target
-                targets[target] = max(targets.get(target, 0), ttl)
-                related.add(target)
-                yield record
+    def extend(self, path: DomainChain, target: dns.name.Name, rrset: RRset) -> DomainChain:
+        name = _domain(target)
+        if name in path or len(path) >= 128:
+            raise ValueError("cyclic or oversized DNS alias chain")
+        extended = (*path, name)
+        self.aliases[extended] = min(
+            self.aliases.get(path, float("inf")), rrset.ttl or _RESOLVE_TIMEOUT
+        )
+        self.records.append((extended, rrset))
+        if len(self.aliases) > _MAX_ALIAS_ORIGINS:
+            raise ValueError("too many DNS alias paths")
+        return extended
 
 
-def _destinations(
-    policy_id: int, response: dns.message.QueryMessage, chain: dns.message.ChainingResult
-) -> tuple[DestSet, AliasTargets]:
-    """Collect the answer, service hints, and addresses for referenced names."""
+def _referral(
+    response: dns.message.QueryMessage, chain: dns.message.ChainingResult
+) -> RRset | None:
+    """A delegation names the servers for the closest enclosing zone."""
+    if chain.answer is not None or response.rcode() != dns.rcode.NOERROR:
+        return None
+    rrclass = response.question[0].rdclass
+    enclosing = [
+        rrset
+        for rrset in response.authority
+        if rrset.rdclass == rrclass and chain.canonical_name.is_subdomain(rrset.name)
+    ]
+    if any(rrset.rdtype == dns.rdatatype.SOA for rrset in enclosing):
+        return None
+    return max(
+        (rrset for rrset in enclosing if rrset.rdtype == dns.rdatatype.NS),
+        key=lambda rrset: len(rrset.name),
+        default=None,
+    )
+
+
+def _answer_paths(
+    response: dns.message.QueryMessage, chain: dns.message.ChainingResult
+) -> _AnswerPaths:
+    """Keep the name path for each returned address, including service hints."""
     question = response.question[0]
-    if question.rdtype == dns.rdatatype.ANY:
-        answers = [
-            rrset
-            for rrset in response.answer
-            if rrset.name == chain.canonical_name and rrset.rdclass == question.rdclass
-        ]
-    else:
-        answers = [chain.answer] if chain.answer is not None else []
-    v4: set[IPv4Network] = set()
-    v6: set[IPv6Network] = set()
-    related = {chain.canonical_name}
-    targets: AliasTargets = {}
+    paths = _AnswerPaths()
+    path: DomainChain = (_domain(question.name),)
     for rrset in chain.cnames:
-        for record in rrset:
-            if isinstance(record, CNAME):
-                targets[record.target] = max(targets.get(record.target, 0), rrset.ttl)
-    additional: dict[dns.name.Name, list[RRset]] = defaultdict(list)
+        path = paths.extend(path, next(iter(rrset)).target, rrset)
+
+    additional: dict[str, list[RRset]] = defaultdict(list)
     for rrset in response.additional:
         if rrset.rdclass == question.rdclass:
-            additional[rrset.name].append(rrset)
-
-    for rrset in answers:
-        if rrset.rdtype == dns.rdatatype.A:
-            v4.update(IPv4Network(str(record)) for record in rrset)
-        elif rrset.rdtype == dns.rdatatype.AAAA:
-            v6.update(IPv6Network(str(record)) for record in rrset)
-        elif rrset.rdtype in (dns.rdatatype.HTTPS, dns.rdatatype.SVCB):
-            for record in _service_bindings(rrset, additional, related, targets):
-                hint4 = record.params.get(ParamKey.IPV4HINT)
-                hint6 = record.params.get(ParamKey.IPV6HINT)
-                if isinstance(hint4, IPv4HintParam):
-                    v4.update(IPv4Network(address) for address in hint4.addresses)
-                if isinstance(hint6, IPv6HintParam):
-                    v6.update(IPv6Network(address) for address in hint6.addresses)
-        else:
-            for record in rrset:
-                if isinstance(record, (CNAME, NS, SRV)):
-                    related.add(record.target)
-                    if isinstance(record, CNAME):
-                        targets[record.target] = max(targets.get(record.target, 0), rrset.ttl)
-                elif isinstance(record, MX):
-                    related.add(record.exchange)
-
-    pending = list(related)
+            additional[_domain(rrset.name)].append(rrset)
+    answers = [
+        rrset
+        for rrset in response.answer
+        if rrset.name == chain.canonical_name
+        and rrset.rdclass == question.rdclass
+        and (question.rdtype == dns.rdatatype.ANY or rrset.rdtype == question.rdtype)
+    ]
+    if not answers and (referral := _referral(response, chain)) is not None:
+        answers.append(referral)
+    pending = [(path, [*answers, *additional[path[-1]]])]
+    visited: set[DomainChain] = set()
     while pending:
-        for rrset in additional.get(pending.pop(), []):
-            if rrset.rdtype == dns.rdatatype.A:
-                v4.update(IPv4Network(str(record)) for record in rrset)
-            elif rrset.rdtype == dns.rdatatype.AAAA:
-                v6.update(IPv6Network(str(record)) for record in rrset)
-            elif rrset.rdtype == dns.rdatatype.CNAME:
-                for record in rrset:
-                    if isinstance(record, CNAME):
-                        targets[record.target] = max(targets.get(record.target, 0), rrset.ttl)
-                        if record.target not in related:
-                            related.add(record.target)
-                            pending.append(record.target)
-    return DestSet(policy_id, frozenset(v4), frozenset(v6)), targets
+        path, records = pending.pop()
+        if path in visited:
+            continue
+        visited.add(path)
+        for rrset in records:
+            aliases = any(isinstance(r, SVCBBase) and r.priority == 0 for r in rrset)
+            for record in rrset:
+                if rrset.rdtype == dns.rdatatype.A:
+                    paths.addresses[path].add(IPv4Network(str(record)))
+                    continue
+                if rrset.rdtype == dns.rdatatype.AAAA:
+                    paths.addresses[path].add(IPv6Network(str(record)))
+                    continue
+                if isinstance(record, SVCBBase):
+                    if aliases and record.priority != 0:
+                        continue
+                    target = record.target
+                    if not record.priority and target == dns.name.root:
+                        continue
+                elif isinstance(record, (CNAME, NS, SRV)):
+                    target = record.target
+                elif isinstance(record, MX):
+                    target = record.exchange
+                else:
+                    continue
+
+                endpoint = path
+                if target != dns.name.root and _domain(target) != path[-1]:
+                    endpoint = paths.extend(path, target, rrset)
+                    pending.append((endpoint, additional[endpoint[-1]]))
+                elif isinstance(record, CNAME) or (
+                    isinstance(record, SVCBBase) and not record.priority
+                ):
+                    raise ValueError("cyclic DNS alias")
+                if isinstance(record, SVCBBase) and record.priority:
+                    hint4 = record.params.get(ParamKey.IPV4HINT)
+                    hint6 = record.params.get(ParamKey.IPV6HINT)
+                    if isinstance(hint4, IPv4HintParam):
+                        paths.addresses[endpoint].update(IPv4Network(a) for a in hint4.addresses)
+                    if isinstance(hint6, IPv6HintParam):
+                        paths.addresses[endpoint].update(IPv6Network(a) for a in hint6.addresses)
+    return paths
