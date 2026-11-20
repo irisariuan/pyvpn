@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "mypy>=1.10", "ruff>=0.5"]
+dev = ["pytest>=8", "mypy>=1.10", "ruff==0.17.6"]
 
 [project.scripts]
 pyvpn = "pyvpn.cli:main"
@@ -27,6 +27,8 @@ packages = ["src/pyvpn"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Docs are not code: keep hand-aligned examples in PLAN.md / WORKSTREAMS.md.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
