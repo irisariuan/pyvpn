@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import socket
 from collections.abc import Sequence
 
@@ -13,21 +14,31 @@ def parse_probe(endpoint: str) -> tuple[str, int]:
     host, separator, port_text = endpoint.rpartition(":")
     if not separator or not host or not port_text:
         raise ValueError(f"invalid probe endpoint: {endpoint!r}")
+    try:
+        address = ipaddress.ip_address(host.strip("[]"))
+    except ValueError as exc:
+        raise ValueError("probe targets must use IP literals") from exc
     port = int(port_text)
     if not 1 <= port <= 65535:
         raise ValueError(f"invalid probe port: {port}")
-    return host.strip("[]"), port
+    return str(address), port
 
 
 def tcp_probe(interface: str, host: str, port: int, timeout: float = 3.0) -> bool:
     """Return whether a TCP connection succeeds while bound to interface."""
 
+    ipaddress.ip_address(host)
     try:
-        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        addresses = socket.getaddrinfo(
+            host,
+            port,
+            type=socket.SOCK_STREAM,
+            flags=socket.AI_NUMERICHOST,
+        )
     except socket.gaierror:
         return False
 
-    for family, sock_type, proto, _canonical, address in addresses:
+    for family, sock_type, proto, _, address in addresses:
         sock = socket.socket(family, sock_type, proto)
         try:
             sock.settimeout(timeout)

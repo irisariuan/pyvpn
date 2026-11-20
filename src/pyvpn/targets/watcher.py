@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from pyvpn.config.models import Target
 from pyvpn.state import IPAddress, TargetStatus
-from pyvpn.targets.resolver import resolve_interface
+from pyvpn.targets.resolver import resolve_interfaces
 
 
 @dataclass(frozen=True)
@@ -25,9 +25,14 @@ def status_for_target(
 ) -> TargetStatus:
     """Build one target status from a point-in-time interface snapshot."""
 
+    if target.probe:
+        raise NotImplementedError(
+            f"target {target.name!r} enables probing, which is not supported yet"
+        )
+
     snapshots = tuple(interfaces)
-    interface = resolve_interface(target.interface, (snapshot.name for snapshot in snapshots))
-    if interface is None:
+    matches = resolve_interfaces(target.interface, (item.name for item in snapshots))
+    if not matches:
         return TargetStatus(
             name=target.name,
             interface=None,
@@ -35,7 +40,9 @@ def status_for_target(
             usable=False,
         )
 
-    snapshot = next(item for item in snapshots if item.name == interface)
+    snapshots_by_name = {item.name: item for item in snapshots}
+    candidates = [snapshots_by_name[name] for name in matches if name in snapshots_by_name]
+    snapshot = next((item for item in candidates if item.up and item.addresses), candidates[0])
     gateway = target.gateway
     if gateway == "auto":
         gateway = snapshot.gateway
