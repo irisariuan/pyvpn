@@ -80,7 +80,7 @@ def test_regex_error_text() -> None:
 
 def test_regex_rejects_non_re2() -> None:
     # Python's re accepts these, RE2 (snake) does not.
-    for bad in [r"/(?=a)b/", r"/(a)\1/", r"/(?<!x)y/"]:
+    for bad in [r"/(?=a)b/", r"/(a)\1/", r"/(?<!x)y/", r"/(?>ab)c/", r"/a*+b/", r"/(a|b)++/"]:
         with pytest.raises(RuleError):
             parse(bad)
 

@@ -7,6 +7,7 @@ order and the first one whose rules route a name wins.
 Per policy, as in snake: ``!rule`` exempts a name from that policy (later
 policies are still tried); ``drop:`` claims the name for the policy but does
 not route it (blocking needs a drop set in the backend, not built yet);
+``build_matcher`` refuses to activate ``drop:`` rules until blocking exists;
 ``session:``, ``route:`` and ``drop[...]:`` sessions are per device in snake
 and not supported here yet (PLAN.md §4): they route nothing and ``check``
 reports them. The names in an ``if:`` condition are routed like plain rules,
@@ -21,15 +22,21 @@ from ipaddress import IPv4Network, IPv6Network, ip_network
 from typing import Literal
 
 from pyvpn.config.models import Config, Policy
+from pyvpn.match.asn import AsnCache
 from pyvpn.match.pattern import RuleError, parse_asn, parse_cidr
 from pyvpn.match.route import group
 from pyvpn.match.ruleset import LineError, Result, RuleSet
+from pyvpn.services import RuleMatcherFactory
 from pyvpn.state import DestSet
 
 AsnResolver = Callable[[int], Iterable[str]]
 """ASN -> announced prefixes, e.g. ``AsnCache.cached`` (must not block long)."""
 
 Action = Literal["route", "drop", "none"]
+
+
+class RuleConfigError(ValueError):
+    """A config's destination rules cannot be activated as they are."""
 
 
 def normalize_name(name: str) -> str:
@@ -178,6 +185,30 @@ class PolicyMatcher:
         """Every ASN the config refers to (for refreshing the cache)."""
         return list(dict.fromkeys(a for pr in self.policies for a in pr.asns))
 
+    def problems(self) -> list[str]:
+        """Why these rules cannot be activated; empty when they can.
+
+        Rejected: rules that do not parse (a typo would leave traffic
+        outside its policy), ``drop:`` rules (they claim a name but nothing
+        blocks it yet, so it would take the host route) and ASNs with no
+        prefixes (the policy would silently match nothing).
+        """
+        out: list[str] = []
+        for pr in self.policies:
+            where = f"policy {pr.name!r}"
+            out += [f"{where} rule {e.index + 1}: {e.error}: {e.rule}" for e in pr.errors]
+            r = pr.rules
+            drops = [p.raw for p in r.drop]
+            drops += [f"drop:asn:{a}" for a in r.drop_asns]
+            drops += [f"drop:cidr:{c}" for c in r.drop_cidrs]
+            out += [f"{where}: drop: rules are not enforced yet: {d}" for d in drops]
+            for a in pr.asns:
+                if self._asn_prefixes is None:
+                    out.append(f"{where}: asn:{a} needs the ASN cache")
+                elif not list(self._asn_prefixes(a)):
+                    out.append(f"{where}: asn:{a} has no cached prefixes; refresh the ASN cache")
+        return out
+
     def bases(self, policy_id: int) -> list[str]:
         """Domain suffixes whose DNS the policy's rules need (see RuleSet.bases)."""
         for pr in self.policies:
@@ -186,9 +217,28 @@ class PolicyMatcher:
         return []
 
 
-def build_matcher(config: Config) -> PolicyMatcher:
-    """``RuleMatcherFactory``: a matcher without ASN prefixes."""
-    return PolicyMatcher.from_config(config)
+def build_matcher(config: Config, asn_cache: AsnCache | None = None) -> PolicyMatcher:
+    """``RuleMatcherFactory``: the matcher the daemon activates.
+
+    ASN prefixes come from ``asn_cache`` (cached only, never fetched). Raises
+    ``RuleConfigError`` listing every rule that cannot be activated, so a
+    config load or reload fails instead of routing less than configured.
+    ``pyvpn rules check`` uses the lenient ``PolicyMatcher.from_config``.
+    """
+    matcher = PolicyMatcher.from_config(config, asn_cache.cached if asn_cache else None)
+    problems = matcher.problems()
+    if problems:
+        raise RuleConfigError("cannot activate destination rules:\n  " + "\n  ".join(problems))
+    return matcher
+
+
+def matcher_factory(asn_cache: AsnCache | None) -> RuleMatcherFactory:
+    """A ``RuleMatcherFactory`` that resolves ASNs from ``asn_cache``."""
+
+    def factory(config: Config) -> PolicyMatcher:
+        return build_matcher(config, asn_cache)
+
+    return factory
 
 
 def policy_rules(policy_id: int, policy: Policy) -> PolicyRules:

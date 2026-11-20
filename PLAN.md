@@ -253,8 +253,10 @@ inspector does.
 
 Rule semantics (`match/policy.py`): policies are tried in config order and
 the first whose rules route a name wins; `!rule` exempts a name from that
-policy only. `drop:` rules parse and claim a name for their policy but are
-not enforced yet (that needs a drop set in the backend contract). snake's
+policy only. `drop:` rules parse but are not enforced yet (that needs a
+drop set in the backend contract), so the daemon refuses to load a config
+that has them. It also refuses rules that do not parse and `asn:` entries
+with no cached prefixes; `pyvpn rules check` reports all three. snake's
 per-device rules (`session:`, `route:`, `drop[...]:`, `if:` branches) parse
 but route nothing; only the names in an `if:` condition are routed, as in
 snake. `pyvpn rules check` warns about these. snake's Domain VPN Routing

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from pyvpn.config.models import Config
-from pyvpn.match import PolicyMatcher, build_matcher
+from pyvpn.match import PolicyMatcher, RuleConfigError, build_matcher, matcher_factory
 from pyvpn.match.asn import AsnCache, AsnError, parse_ripe
 from pyvpn.rulefile import commands
 from pyvpn.services import RuleMatcher, RuleMatcherFactory
@@ -34,10 +34,45 @@ CFG = _config(
 )  # fmt: skip
 
 
+ACTIVE = _config(
+    {"name": "stream", "targets": ["jp"], "domains": ["netflix.com", "cidr:23.246.0.0/18"]},
+)
+
+
 def test_is_a_rule_matcher() -> None:
     factory: RuleMatcherFactory = build_matcher
-    m: RuleMatcher = factory(CFG)
-    assert m.match("www.netflix.com") == 2
+    m: RuleMatcher = factory(ACTIVE)
+    assert m.match("www.netflix.com") == 1
+
+
+def test_runtime_rejects_unparsable_rules() -> None:
+    cfg = _config({"name": "p", "targets": ["jp"], "domains": ["ok.example", "bad domain"]})
+    with pytest.raises(RuleConfigError, match=r"policy 'p' rule 2: .*bad domain"):
+        build_matcher(cfg)
+
+
+def test_runtime_rejects_unenforced_drop_rules() -> None:
+    cfg = _config(
+        {"name": "a", "targets": ["jp"], "domains": ["drop:ads.tv"]},
+        {"name": "b", "targets": ["jp"], "domains": ["ads.tv"]},
+    )
+    # Leniently built, the drop claims the name and policy "b" never sees it.
+    assert PolicyMatcher.from_config(cfg).match("x.ads.tv") is None
+    with pytest.raises(RuleConfigError, match=r"policy 'a': drop: .*drop:ads\.tv"):
+        build_matcher(cfg)
+
+
+def test_runtime_asn_rules_use_the_cache(tmp_path: Path) -> None:
+    cfg = _config({"name": "asn-only", "targets": ["jp"], "domains": ["asn:AS2906"]})
+    with pytest.raises(RuleConfigError, match="asn:2906 needs the ASN cache"):
+        build_matcher(cfg)
+    cache = AsnCache(tmp_path, fetch=lambda url: _ripe("198.38.96.0/19"))
+    factory = matcher_factory(cache)
+    with pytest.raises(RuleConfigError, match="asn:2906 has no cached prefixes"):
+        factory(cfg)
+    cache.prefixes(2906)
+    [ds] = factory(cfg).static_sets()
+    assert ds.policy_id == 1 and ds.v4 == {ip_network("198.38.96.0/19")}
 
 
 def test_first_policy_wins_and_exclusions_fall_through() -> None:

@@ -367,6 +367,8 @@ _UNSUPPORTED = {
     sre_parse.ASSERT_NOT: "lookaround",
     sre_parse.GROUPREF: "backreferences",
     sre_parse.GROUPREF_EXISTS: "conditional groups",
+    sre_parse.ATOMIC_GROUP: "atomic groups",
+    sre_parse.POSSESSIVE_REPEAT: "possessive quantifiers",
 }
 
 

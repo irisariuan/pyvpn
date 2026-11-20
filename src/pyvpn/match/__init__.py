@@ -16,7 +16,14 @@ from pyvpn.match.pattern import (
     parse_cidr,
     strip_comment,
 )
-from pyvpn.match.policy import Decision, PolicyMatcher, PolicyRules, build_matcher
+from pyvpn.match.policy import (
+    Decision,
+    PolicyMatcher,
+    PolicyRules,
+    RuleConfigError,
+    build_matcher,
+    matcher_factory,
+)
 from pyvpn.match.route import (
     Action,
     CondHit,
@@ -43,6 +50,7 @@ __all__ = [
     "PolicyRules",
     "Result",
     "Route",
+    "RuleConfigError",
     "RuleError",
     "RuleSet",
     "Step",
@@ -51,6 +59,7 @@ __all__ = [
     "group",
     "is_legacy_route",
     "is_route",
+    "matcher_factory",
     "normalize",
     "parse",
     "parse_asn",
