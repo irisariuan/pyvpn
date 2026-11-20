@@ -115,3 +115,55 @@ async def test_event_queued_during_scan_is_handled(tmp_path: Path) -> None:
     watcher.scan = scan_then_start  # type: ignore[method-assign]
     await watcher.run(events())
     assert place.placed == [(43, 1)]
+
+
+async def test_buffer_overrun_resubscribes_and_rescans(tmp_path: Path) -> None:
+    import errno
+
+    place = Recorder()
+    opened: list[str] = []
+
+    class FakeSubscription:
+        def __init__(self, overrun: bool) -> None:
+            self.overrun = overrun
+
+        async def __aiter__(self) -> AsyncIterator[int]:
+            if self.overrun:
+                # The kernel dropped events: PID 43 started, but no event arrives.
+                fake_process(tmp_path, 43)
+                raise OSError(errno.ENOBUFS, "No buffer space available")
+            for pid in ():
+                yield pid
+
+        def close(self) -> None:
+            opened.append("closed")
+
+    async def subscribe() -> FakeSubscription:
+        opened.append("opened")
+        return FakeSubscription(overrun=len(opened) == 1)
+
+    watcher = ProcessWatcher([POLICY], place, proc_root=tmp_path)
+    await watcher.run_subscribed(subscribe)
+    assert place.placed == [(43, 1)]  # found by the rescan after resubscribing
+    assert opened == ["opened", "closed", "opened", "closed"]
+
+
+async def test_other_event_errors_still_propagate(tmp_path: Path) -> None:
+    import errno
+
+    import pytest
+
+    class Broken:
+        async def __aiter__(self) -> AsyncIterator[int]:
+            raise OSError(errno.EBADF, "Bad file descriptor")
+            yield 0
+
+        def close(self) -> None:
+            pass
+
+    async def subscribe() -> Broken:
+        return Broken()
+
+    watcher = ProcessWatcher([POLICY], Recorder(), proc_root=tmp_path)
+    with pytest.raises(OSError, match="Bad file descriptor"):
+        await watcher.run_subscribed(subscribe)

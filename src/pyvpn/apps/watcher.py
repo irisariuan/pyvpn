@@ -7,9 +7,11 @@ fully testable without opening privileged netlink sockets.
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
-from collections.abc import AsyncIterable, Awaitable, Callable, Iterable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Iterable
 from pathlib import Path
+from typing import Protocol
 
 from pyvpn.apps.cgroups import CgroupError
 from pyvpn.apps.selectors import SelectorMatcher, read_process
@@ -18,6 +20,14 @@ from pyvpn.constants import policy_cgroup
 
 log = logging.getLogger(__name__)
 Place = Callable[[int, int], Awaitable[None]]
+
+
+class Subscription(Protocol):
+    """An open process-event subscription (``ProcExecEvents``)."""
+
+    def __aiter__(self) -> AsyncIterator[int]: ...
+
+    def close(self) -> None: ...
 
 
 class ProcessWatcher:
@@ -94,11 +104,26 @@ class ProcessWatcher:
         """Subscribe to Linux PROC_EVENT_EXEC events, then scan and watch."""
         from pyvpn.apps.proc_connector import ProcExecEvents
 
-        events = await ProcExecEvents.open()
-        try:
-            await self.run(events)
-        finally:
-            events.close()
+        await self.run_subscribed(ProcExecEvents.open)
+
+    async def run_subscribed(self, subscribe: Callable[[], Awaitable[Subscription]]) -> None:
+        """Watch events from ``subscribe()``, recovering from buffer overruns.
+
+        When the kernel drops events because the socket buffer overflowed
+        (``ENOBUFS``), the subscription is reopened and ``/proc`` rescanned,
+        so processes whose events were lost are still placed.
+        """
+        while not self._stopped.is_set():
+            events = await subscribe()
+            try:
+                await self.run(events)
+                return
+            except OSError as exc:
+                if exc.errno != errno.ENOBUFS:
+                    raise
+                log.warning("process events overran the socket buffer; resubscribing")
+            finally:
+                events.close()
 
     def stop(self) -> None:
         self._stopped.set()
