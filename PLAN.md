@@ -352,6 +352,13 @@ The daemon locks its socket's companion lock file before changing routing
 and holds the lock through shutdown. It binds the API socket during startup
 and begins serving requests after the initial install attempt.
 
+`pyvpn disable` removes every rule and stub and stays in effect, across
+daemon restarts (the enabled flag is in the daemon's state file), until the
+API's `enable` call. `reload` while disabled loads and binds the new config
+but installs nothing; it never re-enables routing on its own. While
+disabled, `place_pid` returns `unavailable` and `status` reports each
+policy as `not_installed`.
+
 ## 7. Milestones
 
 | # | Milestone | Done when |

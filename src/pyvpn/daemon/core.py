@@ -149,8 +149,7 @@ class Daemon:
         static = self._matcher_factory(config).static_sets() if self._matcher_factory else []
         old = self.reconciler.config
         old_slots = self._cgroup_policy_names
-        was_enabled = self.reconciler.enabled
-        enabled = was_enabled or reload
+        enabled = self.reconciler.enabled  # reload never changes it (see ``enable``)
         saved = False
         staged: dict[int, AppBinding] = {}
         try:
@@ -161,7 +160,7 @@ class Daemon:
                 for pid, policy in enumerate(config.policies, start=1)
                 if policy.apps or staged[pid].cgroup_paths
             }
-            if slots != old_slots or enabled != was_enabled:
+            if slots != old_slots:
                 self._save_state(enabled=enabled, slots=slots)
                 saved = True
             if reload:
@@ -174,7 +173,7 @@ class Daemon:
         except Exception:
             if saved:
                 try:
-                    self._save_state(enabled=was_enabled, slots=old_slots)
+                    self._save_state(enabled=enabled, slots=old_slots)
                 except OSError:
                     # Keep the saved reservations if restoring the file fails.
                     log.exception("could not restore previous daemon state")
@@ -256,6 +255,10 @@ class Daemon:
         if method == "disable":
             self._require_admin(peer)
             await self.disable()
+            return None
+        if method == "enable":
+            self._require_admin(peer)
+            await self.enable()
             return None
         if method == "audit":
             if self._audit is None:
@@ -346,6 +349,11 @@ class Daemon:
         raise ApiError("not_found", f"no policy {ref!r}")
 
     async def reload(self) -> None:
+        """Swap in the config file's current contents.
+
+        Reload never changes the enabled state: after ``disable`` the new
+        config is bound but nothing is installed until ``enable``.
+        """
         try:
             config = self._load()
         except Exception as e:
@@ -357,13 +365,20 @@ class Daemon:
             except Exception as e:
                 log.exception("reload failed; previous config kept")
                 raise ApiError("internal", f"reload failed, previous config kept: {e}") from None
-            if not self.reconciler.enabled:
-                await self.reconciler.enable()
 
     async def disable(self) -> None:
         async with self._config_lock:
             await self.reconciler.disable()
             self._save_state(enabled=False, slots=self._cgroup_policy_names)
+
+    async def enable(self) -> None:
+        """Undo ``disable``. A failed apply is retried in the background
+        (``status`` shows ``not_installed`` and ``last_error`` meanwhile)."""
+        async with self._config_lock:
+            if self.reconciler.enabled:
+                return
+            self._save_state(enabled=True, slots=self._cgroup_policy_names)
+            await self.reconciler.enable()
 
     def _save_state(self, *, enabled: bool, slots: dict[int, str]) -> None:
         if self._store is not None:

@@ -261,7 +261,7 @@ async def test_admin_methods_need_root(rig: Rig) -> None:
     await rig.daemon.start()
     if os.geteuid() == USER.uid:
         pytest.skip("test user uid collides with daemon uid")
-    for m in ("reload", "disable"):
+    for m in ("reload", "disable", "enable"):
         with pytest.raises(ApiError) as e:
             await rig.daemon.handle(m, {}, USER)
         assert e.value.code == "forbidden"
@@ -279,9 +279,39 @@ async def test_disable_persists_across_restart(rig: Rig) -> None:
     rig.daemon = rig.new_daemon()
     await rig.daemon.start()
     assert len(rig.backend.plans) == plans  # stays disabled
-    await rig.daemon.handle("reload", {}, ROOT)  # reload re-enables
+    await rig.daemon.handle("enable", {}, ROOT)
     assert len(rig.backend.plans) == plans + 1
     assert rig.store.load().enabled
+    await rig.daemon.stop()
+
+
+async def test_reload_keeps_routing_disabled(rig: Rig) -> None:
+    await rig.daemon.start()
+    await rig.daemon.handle("disable", {}, ROOT)
+    plans = len(rig.backend.plans)
+
+    rig.config = with_changed_target(rig.config)
+    await rig.daemon.handle("reload", {}, ROOT)
+    assert rig.daemon.config is rig.config  # the new config is loaded
+    assert not rig.daemon.reconciler.enabled and rig.store.load().enabled is False
+    assert len(rig.backend.plans) == plans and rig.backend.installed is None
+    assert [p.route for p in rig.daemon.status().policies] == ["not_installed"] * 3
+    with pytest.raises(ApiError) as e:
+        await rig.daemon.handle("place_pid", {"pid": 99, "policy": "Torrents"}, ROOT)
+    assert e.value.code == "unavailable"
+
+    # A restart while disabled stays disabled too.
+    await rig.daemon.stop()
+    rig.daemon = rig.new_daemon()
+    await rig.daemon.start()
+    assert rig.backend.installed is None
+
+    await rig.daemon.handle("enable", {}, ROOT)
+    assert rig.store.load().enabled
+    assert rig.backend.installed is not None
+    assert rig.backend.installed.policies[0].target is None  # "nl" is down
+    assert rig.daemon.reconciler.applied == rig.daemon.reconciler.plan()
+    await rig.daemon.handle("enable", {}, ROOT)  # already enabled: no-op
     await rig.daemon.stop()
 
 
@@ -498,7 +528,7 @@ async def test_place_pid_unavailable_while_disabled(rig: Rig) -> None:
         await rig.daemon.handle("place_pid", {"pid": 99, "policy": "Torrents"}, ROOT)
     assert e.value.code == "unavailable"
     assert rig.apps.placed == []
-    await rig.daemon.handle("reload", {}, ROOT)  # re-enables
+    await rig.daemon.handle("enable", {}, ROOT)
     assert await rig.daemon.handle("place_pid", {"pid": 99, "policy": "Torrents"}, ROOT) == {
         "policy_id": 2
     }
