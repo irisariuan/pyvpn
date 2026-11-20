@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "snakevpn"
+version = "0.0.1"
+description = "Per-process policy routing: send each app out through a chosen interface"
+readme = "PLAN.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "pydantic>=2.6",
+    "pyroute2>=0.7",
+    "dnspython>=2.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "mypy>=1.10", "ruff==0.17.6"]
+
+[project.scripts]
+pyvpn = "pyvpn.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pyvpn"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Docs are not code: keep hand-aligned examples in PLAN.md / WORKSTREAMS.md.
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = ["pyroute2.*", "dns.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+markers = ["integration: needs root and network namespaces"]
+addopts = "-m 'not integration'"
