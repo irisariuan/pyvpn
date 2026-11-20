@@ -18,13 +18,22 @@ Key points from the plan:
 
 - Distributed on PyPI as `snakevpn`; the import package and CLI are `pyvpn`.
 - Python ≥ 3.11, `src/` layout, `pyproject.toml` with hatchling.
-- Linux first (nft `socket cgroupv2` + fwmark + `ip rule`, via `pyroute2`);
-  `proxy` mode on all OSes; signed native helpers for macOS/Windows later.
-- Platform-specific code lives under `src/pyvpn/platform/{linux,darwin,windows}/`.
-  The shared core (config, rule engine, DNS stubs, daemon, CLI) stays
-  OS-agnostic.
+- **Linux only for now** (nft `socket cgroupv2` + fwmark + `ip rule`, via
+  `pyroute2`). macOS, Windows and proxy mode are deferred; don't build them
+  unless asked.
+- Platform-specific code lives under `src/pyvpn/platform/linux/`, behind the
+  `Backend` protocol in `platform/base.py`. The shared core (config, rule
+  engine, DNS stubs, daemon, CLI) stays OS-agnostic so other OSes can be
+  added later.
 - The root daemon stays small. The CLI and `pyvpn run` run unprivileged and
   talk to the daemon over its unix socket.
+
+This is a group project built in parallel. [WORKSTREAMS.md](WORKSTREAMS.md)
+assigns each directory to a workstream. Stay inside your stream's
+directories, code against the Phase 0 contracts (`state.py`,
+`platform/base.py`, `daemon/api.py`, `config/models.py`, `constants.py`) and
+the fakes in `tests/fakes/`, and do not change a contract without approval
+from the streams that use it.
 
 ## Working rules
 

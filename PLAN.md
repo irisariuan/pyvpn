@@ -4,7 +4,7 @@
 packaged for PyPI. It is the client-side counterpart of
 [snake](https://github.com/irisariuan/snake): snake chooses a tunnel per
 *device* on a router; pyvpn chooses an **outgoing interface per process** on
-a laptop or desktop (Linux first, then macOS and Windows; see §2).
+a Linux laptop or desktop. **macOS and Windows are deferred** (§2).
 
 > "Firefox and Steam leave through `wg-jp`, qBittorrent only through `tun0`
 > with a kill switch, `ssh` to the office through `wlan1`, everything else
@@ -35,6 +35,11 @@ route, or blocks (kill switch).
   wheel, and publishes with **PyPI Trusted Publishing** (no stored token).
 
 ## 2. Platforms: Linux, macOS, Windows
+
+> **Decision (2026-11-20): Linux only for now.** macOS, Windows and proxy
+> mode (§2.2 mode 3, M6, M8, M9) are deferred. §2.1–2.4 stay as reference
+> for later. Keep the `platform/base.py` `Backend` protocol so another OS
+> can be added without touching the core.
 
 The shared core is pure Python on every OS: config, the rule engine, the
 per-policy DNS stubs, target (interface) watching, the daemon and its API,
@@ -75,9 +80,10 @@ or `auto` picks the best available mode:
    (Windows WFP filter, macOS NE filter / pf by user) to force a TCP
    fallback.
 
-**v0.x ships `transparent` on Linux and `proxy` everywhere. The native
-helpers for macOS and Windows follow as separate signed downloads that the
-Python daemon detects and drives.**
+**v0.x ships `transparent` (and `user`) on Linux only.** Proxy mode and
+the macOS / Windows native helpers are deferred; if picked up later, the
+helpers ship as separate signed downloads that the Python daemon detects and
+drives.
 
 ### 2.3 macOS: difficulties
 
@@ -318,10 +324,10 @@ src/pyvpn/
   match/        rule language (port of snake internal/match)
   rulefile/     .rules + converters
   daemon/       state, event loop (asyncio), unix-socket API, persistence
-  proxy/        per-policy SOCKS5 / HTTP CONNECT proxy with interface-bound upstream sockets
-  platform/     base protocol + capability flags; linux/, darwin/ (pf, PF_ROUTE, helper client),
-                windows/ (IP Helper + WFP via ctypes, helper client)
-native/
+  proxy/        (deferred) per-policy SOCKS5 / HTTP CONNECT proxy with interface-bound upstream sockets
+  platform/     base protocol + capability flags; linux/
+                (deferred: darwin/ pf, PF_ROUTE, helper client; windows/ IP Helper + WFP)
+native/         (deferred)
   macos/        Swift system extension (transparent proxy + filter), built/notarized in CI
   windows/      WinDivert-based helper (Rust/C), later a WFP callout driver
 ```
@@ -341,10 +347,10 @@ environment and desktop session are kept.
 | **M3** | **Selectors + watcher**: exe/name/unit/uid/flatpak, proc-connector watcher, app groups, exclusions, `pyvpn apps` | a normally started `/usr/bin/foo` lands in its policy within 50 ms, and its children follow |
 | **M4** | **Per-app DNS + leak protection**: per-policy stubs, port-53 redirect per cgroup, resolver bound to the target, DoH/DoT/QUIC blocks, canaries, IPv6 modes, `pyvpn audit` | DNS leak tests: a routed app's queries only leave through its target |
 | **M5** | **Destination filters**: port snake `match` + `rulefile` with its test vectors, ASN/CIDR sets, `pyvpn rules check/test/import/export` | snake's vectors pass; app + domain policies route only the matched destinations |
-| **M6** | **Proxy mode on all OSes**: per-policy SOCKS5/HTTP proxy bound to the target, `pyvpn run` launchers for Chromium/Firefox/env-proxy apps, target watching on macOS (`PF_ROUTE`) and Windows (IP Helper), Windows WFP per-app UDP/leak filters, CI on macOS + Windows runners | a browser launched by `pyvpn run` on all three OSes exits via the target |
-| **M7** | Strict netns isolation (Linux), `pyvpn install` (systemd / launchd / Windows service), `.desktop` helper, `--json` output | **v0.1 public release** (Linux transparent, proxy mode everywhere) |
-| **M8** | **macOS native helper**: Swift `NETransparentProxyProvider` + filter in `native/macos/`, signed + notarized `.pkg` from CI, daemon ↔ helper protocol, macOS `user` mode via pf | transparent per-app routing on macOS 13–15 |
-| **M9** | **Windows native helper**: WinDivert-based per-app NAT helper (Rust/C) in `native/windows/`, MSI; later an own WFP bind-redirect driver | transparent per-app routing on Windows 10/11 |
+| **M6** | *(deferred)* **Proxy mode on all OSes**: per-policy SOCKS5/HTTP proxy bound to the target, `pyvpn run` launchers for Chromium/Firefox/env-proxy apps, target watching on macOS (`PF_ROUTE`) and Windows (IP Helper), Windows WFP per-app UDP/leak filters, CI on macOS + Windows runners | a browser launched by `pyvpn run` on all three OSes exits via the target |
+| **M7** | Strict netns isolation, `pyvpn install` (systemd), `.desktop` helper, `--json` output | **v0.1 public release** (Linux) |
+| **M8** | *(deferred)* **macOS native helper**: Swift `NETransparentProxyProvider` + filter in `native/macos/`, signed + notarized `.pkg` from CI, daemon ↔ helper protocol, macOS `user` mode via pf | transparent per-app routing on macOS 13–15 |
+| **M9** | *(deferred)* **Windows native helper**: WinDivert-based per-app NAT helper (Rust/C) in `native/windows/`, MSI; later an own WFP bind-redirect driver | transparent per-app routing on Windows 10/11 |
 | **M10** | Later: web UI / tray, `session:`/`if:` per app, SNI sniffing | — |
 
 ## 8. Testing
@@ -377,10 +383,8 @@ environment and desktop session are kept.
 
 ## 10. Open questions
 
-1. Cross-platform order: Linux transparent + proxy mode everywhere first,
-   then native helpers for macOS, then Windows — OK? Are you willing to pay
-   for an Apple Developer ID (macOS helper) and, later, a Windows EV
-   certificate (own driver)?
+1. ~~Cross-platform order~~ — decided 2026-11-20: Linux only for now;
+   macOS, Windows and proxy mode deferred.
 2. Should running processes be moved automatically by exe name (watcher), or
    only apps launched through `pyvpn run` / systemd units?
 3. Should a policy have several targets with fallback, or exactly one
