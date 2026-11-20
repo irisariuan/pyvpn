@@ -83,10 +83,12 @@ def build_route_plan(plan: RoutingPlan) -> RoutePlan:
                 Rule(version, policy.rule_pref, policy.mark, POLICY_MARK_MASK, policy.table)
             )
             routes.append(DefaultRoute(version, policy.table, UNREACHABLE_METRIC, "unreachable"))
+            gateway = next((item for item in policy.gateways if item.version == version), None)
+            has_gateway_for_family = any(item.version == version for item in policy.gateways)
             if (
                 policy.route == "dev"
                 and (version == 4 or policy.leak.ipv6 == "route")
-                and (policy.gateway is None or policy.gateway.version == version)
+                and (not policy.gateways or has_gateway_for_family)
             ):
                 routes.append(
                     DefaultRoute(
@@ -95,7 +97,7 @@ def build_route_plan(plan: RoutingPlan) -> RoutePlan:
                         TARGET_METRIC,
                         "unicast",
                         policy.interface,
-                        policy.gateway,
+                        gateway,
                     )
                 )
 

@@ -55,7 +55,7 @@ class TargetStatus:          # produced by D (targets)
     interface: str | None    # resolved interface (patterns resolved), None if absent
     ifindex: int | None
     usable: bool             # link up + address [+ probe ok]
-    gateway: IPAddress | None
+    gateways: tuple[IPAddress, ...] # next hops, one per available family; empty = device route
     addresses: tuple[IPAddress, ...]
 
 @dataclass(frozen=True)
@@ -77,7 +77,7 @@ class PolicyPlan:            # computed by B, consumed by C / platform backends
     table: int
     route: Literal["dev", "unreachable", "main"]
     interface: str | None
-    gateway: IPAddress | None
+    gateways: tuple[IPAddress, ...] # empty = device route; otherwise family-specific next hops
     apps: AppBinding
     dests: DestSet | None    # None = all destinations
     leak: LeakSettings

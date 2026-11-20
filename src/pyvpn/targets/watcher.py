@@ -16,7 +16,7 @@ class InterfaceSnapshot:
     ifindex: int
     up: bool
     addresses: tuple[IPAddress, ...] = ()
-    gateway: IPAddress | None = None
+    gateways: tuple[IPAddress, ...] = ()
 
 
 def status_for_target(
@@ -24,11 +24,6 @@ def status_for_target(
     interfaces: Iterable[InterfaceSnapshot],
 ) -> TargetStatus:
     """Build one target status from a point-in-time interface snapshot."""
-
-    if target.probe:
-        raise NotImplementedError(
-            f"target {target.name!r} enables probing, which is not supported yet"
-        )
 
     snapshots = tuple(interfaces)
     matches = resolve_interfaces(target.interface, (item.name for item in snapshots))
@@ -43,17 +38,25 @@ def status_for_target(
     snapshots_by_name = {item.name: item for item in snapshots}
     candidates = [snapshots_by_name[name] for name in matches if name in snapshots_by_name]
     snapshot = next((item for item in candidates if item.up and item.addresses), candidates[0])
-    gateway = target.gateway
-    if gateway == "auto":
-        gateway = snapshot.gateway
+    if target.gateway == "auto":
+        gateways = snapshot.gateways
+    elif target.gateway is None:
+        gateways = ()
+    else:
+        gateways = (target.gateway,)
 
-    usable = snapshot.up and bool(snapshot.addresses)
+    usable = (
+        snapshot.up
+        and bool(snapshot.addresses)
+        and not target.probe
+        and (target.gateway != "auto" or bool(gateways))
+    )
     return TargetStatus(
         name=target.name,
         interface=snapshot.name,
         ifindex=snapshot.ifindex,
         usable=usable,
-        gateway=gateway if usable else None,
+        gateways=gateways if usable else (),
         addresses=snapshot.addresses,
     )
 

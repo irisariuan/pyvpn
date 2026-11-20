@@ -23,7 +23,7 @@ class TargetStatus:
     interface: str | None
     ifindex: int | None
     usable: bool
-    gateway: IPAddress | None = None
+    gateways: tuple[IPAddress, ...] = ()
     addresses: tuple[IPAddress, ...] = ()
 
 
@@ -69,7 +69,7 @@ class PolicyPlan:
     rule_pref: int
     route: RouteKind
     interface: str | None
-    gateway: IPAddress | None
+    gateways: tuple[IPAddress, ...]
     apps: AppBinding
     dests: DestSet | None  # None = all destinations
     leak: LeakSettings

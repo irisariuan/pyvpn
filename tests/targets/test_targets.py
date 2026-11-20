@@ -39,7 +39,7 @@ def test_resolve_interface_exact_and_glob() -> None:
 
 
 def test_pattern_prefers_first_usable_interface_in_sorted_order() -> None:
-    target = Target(name="vpn", interface="tun*", gateway="auto")
+    target = Target(name="vpn", interface="tun*")
     snapshots = (
         InterfaceSnapshot("tun1", 11, True, (_address("10.0.1.2"),)),
         InterfaceSnapshot("tun0", 10, False, (_address("10.0.0.2"),)),
@@ -74,7 +74,7 @@ def test_status_for_target_resolves_auto_gateway() -> None:
             ifindex=42,
             up=True,
             addresses=(_address("10.0.0.2"),),
-            gateway=_address("10.0.0.1"),
+            gateways=(_address("10.0.0.1"),),
         ),
     )
 
@@ -84,7 +84,27 @@ def test_status_for_target_resolves_auto_gateway() -> None:
     assert status.interface == "wg-jp"
     assert status.ifindex == 42
     assert status.usable
-    assert status.gateway == _address("10.0.0.1")
+    assert status.gateways == (_address("10.0.0.1"),)
+
+
+def test_auto_gateway_loss_makes_broadcast_target_unusable() -> None:
+    target = Target(name="office", interface="wlan1", gateway="auto")
+    snapshot = InterfaceSnapshot("wlan1", 42, True, (_address("192.0.2.10"),))
+
+    status = status_for_target(target, (snapshot,))
+
+    assert not status.usable
+    assert status.gateways == ()
+
+
+def test_device_only_target_remains_usable_without_gateway() -> None:
+    target = Target(name="vpn", interface="wg0")
+    snapshot = InterfaceSnapshot("wg0", 42, True, (_address("10.0.0.2"),))
+
+    status = status_for_target(target, (snapshot,))
+
+    assert status.usable
+    assert status.gateways == ()
 
 
 def test_status_for_missing_interface_is_down() -> None:
@@ -95,11 +115,29 @@ def test_status_for_missing_interface_is_down() -> None:
     assert not status.usable
 
 
-def test_probe_configuration_is_not_silently_ignored() -> None:
-    target = Target(name="vpn", interface="tun0", probe=True)
+def test_unsupported_probe_only_marks_its_target_unusable() -> None:
+    probe_target = Target(name="vpn", interface="tun0", probe=True)
+    healthy_target = Target(name="office", interface="eth0")
+    snapshots = (
+        InterfaceSnapshot("tun0", 1, True, (_address("10.0.0.2"),)),
+        InterfaceSnapshot("eth0", 2, True, (_address("192.0.2.2"),)),
+    )
 
-    with pytest.raises(NotImplementedError, match=r"probing.*not supported"):
-        status_for_target(target, ())
+    class OneSnapshotReader:
+        async def events(self) -> AsyncIterator[tuple[InterfaceSnapshot, ...]]:
+            yield snapshots
+
+    statuses = NetlinkTargetWatcher(
+        (probe_target, healthy_target),
+        OneSnapshotReader(),
+    )
+
+    async def collect() -> list[dict[str, TargetStatus]]:
+        return [status async for status in statuses.statuses()]
+
+    (status_map,) = asyncio.run(collect())
+    assert not status_map["vpn"].usable
+    assert status_map["office"].usable
 
 
 def test_link_requires_carrier_but_accepts_unknown_operstate() -> None:
@@ -152,7 +190,7 @@ def test_default_gateway_uses_main_table_default_and_lowest_metric_per_family() 
         ),
         routes,
     )
-    assert snapshots[0].gateway == _address("192.0.2.2")
+    assert snapshots[0].gateways == (_address("192.0.2.2"), _address("2001:db8::1"))
 
 
 def test_parse_address_prefers_local_over_peer_address() -> None:

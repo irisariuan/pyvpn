@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import select
-from collections.abc import AsyncIterator, Iterable, Mapping
+import threading
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from ipaddress import ip_address
 from typing import Any, Protocol
 
@@ -152,21 +154,17 @@ def _snapshots_from_messages(
         interface_addresses = tuple(addresses_by_index.get(ifindex, ()))
         gateways = gateways_by_index.get(ifindex, {})
         address_families = {address.version for address in interface_addresses}
-        gateway = next(
-            (
-                gateways[version]
-                for version in (4, 6)
-                if version in address_families and version in gateways
-            ),
-            None,
-        )
         snapshots.append(
             InterfaceSnapshot(
                 name=str(name),
                 ifindex=ifindex,
                 up=link_is_up(message),
                 addresses=interface_addresses,
-                gateway=gateway,
+                gateways=tuple(
+                    gateways[version]
+                    for version in (4, 6)
+                    if version in address_families and version in gateways
+                ),
             )
         )
     return tuple(snapshots)
@@ -220,25 +218,63 @@ class NetlinkReader:
             | RTMGRP_IPV4_ROUTE
             | RTMGRP_IPV6_ROUTE
         )
-        with IPRoute() as ipr:
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[tuple[InterfaceSnapshot, ...]] = asyncio.Queue()
+        stopping = threading.Event()
+
+        def publish(snapshots: tuple[InterfaceSnapshot, ...]) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, snapshots)
+
+        worker = asyncio.create_task(
+            asyncio.to_thread(self._watch, IPRoute, groups, stopping, publish)
+        )
+        pending: asyncio.Task[tuple[InterfaceSnapshot, ...]] | None = None
+        try:
+            while True:
+                pending = asyncio.create_task(queue.get())
+                done, _ = await asyncio.wait(
+                    (pending, worker),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if worker in done:
+                    if not pending.done():
+                        pending.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await pending
+                    pending = None
+                    await worker
+                    raise RuntimeError("netlink reader stopped without an error")
+                snapshots = pending.result()
+                pending = None
+                yield snapshots
+        finally:
+            stopping.set()
+            if pending is not None:
+                pending.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pending
+            await asyncio.shield(worker)
+
+    def _watch(
+        self,
+        iproute_type: Any,
+        groups: int,
+        stopping: threading.Event,
+        publish: Callable[[tuple[InterfaceSnapshot, ...]], None],
+    ) -> None:
+        with iproute_type() as ipr:
             ipr.bind(groups=groups)
             fd = ipr.socket.fileno()
-            loop = asyncio.get_running_loop()
-            ready = asyncio.Event()
-            loop.add_reader(fd, ready.set)
-            try:
-                yield self._read_snapshots(ipr)
-                while True:
-                    await ready.wait()
-                    ready.clear()
-                    received = False
-                    while select.select([fd], [], [], 0)[0]:
-                        messages = ipr.get()
-                        received = received or bool(messages)
-                    if received:
-                        yield self._read_snapshots(ipr)
-            finally:
-                loop.remove_reader(fd)
+            publish(self._read_snapshots(ipr))
+            while not stopping.is_set():
+                if not select.select([fd], [], [], 0.1)[0]:
+                    continue
+                received = False
+                while select.select([fd], [], [], 0)[0]:
+                    messages = ipr.get()
+                    received = received or bool(messages)
+                if received:
+                    publish(self._read_snapshots(ipr))
 
 
 class NetlinkTargetWatcher:
