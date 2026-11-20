@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import pwd
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Iterable
 
 from pyvpn.config.models import AppGroup, AppSelector, Policy
 
