@@ -30,7 +30,7 @@ from dataclasses import replace
 from pyvpn.config.models import Config
 from pyvpn.daemon.planner import build_plan
 from pyvpn.platform.base import Backend
-from pyvpn.services import DnsService
+from pyvpn.services import DnsService, RuleMatcher
 from pyvpn.state import AppBinding, DestSet, PolicyPlan, RoutingPlan, TargetStatus
 
 log = logging.getLogger(__name__)
@@ -90,6 +90,7 @@ class Reconciler:
         self._batch_depth = 0
 
         self.config: Config | None = None
+        self.matcher: RuleMatcher | None = None
         self.statuses: dict[str, TargetStatus] = {}
         self.bindings: dict[int, AppBinding] = {}
         self.static_dests: dict[int, DestSet] = {}
@@ -112,7 +113,13 @@ class Reconciler:
 
     # --- inputs ---------------------------------------------------------------
 
-    async def set_config(self, config: Config, static_sets: Iterable[DestSet] = ()) -> None:
+    async def set_config(
+        self,
+        config: Config,
+        static_sets: Iterable[DestSet] = (),
+        *,
+        matcher: RuleMatcher | None = None,
+    ) -> None:
         """Install a new config; apply failures are retried in the background.
 
         Policy ids may shift, so per-id state is reset (DNS-learned
@@ -121,6 +128,7 @@ class Reconciler:
         ``commit_config`` to apply config and bindings in one step."""
         async with self._lock:
             self._swap_config(config, static_sets, {})
+            self.matcher = matcher
             self._committed = self._generation
         await self.reconcile()
 
@@ -129,26 +137,36 @@ class Reconciler:
         config: Config,
         static_sets: Iterable[DestSet],
         bindings: Mapping[int, AppBinding],
+        *,
+        matcher: RuleMatcher | None = None,
     ) -> None:
         """Replace config and bindings and apply them as one step.
 
-        On a backend failure the previous config, bindings and destination
-        sets are restored (the backend keeps the old rules) and the error is
-        raised, so the caller can roll back its own staged changes.
+        Stop the old DNS listeners before changing routing. Activate the
+        matcher and generation together before reopening the listeners.
+        On failure before commit, restore the previous config and listeners.
         """
         async with self._lock:
             saved = self._snapshot()
-            self._swap_config(config, static_sets, bindings)
-            if self.enabled:
-                plan = self.plan()
-                assert plan is not None
-                try:
+            installed = self.applied
+            plan = None
+            try:
+                if self.enabled:
+                    await self._quiesce_dns_locked()
+                self._swap_config(config, static_sets, bindings)
+                if self.enabled:
+                    plan = self.plan()
+                    assert plan is not None
                     await self._apply_locked(plan)
-                except Exception:
-                    self._restore(saved)
-                    raise
-                await self._sync_dns_locked(plan)
+            except (Exception, asyncio.CancelledError):
+                self._restore(saved)
+                if self.enabled and installed is not None:
+                    await self._sync_dns_locked(installed)
+                raise
+            self.matcher = matcher
             self._committed = self._generation
+            if plan is not None:
+                await self._sync_dns_locked(plan)
 
     def _swap_config(
         self,
@@ -279,6 +297,18 @@ class Reconciler:
         await self._backend.apply(plan)
         self.applied = plan
         self.last_error = None
+
+    async def _quiesce_dns_locked(self) -> None:
+        if self._dns is None:
+            return
+        ids = set(self.dns_applied)
+        if self.applied is not None:
+            # Include configured ports even if an earlier listener update failed.
+            ids.update(p.policy_id for p in self.applied.policies if p.dns_stub_port is not None)
+        for pid in sorted(ids):
+            # A failed stop may already have closed the listener. Resync it on rollback.
+            self.dns_applied.pop(pid, None)
+            await self._dns.stop(pid)
 
     async def _sync_dns_locked(self, plan: RoutingPlan) -> None:
         """Make the running stubs match ``plan``; retry anything that failed."""

@@ -12,7 +12,7 @@ from pyvpn.config.models import Config
 from pyvpn.daemon.core import Daemon
 from pyvpn.daemon.persistence import PersistentState, StateStore
 from pyvpn.daemon.server import ApiError, PeerCred
-from pyvpn.state import AppBinding, RoutingPlan
+from pyvpn.state import AppBinding, PolicyPlan, RoutingPlan
 from tests.daemon.conftest import make_config
 from tests.fakes import (
     FakeAppManager,
@@ -689,4 +689,44 @@ async def test_active_matcher_follows_the_committed_config(tmp_path: Path, confi
         await daemon.handle("reload", {}, ROOT)
     assert id(rig.config) in built  # a matcher was built for it, but not activated
     assert daemon.active_matcher() is committed
+    await daemon.stop()
+
+
+async def test_reload_stops_old_stubs_until_the_new_matcher_is_active(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    daemon = Daemon(
+        config_loader=lambda: rig.config,
+        backend=rig.backend,
+        targets=rig.targets,
+        apps=rig.apps,
+        dns=rig.dns,
+        matcher_factory=lambda cfg: FakeRuleMatcher(
+            {domain: pid for pid, policy in enumerate(cfg.policies, 1) for domain in policy.domains}
+        ),
+        store=rig.store,
+        socket_path=rig.sock,
+    )
+    await daemon.start()
+    assert rig.dns.running[1].dests is None  # The old stub can bypass matching.
+    first, *remaining = rig.config.policies
+    first = first.model_copy(update={"domains": ("new.example",)})
+    rig.config = rig.config.model_copy(update={"policies": (first, *remaining)})
+    apply = rig.backend.apply
+    start = rig.dns.start
+
+    async def apply_without_stale_stubs(plan: RoutingPlan) -> None:
+        await apply(plan)
+        assert not rig.dns.running
+
+    async def start_with_new_matcher(plan: PolicyPlan) -> None:
+        assert plan in rig.backend.last.policies
+        assert daemon.active_matcher().match("new.example") == 1
+        await start(plan)
+
+    monkeypatch.setattr(rig.backend, "apply", apply_without_stale_stubs)
+    monkeypatch.setattr(rig.dns, "start", start_with_new_matcher)
+    await daemon.handle("reload", {}, ROOT)
+
+    assert rig.dns.running[1].dests is not None
     await daemon.stop()

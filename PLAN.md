@@ -267,6 +267,9 @@ inspector does.
   **from that policy's apps** to it, which also catches hard-coded `8.8.8.8`.
   The stub forwards through the policy's interface (bound socket; plain, DoT
   or DoH; SERVFAIL rather than falling back to another path).
+* Reload stops the existing policy DNS listeners before applying the new
+  routes. The daemon activates the new matcher before reopening listeners,
+  so an answer cannot use the previous config's matching rules.
 * Other apps keep the system resolver. **pyvpn does not take over system
   DNS.**
 * Per-policy leak toggles (snake's): block DoT 853, block known DoH

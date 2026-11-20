@@ -212,16 +212,41 @@ async def test_failed_dns_update_stops_stale_stub(config: Config) -> None:
 
 
 async def test_commit_config_failure_restores_previous_state(config: Config) -> None:
-    r, backend, _ = make()
+    r, backend, dns = make()
     await r.set_config(config)
     await r.add_dests(DestSet(3, frozenset({NET_A})))
     installed, dests = r.applied, dict(r.dynamic_dests)
+    listeners = dict(dns.running)
     backend.fail_apply = 1
     other = config.model_copy(update={"policies": config.policies[:1]})
     with pytest.raises(RuntimeError):
         await r.commit_config(other, (), {1: AppBinding(1, cgroup_paths=("x",))})
     assert r.config is config and r.applied == installed and r.dynamic_dests == dests
+    assert dns.running == listeners
     await r.add_dests(DestSet(3, frozenset({NET_B})))  # old ids still valid
+    await r.close()
+
+
+async def test_commit_config_keeps_old_routes_if_a_listener_cannot_stop(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r, backend, dns = make()
+    await r.set_config(config)
+    installed, listeners = backend.installed, dict(dns.running)
+    stop = dns.stop
+
+    async def fail_second_stop(pid: int) -> None:
+        await stop(pid)
+        if pid == 2:
+            raise RuntimeError("DNS stop failed")
+
+    monkeypatch.setattr(dns, "stop", fail_second_stop)
+    other = config.model_copy(update={"policies": config.policies[:1]})
+    with pytest.raises(RuntimeError, match="DNS stop failed"):
+        await r.commit_config(other, (), {})
+
+    assert r.config is config and backend.installed is installed
+    assert dns.running == listeners
     await r.close()
 
 

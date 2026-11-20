@@ -59,7 +59,6 @@ class Daemon:
         self._apps = apps
         self._dns = dns
         self._matcher_factory = matcher_factory
-        self._matcher: RuleMatcher | None = None  # built from the committed config
         self._audit = audit
         self._store = store
         self._teardown_on_stop = teardown_on_stop
@@ -84,16 +83,14 @@ class Daemon:
 
         The composition root hands this to the DNS service, e.g.
         ``PolicyDnsService(matcher_factory=lambda: daemon.active_matcher())``
-        (late-bound, since the daemon takes the service), so a stub matches
-        answers against the same config, and policy ids, that the reconciler
-        checks in ``add_dests``. It is replaced in the same
-        event-loop step as the reconciler's commit, so a match and the
-        callback's generation check always see the same config. Raises (the
-        stub answers SERVFAIL) while no matcher is available.
+        (late-bound, since the daemon takes the service). The reconciler
+        activates it before starting DNS listeners for the new config.
+        Raises while no matcher is available so the stub answers SERVFAIL.
         """
-        if self._matcher is None:
+        matcher = self.reconciler.matcher
+        if matcher is None:
             raise RuntimeError("no rule matcher for the active config")
-        return self._matcher
+        return matcher
 
     # --- lifecycle --------------------------------------------------------------
 
@@ -188,10 +185,10 @@ class Daemon:
                 self._save_state(enabled=enabled, slots=slots)
                 saved = True
             if reload:
-                await self.reconciler.commit_config(config, static, staged)
+                await self.reconciler.commit_config(config, static, staged, matcher=matcher)
             else:
                 async with self.reconciler.batch():  # one apply; failures are retried
-                    await self.reconciler.set_config(config, static)
+                    await self.reconciler.set_config(config, static, matcher=matcher)
                     for binding in staged.values():
                         await self.reconciler.update_binding(binding)
         except Exception:
@@ -205,11 +202,6 @@ class Daemon:
                 # Include the id whose bind failed: it may be half-changed.
                 await self._rebind(old, min(len(staged) + 1, len(config.policies)))
             raise
-        # On reload nothing awaits between the commit and this line, so DNS
-        # answers switch matchers in the same step as the reconciler's
-        # committed generation. At startup the matcher is unset until here
-        # (stubs answer SERVFAIL, as add_dests refuses before the first apply).
-        self._matcher = matcher
         if old is not None:
             for pid in range(len(config.policies) + 1, len(old.policies) + 1):
                 with contextlib.suppress(Exception):
