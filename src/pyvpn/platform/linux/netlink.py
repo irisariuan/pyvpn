@@ -97,8 +97,8 @@ def _default_gateways(
             best[key] = (priority, gateway)
 
     gateways: dict[int, dict[int, IPAddress]] = {}
-    for (ifindex, version), route in best.items():
-        gateway = route[1]
+    for (ifindex, version), selected_route in best.items():
+        gateway = selected_route[1]
         gateways.setdefault(ifindex, {})[version] = gateway
     return gateways
 
