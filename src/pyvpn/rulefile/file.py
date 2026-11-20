@@ -214,10 +214,22 @@ def convert_line(line: str) -> list[str] | None:
             if h not in _HOSTS_SKIP and canonical_ip(h) is None:
                 out.append("=" + h)
         return out
-    m = _DNSMASQ_RE.match(lo)
+    # Whitespace before # starts a comment; dnsmasq's own "/#" stays.
+    m = _DNSMASQ_RE.match(re.sub(r"\s+#.*$", "", lo))
     if m:
-        return [d for d in (x.strip() for x in m.group(2).split("/")) if d and d != "#"]
+        return [
+            _dnsmasq_domain(d) for d in (x.strip() for x in m.group(2).split("/")) if d and d != "#"
+        ]
     return None
+
+
+def _dnsmasq_domain(d: str) -> str:
+    """dnsmasq's domain forms in snake rule syntax: ``/example.com/`` and
+    ``/.example.com/`` cover the domain and its subdomains (``example.com``);
+    ``/*.example.com/`` covers subdomains at any depth (``.example.com``)."""
+    if d.startswith("*."):
+        return "." + d[2:]
+    return d.removeprefix(".")
 
 
 def _one_line(s: str) -> str:

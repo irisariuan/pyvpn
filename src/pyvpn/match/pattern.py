@@ -127,15 +127,30 @@ def strip_comment(s: str) -> str:
     body = s.removeprefix("!").lstrip()
     if body.startswith("re:"):
         return s
-    i = s.find(" #")
-    if body.startswith("/"):
-        while i >= 0:
-            head = s[:i].rstrip().removeprefix("!").lstrip()
-            if len(head) > 1 and head.endswith("/"):
-                break
-            i = s.find(" #", i + 1)
-    if i >= 0:
-        s = s[:i].strip()
+    # A /regex/ may start after a prefix too (drop:/.../, session:/.../, or
+    # inside an if: expression), so track regex boundaries through the line.
+    in_re = in_class = False
+    prev = ""
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if in_re:
+            if c == "\\":
+                i += 2
+                continue
+            if in_class:
+                in_class = c != "]"
+            elif c == "[":
+                in_class = True
+            elif c == "/":
+                in_re = False
+        elif c == "#" and i > 0 and s[i - 1] in " \t":
+            return s[:i].strip()
+        elif c == "/" and (prev == "" or prev in "!(,:;"):
+            in_re = True
+        if c not in " \t":
+            prev = c
+        i += 1
     return s
 
 
@@ -199,8 +214,10 @@ def normalize(s: str) -> str:
     prefix = ""
     if s.startswith("="):
         prefix, s = "=", s[1:]
+    url = s.startswith(("https://", "http://"))
     s = s.removeprefix("https://").removeprefix("http://")
-    m = re.search(r"[/:]", s)
+    # In a URL, ? and # start the query and fragment; elsewhere ? is a wildcard.
+    m = re.search(r"[/:?#]" if url else r"[/:]", s)
     if m:
         s = s[: m.start()]
     s = s.removesuffix(".")

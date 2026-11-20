@@ -136,3 +136,14 @@ def test_convert_keeps_exclusions_with_inline_comments() -> None:
     r = parse_text("example.com\n!ads.example.com # tracking\n! Title: a list\n", convert=True)
     assert r.file.domains == ["example.com", "!ads.example.com"]
     assert r.converted == 1  # only the "! Title:" line was an AdBlock comment
+
+
+def test_dnsmasq_import_strips_comments_and_maps_domain_forms() -> None:
+    r = parse_text(
+        "server=/app.example/1.1.1.1 # see https://docs.example/list\n"
+        "server=/.apex.example/1.1.1.1\n"
+        "server=/*.deep.example/1.1.1.1\n"
+        "server=/plain.example/#\n",
+        convert=True,
+    )
+    assert r.file.domains == ["app.example", "apex.example", ".deep.example", "plain.example"]

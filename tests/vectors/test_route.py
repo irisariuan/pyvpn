@@ -359,3 +359,17 @@ def test_trailing_semicolon_does_not_swallow_the_next_rule() -> None:
     assert [g.text for g in group(rules)] == rules
     legacy = ["route:a.example;", "if:b.example"]  # old route:EXPR;if:COND form
     assert [g.text for g in group(legacy)] == ["route:a.example;\nif:b.example"]
+
+
+def test_comment_lines_between_branches_keep_the_rule_together() -> None:
+    from pyvpn.match import group
+
+    lines = ["if:a.example;", "# CDN", "then:route:b.example"]
+    assert [g.text for g in group(lines)] == ["\n".join(lines)]
+
+
+def test_plain_rule_after_trailing_semicolon_is_its_own_rule() -> None:
+    from pyvpn.match import group
+
+    for head in ("if:a.example;then:route:b.example;", "route:b.example;"):
+        assert [g.text for g in group([head, "plain.example"])] == [head, "plain.example"]

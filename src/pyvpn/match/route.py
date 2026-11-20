@@ -434,7 +434,9 @@ def group(lines: Sequence[str]) -> list[Logical]:
         while j + 1 < n:
             nxt = strip_comment(lines[j + 1]).strip()
             if not nxt:
-                if depth > 0:
+                # Inside parentheses skip blank lines; anywhere, skip comment
+                # lines, so a comment between branches does not end the rule.
+                if depth > 0 or lines[j + 1].strip():
                     j += 1
                     continue
                 break
@@ -454,7 +456,9 @@ def group(lines: Sequence[str]) -> list[Logical]:
                     and not _has_if(lines[i : end + 1])
                 )
             else:
-                more = last.endswith(";") or nxt.startswith(";") or _starts_branch(nxt)
+                # A plain rule after a trailing ; is its own rule, not more of
+                # this one; only a branch or a leading ; continues it.
+                more = nxt.startswith(";") or _starts_branch(nxt)
             if not more:
                 break
             j += 1

@@ -326,3 +326,28 @@ def test_fractional_ttl_round_trips() -> None:
 
     assert format_ttl(10.5) == "10.5s" and parse_duration(format_ttl(10.5)) == 10.5
     assert (format_ttl(3600), format_ttl(600), format_ttl(90)) == ("1h", "10m", "90s")
+
+
+@pytest.mark.parametrize(
+    ("line", "want"),
+    [
+        ("drop:/^[a-z #]+\\.example$/ # note", "drop:/^[a-z #]+\\.example$/"),
+        ("session:/^a #b\\.example$/", "session:/^a #b\\.example$/"),
+        (
+            "if:(/^x #y\\.example$/);then:route:b.example #c",
+            "if:(/^x #y\\.example$/);then:route:b.example",
+        ),
+        ("https://example.com/path #c", "https://example.com/path"),
+    ],
+)
+def test_strip_comment_keeps_hashes_inside_prefixed_regexes(line: str, want: str) -> None:
+    from pyvpn.match.pattern import strip_comment
+
+    assert strip_comment(line) == want
+
+
+def test_url_query_and_fragment_are_dropped() -> None:
+    for rule in ("https://example.com?ref=1", "http://example.com#top"):
+        p = parse(rule)
+        assert p.kind is Kind.SUFFIX and p.value == "example.com"
+    assert parse("exampl?.com").kind is Kind.GLOB  # ? stays a wildcard without a scheme
