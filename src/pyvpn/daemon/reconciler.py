@@ -37,6 +37,31 @@ log = logging.getLogger(__name__)
 _DNS_FIELDS = ("route", "interface", "gateway", "leak", "dns_stub_port")
 
 
+def _carry_learned_dests(
+    old: Config | None, new: Config, learned: Mapping[int, DestSet]
+) -> dict[int, DestSet]:
+    """Keep DNS-learned destinations for policies whose domain rules survive.
+
+    Apps keep using cached answers after a reload, so dropping the learned
+    addresses would send them out the default route (even under
+    ``on_down: block``) until they query DNS again. A policy keeps its set
+    when one with the same name and the same ``domains`` exists in the new
+    config; ids are remapped because they follow config order.
+    """
+    if old is None or not learned:
+        return {}
+    old_ids = {p.name: (i, p.domains) for i, p in enumerate(old.policies, start=1)}
+    out: dict[int, DestSet] = {}
+    for new_id, policy in enumerate(new.policies, start=1):
+        prev = old_ids.get(policy.name)
+        if prev is None or prev[1] != policy.domains or not policy.domains:
+            continue
+        dests = learned.get(prev[0])
+        if dests:
+            out[new_id] = replace(dests, policy_id=new_id)
+    return out
+
+
 def _dns_changed(old: PolicyPlan | None, new: PolicyPlan) -> bool:
     return old is None or any(getattr(old, f) != getattr(new, f) for f in _DNS_FIELDS)
 
@@ -80,7 +105,8 @@ class Reconciler:
     async def set_config(self, config: Config, static_sets: Iterable[DestSet] = ()) -> None:
         """Install a new config; apply failures are retried in the background.
 
-        Policy ids may shift, so per-id state is reset. Callers rebind apps
+        Policy ids may shift, so per-id state is reset (DNS-learned
+        destinations carry over for unchanged policies). Callers rebind apps
         inside ``batch()`` to avoid an unbound window, or use
         ``commit_config`` to apply config and bindings in one step."""
         async with self._lock:
@@ -119,9 +145,9 @@ class Reconciler:
         static_sets: Iterable[DestSet],
         bindings: Mapping[int, AppBinding],
     ) -> None:
+        self.dynamic_dests = _carry_learned_dests(self.config, config, self.dynamic_dests)
         self.config = config
         self.bindings = dict(bindings)
-        self.dynamic_dests = {}
         self.static_dests = {}
         for s in static_sets:
             prev = self.static_dests.get(s.policy_id)

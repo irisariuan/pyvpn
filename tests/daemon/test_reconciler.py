@@ -222,3 +222,33 @@ async def test_commit_config_failure_restores_previous_state(config: Config) -> 
     assert r.config is config and r.applied == installed and r.dynamic_dests == dests
     await r.add_dests(DestSet(3, frozenset({NET_B})))  # old ids still valid
     await r.close()
+
+
+async def test_reload_keeps_learned_dests_for_unchanged_policies(config: Config) -> None:
+    r, _, _ = make()
+    await r.set_config(config)
+    await r.update_targets({"office": up("office", "wlan1")})
+    await r.add_dests(DestSet(3, frozenset({NET_A})))
+
+    # Same config: the learned address stays installed.
+    same = config.model_copy()
+    await r.commit_config(same, (), {})
+    assert r.dynamic_dests == {3: DestSet(3, frozenset({NET_A}))}
+
+    # Reordered: "Office" is now policy 1 and keeps its set under the new id.
+    office, *rest = reversed(config.policies)
+    reordered = config.model_copy(update={"policies": (office, *reversed(rest))})
+    await r.commit_config(reordered, (), {})
+    assert r.dynamic_dests == {1: DestSet(1, frozenset({NET_A}))}
+    plan = r.plan()
+    assert plan is not None
+    office_plan = next(p for p in plan.policies if p.apps.policy_id == 1)
+    assert office_plan.dests is not None and NET_A in office_plan.dests.v4
+
+    # Changed domain rules: the learned set no longer applies.
+    changed = office.model_copy(update={"domains": ("other.example",)})
+    await r.commit_config(
+        reordered.model_copy(update={"policies": (changed, *reordered.policies[1:])}), (), {}
+    )
+    assert r.dynamic_dests == {}
+    await r.close()
