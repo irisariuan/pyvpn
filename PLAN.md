@@ -243,7 +243,13 @@ cgroup (as in snake: "connections keep their route").
 Policy names are unique. Reload, and a daemon restart, keep each policy
 that has used an app cgroup at the same position in the config (the
 reserved positions are saved in the daemon's state file, since rules and
-cgroups outlive the daemon).
+cgroups outlive the daemon). A state file that exists but cannot be read
+stops the daemon from starting rather than losing those reservations.
+The daemon also refuses configs it cannot enforce: destination rules
+without a rule matcher, `dns_via_target` without a DNS service, hostname
+rules without `dns_via_target` (only the policy's DNS stub can learn their
+addresses), and, on reload, changed target definitions (the target
+watcher is set up at start).
 Existing cgroups can still contain running apps after an app selector is
 changed or removed, so reload rejects changes that would remove or reuse
 those positions. Reload can still update policy settings, append policies,

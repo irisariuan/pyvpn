@@ -43,7 +43,6 @@ def make_config(**overrides: Any) -> Config:
                 "name": "Office",
                 "targets": ["office"],
                 "domains": ["corp.example"],
-                "leak": {"dns_via_target": False},
             },
         ],
     }

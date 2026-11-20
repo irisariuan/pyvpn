@@ -10,7 +10,7 @@ import pytest
 
 from pyvpn.config.models import Config
 from pyvpn.daemon.core import Daemon
-from pyvpn.daemon.persistence import PersistentState, StateStore
+from pyvpn.daemon.persistence import PersistentState, StateError, StateStore
 from pyvpn.daemon.server import ApiError, PeerCred
 from pyvpn.state import AppBinding, PolicyPlan, RoutingPlan
 from tests.daemon.conftest import make_config
@@ -42,6 +42,7 @@ class Rig:
             targets=self.targets,
             apps=self.apps,
             dns=self.dns,
+            matcher_factory=lambda config: FakeRuleMatcher(),
             store=self.store,
             socket_path=self.sock,
         )
@@ -99,7 +100,10 @@ def with_appended_app_policy(config: Config) -> Config:
 
 
 ROOT = PeerCred(pid=1, uid=0, gid=0)
-USER = PeerCred(pid=4242, uid=1000, gid=1000)
+# Stand-in pidfds: a pipe's read end is not readable while its write end is
+# open (process alive) and becomes readable once it closes (process exited).
+_ALIVE_R, _ALIVE_W = os.pipe()
+USER = PeerCred(pid=4242, uid=1000, gid=1000, pidfd=_ALIVE_R)
 
 
 async def test_start_binds_apps_in_one_apply(rig: Rig) -> None:
@@ -129,7 +133,7 @@ async def test_watcher_death_fails_closed(rig: Rig) -> None:
     rig.targets.stream.fail(RuntimeError("netlink socket closed"))
     await rig.settle()
     assert rig.backend.last.policies[1].route == "unreachable"
-    assert "target watcher failed" in (rig.daemon.reconciler.last_error or "")
+    assert "target watcher failed" in (rig.daemon.status().last_error or "")
     await rig.daemon.stop()
 
 
@@ -143,7 +147,7 @@ async def test_reload_has_no_unbound_window(rig: Rig) -> None:
     assert len(new_plans[0].policies) == 2
     assert all(p.apps.cgroup_paths for p in new_plans[0].policies)
     assert rig.apps.unbound == [3]  # only the removed policy; 1-2 were rebound in place
-    assert ("stop", 3) not in rig.dns.events  # policy 3 had no stub
+    assert 3 not in rig.dns.running  # the removed policy's stub is gone
     await rig.daemon.stop()
 
 
@@ -519,6 +523,9 @@ async def test_teardown_on_stop_removes_rules(tmp_path: Path, config: Config) ->
         backend=rig.backend,
         targets=rig.targets,
         apps=rig.apps,
+        dns=rig.dns,
+        matcher_factory=lambda config: FakeRuleMatcher(),
+        store=rig.store,
         socket_path=rig.sock,
         teardown_on_stop=True,  # uninstall path
     )
@@ -559,10 +566,20 @@ async def test_policy_slots_survive_restart(rig: Rig) -> None:
     await rig.daemon.stop()
 
 
-def test_unreadable_policy_slots_are_ignored(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "content",
+    [
+        json.dumps({"enabled": True, "policy_slots": [[1, "a"], ["x", 2]]}),
+        json.dumps({"enabled": "yes"}),
+        "{not json",
+    ],
+)
+def test_untrusted_state_file_is_refused(tmp_path: Path, content: str) -> None:
     path = tmp_path / "state.json"
-    path.write_text(json.dumps({"enabled": True, "policy_slots": [[1, "a"], ["x", 2], 3]}))
-    assert StateStore(path).load() == PersistentState(enabled=True, policy_slots=((1, "a"),))
+    path.write_text(content)
+    with pytest.raises(StateError):
+        StateStore(path).load()
+    assert StateStore(tmp_path / "missing.json").load() == PersistentState()
 
 
 async def test_second_daemon_does_not_take_over_the_socket(rig: Rig) -> None:
@@ -639,6 +656,7 @@ async def test_stop_completes_when_teardown_fails(tmp_path: Path, config: Config
         targets=rig.targets,
         apps=rig.apps,
         dns=rig.dns,
+        matcher_factory=lambda config: FakeRuleMatcher(),
         store=rig.store,
         socket_path=rig.sock,
         teardown_on_stop=True,
@@ -730,3 +748,109 @@ async def test_reload_stops_old_stubs_until_the_new_matcher_is_active(
 
     assert rig.dns.running[1].dests is not None
     await daemon.stop()
+
+
+def test_store_must_be_passed_explicitly(rig: Rig) -> None:
+    with pytest.raises(TypeError, match="store"):
+        Daemon(  # type: ignore[call-arg]
+            config_loader=lambda: rig.config,
+            backend=rig.backend,
+            targets=rig.targets,
+            apps=rig.apps,
+        )
+
+
+async def test_destination_rules_need_a_matcher(tmp_path: Path, config: Config) -> None:
+    rig = Rig(tmp_path, config)
+    daemon = Daemon(
+        config_loader=lambda: rig.config,
+        backend=rig.backend,
+        targets=rig.targets,
+        apps=rig.apps,
+        dns=rig.dns,
+        store=rig.store,
+        socket_path=rig.sock,
+    )
+    with pytest.raises(ApiError, match="destination rules need a rule matcher"):
+        await daemon.start()
+    assert rig.backend.plans == []
+
+
+async def test_hostname_rules_need_dns_via_target(tmp_path: Path) -> None:
+    config = make_config()
+    office = config.policies[2]
+    office = office.model_copy(
+        update={"leak": office.leak.model_copy(update={"dns_via_target": False})}
+    )
+    rig = Rig(tmp_path, config.model_copy(update={"policies": (*config.policies[:2], office)}))
+    with pytest.raises(ApiError, match=r"hostname rules .* need dns_via_target"):
+        await rig.daemon.start()
+
+
+async def test_reload_cannot_change_targets(rig: Rig) -> None:
+    await rig.daemon.start()
+    targets = list(rig.config.targets)
+    targets[0] = targets[0].model_copy(update={"interface": "wg-other"})
+    rig.config = rig.config.model_copy(update={"targets": tuple(targets)})
+    with pytest.raises(ApiError, match="reload cannot change targets"):
+        await rig.daemon.handle("reload", {}, ROOT)
+    await rig.daemon.stop()
+
+
+async def test_placement_needs_the_cgroup_in_the_installed_binding(rig: Rig) -> None:
+    async def uid_only(policy_id: int, policy: Any, groups: Any) -> AppBinding:
+        return AppBinding(policy_id, uids=(1000,))
+
+    rig.apps.bind = uid_only  # type: ignore[method-assign]
+    await rig.daemon.start()
+    with pytest.raises(ApiError, match="placement cgroup is not governed"):
+        await rig.daemon.handle("place_pid", {"pid": 99, "policy": "Torrents"}, ROOT)
+    assert rig.apps.placed == []
+    await rig.daemon.stop()
+
+
+async def test_placement_refuses_a_peer_whose_process_exited(rig: Rig) -> None:
+    await rig.daemon.start()
+    r, w = os.pipe()
+    os.close(w)  # the pidfd stand-in becomes readable: the process exited
+    gone = PeerCred(pid=4242, uid=1000, gid=1000, pidfd=r)
+    try:
+        with pytest.raises(ApiError, match="still exists"):
+            await rig.daemon.handle("place_pid", {"pid": 4242, "policy": "Torrents"}, gone)
+        no_pidfd = PeerCred(pid=4242, uid=1000, gid=1000)
+        with pytest.raises(ApiError, match="still exists"):
+            await rig.daemon.handle("place_pid", {"pid": 4242, "policy": "Torrents"}, no_pidfd)
+    finally:
+        os.close(r)
+    assert rig.apps.placed == []
+    await rig.daemon.stop()
+
+
+async def test_watcher_failure_stays_in_status_after_a_good_apply(rig: Rig) -> None:
+    await rig.daemon.start()
+    rig.targets.stream.fail(RuntimeError("netlink socket closed"))
+    await rig.settle()
+    await rig.daemon.reconciler.reconcile()
+    assert rig.daemon.reconciler.last_error is None
+    assert "target watcher failed" in (rig.daemon.status().last_error or "")
+    await rig.daemon.stop()
+
+
+async def test_close_cancels_a_stuck_request(tmp_path: Path) -> None:
+    from pyvpn.daemon.server import ApiServer
+
+    started = asyncio.Event()
+
+    async def stuck(method: str, params: dict[str, Any], peer: PeerCred | None) -> Any:
+        started.set()
+        await asyncio.Event().wait()
+
+    server = ApiServer(tmp_path / "s.sock", stuck)
+    server.drain_timeout = 0.05
+    await server.start()
+    _, writer = await asyncio.open_unix_connection(str(tmp_path / "s.sock"))
+    writer.write(b'{"id": 1, "method": "audit", "params": {}}\n')
+    await writer.drain()
+    await asyncio.wait_for(started.wait(), 1)
+    await asyncio.wait_for(server.close(), 1)
+    writer.close()

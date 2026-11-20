@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pyvpn.config.models import Config
-from pyvpn.constants import SOCKET_PATH
+from pyvpn.constants import SOCKET_PATH, policy_cgroup
 from pyvpn.daemon.api import AppsEntry, PlacePidParams, PolicyStatus, StatusResult
 from pyvpn.daemon.persistence import PersistentState, StateStore
 from pyvpn.daemon.reconciler import Reconciler
@@ -49,7 +49,9 @@ class Daemon:
         dns: DnsService | None = None,
         matcher_factory: RuleMatcherFactory | None = None,
         audit: AuditFn | None = None,
-        store: StateStore | None = None,
+        # Required: the enabled flag and cgroup reservations must survive a
+        # restart. Pass ``None`` only to opt out explicitly (tests).
+        store: StateStore | None,
         socket_path: str | os.PathLike[str] = SOCKET_PATH,
         teardown_on_stop: bool = False,
     ) -> None:
@@ -72,6 +74,9 @@ class Daemon:
         self._config_lock = asyncio.Lock()
         # Cgroups may still contain processes after their selectors change.
         self._cgroup_policy_names: dict[int, str] = {}
+        # Failures of the target/app watchers: they do not recover, so they
+        # stay in ``status`` (an apply succeeding later does not clear them).
+        self._watcher_errors: dict[str, str] = {}
 
     @property
     def config(self) -> Config:
@@ -166,6 +171,7 @@ class Daemon:
         restores the previous bindings and raises. Startup apply failures
         are retried by the reconciler.
         """
+        self._check_supported(config)
         matcher = self._matcher_factory(config) if self._matcher_factory else None
         static = matcher.static_sets() if matcher is not None else []
         old = self.reconciler.config
@@ -191,7 +197,7 @@ class Daemon:
                     await self.reconciler.set_config(config, static, matcher=matcher)
                     for binding in staged.values():
                         await self.reconciler.update_binding(binding)
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             if saved:
                 try:
                     self._save_state(enabled=enabled, slots=old_slots)
@@ -206,6 +212,35 @@ class Daemon:
             for pid in range(len(config.policies) + 1, len(old.policies) + 1):
                 with contextlib.suppress(Exception):
                     await self._apps.unbind(pid)
+
+    def _check_supported(self, config: Config) -> None:
+        """Refuse configs this daemon cannot enforce, before anything changes.
+
+        - destination rules without a rule matcher would install empty sets;
+        - DNS stubs without a DNS service would redirect DNS to nothing;
+        - hostname rules need a stub to learn addresses, which only runs with
+          ``dns_via_target`` (otherwise their traffic is never matched);
+        - the target watcher is fixed at startup, so reload cannot change the
+          target definitions.
+        """
+        for policy in config.policies:
+            where = f"policy {policy.name!r}"
+            if policy.domains and self._matcher_factory is None:
+                raise ApiError("bad_request", f"{where}: destination rules need a rule matcher")
+            if policy.leak.dns_via_target and self._dns is None:
+                raise ApiError("bad_request", f"{where}: dns_via_target needs a DNS service")
+            hostnames = [d for d in policy.domains if not _is_address_rule(d)]
+            if hostnames and not policy.leak.dns_via_target:
+                raise ApiError(
+                    "bad_request",
+                    f"{where}: hostname rules ({hostnames[0]!r}) need dns_via_target: true, "
+                    "since only the policy's DNS stub can learn their addresses",
+                )
+        old = self.reconciler.config
+        if old is not None and old.targets != config.targets:
+            raise ApiError(
+                "bad_request", "reload cannot change targets yet; restart the daemon instead"
+            )
 
     def _validate_policy_slots(self, config: Config) -> None:
         names = tuple(policy.name for policy in config.policies)
@@ -247,8 +282,8 @@ class Daemon:
         # The watcher is gone: we can no longer tell whether a target is up.
         # Treat every target as down so kill-switch policies block.
         log.error("%s; marking all targets down", reason)
+        self._watcher_errors["targets"] = reason
         await self.reconciler.update_targets({})
-        self.reconciler.last_error = reason
 
     async def _watch_bindings(self) -> None:
         try:
@@ -258,15 +293,17 @@ class Daemon:
             raise
         except Exception as e:
             log.exception("app manager stream failed")
-            self.reconciler.last_error = f"app manager failed: {e}"
+            self._watcher_errors["apps"] = f"app manager failed: {e}"
 
     # --- API --------------------------------------------------------------------
 
     async def handle(self, method: str, params: dict[str, Any], peer: PeerCred | None) -> Any:
         if method == "status":
-            return dataclasses.asdict(self.status())
+            async with self._config_lock:  # never show a staged, uncommitted config
+                return dataclasses.asdict(self.status())
         if method == "apps":
-            return [dataclasses.asdict(e) for e in self.apps()]
+            async with self._config_lock:
+                return [dataclasses.asdict(e) for e in self.apps()]
         if method == "place_pid":
             return await self._place_pid(params, peer)
         if method == "reload":
@@ -318,7 +355,8 @@ class Daemon:
         targets = {
             name: {"interface": s.interface, "usable": s.usable} for name, s in r.statuses.items()
         }
-        return StatusResult(r.enabled, policies, targets, r.last_error)
+        errors = [*self._watcher_errors.values(), r.last_error]
+        return StatusResult(r.enabled, policies, targets, "; ".join(e for e in errors if e) or None)
 
     def apps(self) -> list[AppsEntry]:
         out = []
@@ -344,8 +382,13 @@ class Daemon:
             raise ApiError("bad_request", "pid must be a positive integer")
         if peer is None:
             raise ApiError("forbidden", "caller credentials unavailable")
-        if peer.uid != 0 and peer.pid != p.pid:
-            raise ApiError("forbidden", "unprivileged callers may only place their own pid")
+        if peer.uid != 0:
+            if peer.pid != p.pid:
+                raise ApiError("forbidden", "unprivileged callers may only place their own pid")
+            # SO_PEERCRED's pid is from connect time; the pidfd proves the
+            # process is still that one, not a later process with a reused PID.
+            if not peer.same_process_alive():
+                raise ApiError("forbidden", "cannot verify that the calling process still exists")
         async with self._config_lock:
             r = self.reconciler
             if not r.enabled:
@@ -353,6 +396,14 @@ class Daemon:
             if r.applied is None:
                 raise ApiError("unavailable", "routing rules are not installed yet")
             pid = self._resolve_policy(p.policy)
+            installed = next((x for x in r.applied.policies if x.policy_id == pid), None)
+            governed = installed is not None and (
+                installed.apps.any_process or policy_cgroup(pid) in installed.apps.cgroup_paths
+            )
+            if not governed:
+                raise ApiError(
+                    "unavailable", f"policy {pid}'s placement cgroup is not governed by its rules"
+                )
             if pid not in self._cgroup_policy_names:
                 name = self.config.policies[pid - 1].name
                 self._save_state(enabled=True, slots=self._cgroup_policy_names | {pid: name})
@@ -410,3 +461,9 @@ class Daemon:
                 )
             )
         self._cgroup_policy_names = slots
+
+
+def _is_address_rule(rule: str) -> bool:
+    """``asn:``/``cidr:``/``ip:`` rules need no DNS to be enforced."""
+    head = rule.strip().lower()
+    return head.startswith(("asn:", "cidr:", "ip:"))

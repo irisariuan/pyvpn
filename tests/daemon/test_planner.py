@@ -67,7 +67,12 @@ def test_numbering(config: Config) -> None:
 
 def test_dns_stub_port_only_with_dns_via_target(config: Config) -> None:
     plan = plan_of(config)
-    assert [p.dns_stub_port for p in plan.policies] == [dns_stub_port(1), dns_stub_port(2), None]
+    assert [p.dns_stub_port for p in plan.policies] == [dns_stub_port(i) for i in (1, 2, 3)]
+    office = config.policies[2].model_copy(
+        update={"leak": config.policies[2].leak.model_copy(update={"dns_via_target": False})}
+    )
+    off = config.model_copy(update={"policies": (*config.policies[:2], office)})
+    assert plan_of(off).policies[2].dns_stub_port is None
 
 
 def test_dests_none_without_domains_and_empty_set_with(config: Config) -> None:

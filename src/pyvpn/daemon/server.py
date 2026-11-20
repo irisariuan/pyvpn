@@ -8,11 +8,12 @@ import fcntl
 import json
 import logging
 import os
+import select
 import socket
 import stat
 import struct
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,23 @@ class PeerCred:
     pid: int
     uid: int
     gid: int
+    # A pidfd for ``pid`` opened when the connection was accepted. It keeps
+    # referring to that process, so a later PID reuse can be detected.
+    pidfd: int | None = field(default=None, compare=False)
+
+    def same_process_alive(self) -> bool:
+        """Whether the connecting process still exists (not a reused PID).
+
+        A pidfd becomes readable once its process exits. Without a pidfd the
+        identity cannot be checked, so this returns False (fail closed).
+        """
+        if self.pidfd is None:
+            return False
+        try:
+            readable, _, _ = select.select([self.pidfd], [], [], 0)
+        except (OSError, ValueError):
+            return False
+        return not readable
 
 
 class ApiError(Exception):
@@ -47,7 +65,12 @@ def peer_cred(sock: socket.socket | None) -> PeerCred | None:
     except OSError:
         return None
     pid, uid, gid = struct.unpack("3i", raw)
-    return PeerCred(pid, uid, gid)
+    pidfd = None
+    pidfd_open = getattr(os, "pidfd_open", None)
+    if pidfd_open is not None and pid > 0:
+        with contextlib.suppress(OSError):
+            pidfd = pidfd_open(pid)
+    return PeerCred(pid, uid, gid, pidfd)
 
 
 def acquire_instance_lock(path: Path) -> int:
@@ -75,6 +98,7 @@ class ApiServer:
         self._inode: int | None = None
         self._clients: dict[asyncio.Task[None], asyncio.StreamWriter] = {}
         self._closing = False
+        self.drain_timeout = 5.0
 
     async def start(self, *, start_serving: bool = True) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -101,7 +125,15 @@ class ApiServer:
             self._server.close()
             for writer in self._clients.values():
                 writer.close()
-            await asyncio.gather(*self._clients, return_exceptions=True)
+            clients = list(self._clients)
+            if clients:
+                # A request stuck in its handler (audit, reload) must not block
+                # shutdown forever: wait a bit, then cancel. Config changes
+                # roll back on cancellation.
+                _, pending = await asyncio.wait(clients, timeout=self.drain_timeout)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*clients, return_exceptions=True)
             await self._server.wait_closed()
             self._server = None
         # Remove the socket only if it is still ours, not a successor's.
@@ -120,6 +152,15 @@ class ApiServer:
 
     async def _client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = peer_cred(writer.get_extra_info("socket"))
+        try:
+            await self._serve_client(reader, writer, peer)
+        finally:
+            if peer is not None and peer.pidfd is not None:
+                os.close(peer.pidfd)
+
+    async def _serve_client(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, peer: PeerCred | None
+    ) -> None:
         try:
             while not self._closing:
                 try:

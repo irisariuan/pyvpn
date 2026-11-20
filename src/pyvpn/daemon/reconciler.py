@@ -46,8 +46,10 @@ def _carry_learned_dests(
     Apps keep using cached answers after a reload, so dropping the learned
     addresses would send them out the default route (even under
     ``on_down: block``) until they query DNS again. A policy keeps its set
-    when one with the same name and the same ``domains`` exists in the new
-    config; ids are remapped because they follow config order.
+    when one with the same name exists in the new config and its new
+    ``domains`` only add rules (no exclusions) to the old ones, so every
+    learned address still matches; ids are remapped because they follow
+    config order. Any other edit starts the set empty (fail closed).
     """
     if old is None or not learned:
         return {}
@@ -55,12 +57,20 @@ def _carry_learned_dests(
     out: dict[int, DestSet] = {}
     for new_id, policy in enumerate(new.policies, start=1):
         prev = old_ids.get(policy.name)
-        if prev is None or prev[1] != policy.domains or not policy.domains:
+        if prev is None or not policy.domains or not _only_adds_rules(prev[1], policy.domains):
             continue
         dests = learned.get(prev[0])
         if dests:
             out[new_id] = replace(dests, policy_id=new_id)
     return out
+
+
+def _only_adds_rules(old: tuple[str, ...], new: tuple[str, ...]) -> bool:
+    """Whether ``new`` keeps every rule of ``old`` and adds only plain rules."""
+    kept = set(new)
+    if not set(old) <= kept:
+        return False
+    return not any(rule.lstrip().startswith("!") for rule in kept - set(old))
 
 
 def _dns_changed(old: PolicyPlan | None, new: PolicyPlan) -> bool:
@@ -99,7 +109,12 @@ class Reconciler:
         self.enabled = True
         self.applied: RoutingPlan | None = None
         self.dns_applied: dict[int, PolicyPlan] = {}
-        self.last_error: str | None = None
+        # Stubs whose stop failed: they may still be listening, so keep
+        # retrying the stop until it succeeds.
+        self._dns_stop_pending: set[int] = set()
+        self._apply_error: str | None = None
+        self._dns_error: str | None = None
+        self._retry_wanted = False
         # ``_generation`` identifies the config held in ``self.config``: every
         # swap takes a fresh value and a rollback restores the old one, so a
         # value is never reused. ``_committed`` is the generation of the last
@@ -110,6 +125,12 @@ class Reconciler:
         self._generations = itertools.count(1)
         self._generation = 0
         self._committed = 0
+
+    @property
+    def last_error(self) -> str | None:
+        """The current apply or DNS failure, cleared once that part recovers."""
+        errors = [e for e in (self._apply_error, self._dns_error) if e]
+        return "; ".join(errors) or None
 
     # --- inputs ---------------------------------------------------------------
 
@@ -284,10 +305,13 @@ class Reconciler:
         if plan is None:
             return
         if plan != self.applied:
+            # Stop stubs whose settings change (e.g. main -> unreachable)
+            # before routing changes, so none forwards with the old route.
+            await self._stop_changed_dns_locked(plan)
             try:
                 await self._apply_locked(plan)
             except Exception as e:  # backend keeps the previous state on failure
-                self.last_error = f"apply failed: {e}"
+                self._apply_error = f"apply failed: {e}"
                 log.exception("apply failed; retrying")
                 self._schedule_retry()
                 return
@@ -296,34 +320,61 @@ class Reconciler:
     async def _apply_locked(self, plan: RoutingPlan) -> None:
         await self._backend.apply(plan)
         self.applied = plan
-        self.last_error = None
+        self._apply_error = None
 
-    async def _quiesce_dns_locked(self) -> None:
+    async def _stop_dns_locked(self, pid: int) -> bool:
+        """Stop one stub. A failed stop is remembered and retried, since the
+        listener may still be live; it is never just forgotten."""
+        assert self._dns is not None
+        self.dns_applied.pop(pid, None)
+        try:
+            await self._dns.stop(pid)
+        except Exception as e:
+            self._dns_stop_pending.add(pid)
+            self._dns_error = f"dns policy {pid}: stop failed: {e}"
+            log.exception("dns stop failed for policy %d", pid)
+            return False
+        self._dns_stop_pending.discard(pid)
+        return True
+
+    async def _stop_all_dns_locked(self) -> bool:
         if self._dns is None:
-            return
-        ids = set(self.dns_applied)
+            return True
+        ids = set(self.dns_applied) | self._dns_stop_pending
         if self.applied is not None:
             # Include configured ports even if an earlier listener update failed.
             ids.update(p.policy_id for p in self.applied.policies if p.dns_stub_port is not None)
+        ok = True
         for pid in sorted(ids):
-            # A failed stop may already have closed the listener. Resync it on rollback.
-            self.dns_applied.pop(pid, None)
-            await self._dns.stop(pid)
+            ok = await self._stop_dns_locked(pid) and ok
+        return ok
+
+    async def _quiesce_dns_locked(self) -> None:
+        if not await self._stop_all_dns_locked():
+            raise RuntimeError(self._dns_error or "dns stop failed")
+
+    async def _stop_changed_dns_locked(self, plan: RoutingPlan) -> None:
+        if self._dns is None:
+            return
+        want = {p.policy_id: p for p in plan.policies}
+        for pid, old in list(self.dns_applied.items()):
+            new = want.get(pid)
+            if new is None or new.dns_stub_port is None or _dns_changed(old, new):
+                await self._stop_dns_locked(pid)
 
     async def _sync_dns_locked(self, plan: RoutingPlan) -> None:
         """Make the running stubs match ``plan``; retry anything that failed."""
         ok = True
         if self._dns is not None:
             want = {p.policy_id: p for p in plan.policies if p.dns_stub_port is not None}
-            for pid in [pid for pid in self.dns_applied if pid not in want]:
-                try:
-                    await self._dns.stop(pid)
-                    del self.dns_applied[pid]
-                except Exception as e:
-                    ok = False
-                    self.last_error = f"dns policy {pid}: stop failed: {e}"
-                    log.exception("dns stop failed for policy %d", pid)
+            stale = {pid for pid in self.dns_applied if pid not in want}
+            # Retry pending stops first, also for stubs that should run: the
+            # old listener may still hold the port.
+            for pid in sorted(stale | self._dns_stop_pending):
+                ok = await self._stop_dns_locked(pid) and ok
             for pid, p in want.items():
+                if pid in self._dns_stop_pending:
+                    continue  # still not stopped; retried later
                 if not _dns_changed(self.dns_applied.get(pid), p):
                     continue
                 try:
@@ -331,41 +382,51 @@ class Reconciler:
                     self.dns_applied[pid] = p
                 except Exception as e:
                     ok = False
-                    self.last_error = f"dns policy {pid}: {e}"
+                    self._dns_error = f"dns policy {pid}: {e}"
                     log.exception("dns update failed for policy %d", pid)
                     # Fail closed: never leave a stub running with stale settings.
-                    self.dns_applied.pop(pid, None)
-                    with contextlib.suppress(Exception):
-                        await self._dns.stop(pid)
+                    await self._stop_dns_locked(pid)
         if ok:
+            self._dns_error = None
             self._retry_delay = self._retry_initial
         else:
             self._schedule_retry()
 
     def _schedule_retry(self) -> None:
+        """Retry soon. The task stays tracked until it finishes (including
+        the reconcile it runs), so ``close()`` can wait for in-flight work."""
+        self._retry_wanted = True
         if self._retry_task is not None and not self._retry_task.done():
             return
-        delay = self._retry_delay
-        self._retry_delay = min(self._retry_delay * 2, self._retry_max)
 
         async def retry() -> None:
-            await asyncio.sleep(delay)
-            self._retry_task = None
-            await self.reconcile()
+            while self._retry_wanted:
+                self._retry_wanted = False
+                delay = self._retry_delay
+                self._retry_delay = min(self._retry_delay * 2, self._retry_max)
+                await asyncio.sleep(delay)
+                await self.reconcile()
 
         self._retry_task = asyncio.get_running_loop().create_task(retry())
 
     async def disable(self) -> None:
-        """Remove all rules and stop all stubs until ``enable``."""
+        """Remove all rules and stop all stubs until ``enable``.
+
+        Routing counts as disabled only once teardown succeeded. If it fails
+        part-way, ``applied`` no longer describes the backend, so it is
+        cleared and the active config is re-applied (enforcement resumes).
+        """
         async with self._lock:
-            self.enabled = False
             self._cancel_retry()
-            if self._dns is not None:
-                for pid in list(self.dns_applied):
-                    with contextlib.suppress(Exception):
-                        await self._dns.stop(pid)
-            self.dns_applied = {}
-            await self._backend.teardown()
+            await self._stop_all_dns_locked()
+            try:
+                await self._backend.teardown()
+            except Exception as e:
+                self.applied = None
+                self._apply_error = f"teardown failed: {e}"
+                self._schedule_retry()
+                raise
+            self.enabled = False
             self.applied = None
 
     async def enable(self) -> None:
@@ -373,9 +434,22 @@ class Reconciler:
         await self.reconcile()
 
     def _cancel_retry(self) -> None:
+        self._retry_wanted = False
         if self._retry_task is not None:
             self._retry_task.cancel()
             self._retry_task = None
 
     async def close(self) -> None:
+        """Stop background work and the DNS stubs; installed rules stay.
+
+        Waits for an in-flight retry so nothing changes routing after the
+        daemon gives up ownership, and stops the stubs so their callbacks
+        cannot touch the backend afterwards.
+        """
+        task = self._retry_task
         self._cancel_retry()
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        async with self._lock:
+            await self._stop_all_dns_locked()

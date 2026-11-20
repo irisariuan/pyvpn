@@ -123,10 +123,11 @@ async def test_binding_for_unknown_policy_is_ignored(config: Config) -> None:
 async def test_dns_follows_interface_and_stops(config: Config) -> None:
     r, _, dns = make()
     await r.set_config(config)
-    assert sorted(dns.running) == [1, 2]  # policy 3 has dns_via_target off
+    assert sorted(dns.running) == [1, 2, 3]
     dns.events.clear()
     await r.update_targets({"nl": up("nl", "tun0")})
-    assert sorted(dns.events) == [("start", 1), ("start", 2)]
+    # Affected stubs stop before routing changes, then restart with it.
+    assert dns.events == [("stop", 1), ("stop", 2), ("start", 1), ("start", 2)]
     assert dns.running[2].interface == "tun0"
     dns.events.clear()
     await r.update_targets({"nl": up("nl", "tun0")})
@@ -195,7 +196,7 @@ async def test_failed_dns_start_is_retried_without_route_change(config: Config) 
     assert r.last_error and "simulated" in r.last_error
     await r.reconcile()  # same routing plan, but DNS is behind
     assert len(backend.plans) == 1
-    assert sorted(dns.running) == [1, 2] and sorted(r.dns_applied) == [1, 2]
+    assert sorted(dns.running) == [1, 2, 3] and sorted(r.dns_applied) == [1, 2, 3]
     await r.close()
 
 
@@ -222,7 +223,11 @@ async def test_commit_config_failure_restores_previous_state(config: Config) -> 
     with pytest.raises(RuntimeError):
         await r.commit_config(other, (), {1: AppBinding(1, cgroup_paths=("x",))})
     assert r.config is config and r.applied == installed and r.dynamic_dests == dests
-    assert dns.running == listeners
+    # Same listeners with the same DNS settings (their plans may now carry
+    # the learned destinations).
+    assert {k: (v.route, v.interface) for k, v in dns.running.items()} == {
+        k: (v.route, v.interface) for k, v in listeners.items()
+    }
     await r.add_dests(DestSet(3, frozenset({NET_B})))  # old ids still valid
     await r.close()
 
@@ -246,7 +251,13 @@ async def test_commit_config_keeps_old_routes_if_a_listener_cannot_stop(
         await r.commit_config(other, (), {})
 
     assert r.config is config and backend.installed is installed
-    assert dns.running == listeners
+    # Listener 2 reported a failed stop, so it is not restarted until a
+    # stop succeeds (it might still hold its port); the others are back.
+    assert dns.running == {k: v for k, v in listeners.items() if k != 2}
+    assert r.last_error and "stop failed" in r.last_error
+    monkeypatch.setattr(dns, "stop", stop)
+    await r.reconcile()  # the pending stop now succeeds and the stub restarts
+    assert sorted(dns.running) == sorted(listeners)
     await r.close()
 
 
@@ -328,4 +339,92 @@ async def test_stale_binding_is_dropped_after_commit(config: Config) -> None:
     r, _ = await _binding_during_commit(config, fail=False)
     assert r.config is not None and r.config.policies[0].name == "Office"
     assert 1 not in r.bindings  # never attached to the policy that now has id 1
+    await r.close()
+
+
+async def test_additive_domain_edit_keeps_learned_dests(config: Config) -> None:
+    r, _, _ = make()
+    await r.set_config(config)
+    await r.update_targets({"office": up("office", "wlan1")})
+    await r.add_dests(DestSet(3, frozenset({NET_A})))
+    office = config.policies[2]
+
+    added = office.model_copy(update={"domains": (*office.domains, "more.example")})
+    await r.commit_config(
+        config.model_copy(update={"policies": (*config.policies[:2], added)}), (), {}
+    )
+    assert r.dynamic_dests == {3: DestSet(3, frozenset({NET_A}))}
+
+    excluded = added.model_copy(update={"domains": (*added.domains, "!x.corp.example")})
+    await r.commit_config(
+        config.model_copy(update={"policies": (*config.policies[:2], excluded)}), (), {}
+    )
+    assert r.dynamic_dests == {}  # an exclusion may un-match learned addresses
+    await r.close()
+
+
+class StuckStopDns(FakeDnsService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_stop = 0
+
+    async def stop(self, policy_id: int) -> None:
+        if self.fail_stop:
+            self.fail_stop -= 1
+            raise RuntimeError("close listener: simulated failure")
+        await super().stop(policy_id)
+
+
+async def test_failed_stub_stop_is_retried_until_it_succeeds(config: Config) -> None:
+    backend, dns = FakeBackend(), StuckStopDns()
+    r = Reconciler(backend, dns, retry_initial=60)
+    await r.set_config(config)
+    dns.fail_stop = 1
+    await r.disable()
+    assert 1 in dns.running and r.last_error and "stop failed" in r.last_error
+    await r.enable()  # the pending stop is retried before the stub restarts
+    assert ("stop", 1) in dns.events and sorted(dns.running) == [1, 2, 3]
+    assert r.last_error is None
+    await r.close()
+
+
+async def test_failed_teardown_keeps_enforcing(config: Config) -> None:
+    r, backend, _ = make(retry_initial=0)
+
+    async def broken() -> None:
+        raise RuntimeError("nft: teardown failed part-way")
+
+    await r.set_config(config)
+    teardown = backend.teardown
+    backend.teardown = broken  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="part-way"):
+        await r.disable()
+    assert r.enabled and r.applied is None
+    plans = len(backend.plans)
+    await asyncio.sleep(0.01)  # the retry re-applies the active config
+    assert len(backend.plans) == plans + 1 and r.applied is not None
+    backend.teardown = teardown  # type: ignore[method-assign]
+    await r.close()
+
+
+async def test_close_stops_stubs_and_waits_for_a_running_retry(config: Config) -> None:
+    r, backend, dns = make(retry_initial=0)
+    backend.fail_apply = 1
+    await r.set_config(config)  # fails, schedules a retry
+    assert r._retry_task is not None
+    await r.close()
+    assert r._retry_task is None and dns.running == {}
+    plans = len(backend.plans)
+    await asyncio.sleep(0.01)
+    assert len(backend.plans) == plans  # nothing applies after close
+
+
+async def test_dns_only_retry_clears_its_error(config: Config) -> None:
+    backend, dns = FakeBackend(), FlakyDns()
+    r = Reconciler(backend, dns, retry_initial=60)
+    dns.fail_start = 1
+    await r.set_config(config)
+    assert r.last_error
+    await r.reconcile()
+    assert r.last_error is None
     await r.close()
