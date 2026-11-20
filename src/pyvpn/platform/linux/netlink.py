@@ -1,18 +1,23 @@
-"""Linux netlink interface, address, route, and event helpers."""
+"""Linux netlink interface, address, route, and event helpers.
+
+Also holds the Linux probe connector (``SO_BINDTODEVICE``), so the shared
+``pyvpn.targets`` core stays OS-agnostic.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import select
+import socket
 import threading
-from collections.abc import AsyncIterator, Callable, Iterable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Mapping
 from ipaddress import ip_address
 from typing import Any, Protocol
 
 from pyvpn.config.models import Target
 from pyvpn.state import IPAddress, TargetStatus
-from pyvpn.targets.watcher import InterfaceSnapshot, status_for_target
+from pyvpn.targets.watcher import InterfaceSnapshot, SnapshotTargetWatcher
 
 _RT_TABLE_MAIN = 254
 _IFF_UP = 0x1
@@ -21,6 +26,8 @@ _IFF_LOWER_UP = 0x10000
 _RT_SCOPE_LINK = 253  # link (fe80::/10, 169.254/16) and host (loopback) scopes
 _IFA_F_DADFAILED = 0x08
 _IFA_F_TENTATIVE = 0x40
+# Missing from ``socket`` in typeshed on non-Linux hosts; 25 on every Linux arch.
+_SO_BINDTODEVICE: int = getattr(socket, "SO_BINDTODEVICE", 25)
 
 
 class NetlinkEventSource(Protocol):
@@ -193,6 +200,36 @@ def _snapshots_from_messages(
     return tuple(snapshots)
 
 
+def tcp_connect_bound(interface: str, host: str, port: int, timeout: float = 3.0) -> bool:
+    """Probe :data:`~pyvpn.targets.probes.Connector` for Linux.
+
+    Connects to ``host:port`` (an IP literal) on a socket bound to
+    ``interface`` with ``SO_BINDTODEVICE``, so the probe can only leave through
+    that interface. A socket that cannot be bound is never connected.
+    """
+
+    try:
+        addresses = socket.getaddrinfo(
+            host, port, type=socket.SOCK_STREAM, flags=socket.AI_NUMERICHOST
+        )
+    except socket.gaierror:
+        return False
+
+    for family, sock_type, proto, _, address in addresses:
+        with socket.socket(family, sock_type, proto) as sock:
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, _SO_BINDTODEVICE, interface.encode())
+            except OSError:
+                continue  # fail closed: never connect unbound
+            sock.settimeout(timeout)
+            try:
+                sock.connect(address)
+            except OSError:
+                continue
+            return True
+    return False
+
+
 class NetlinkReader:
     """Read and watch interfaces using pyroute2 when available."""
 
@@ -219,7 +256,7 @@ class NetlinkReader:
                 snapshot_ipr.get_routes(),
             )
 
-    async def events(self) -> AsyncIterator[tuple[InterfaceSnapshot, ...]]:
+    async def events(self) -> AsyncGenerator[tuple[InterfaceSnapshot, ...], None]:
         """Yield one refreshed snapshot per coalesced netlink event burst."""
 
         try:
@@ -306,22 +343,11 @@ class NetlinkReader:
 
 
 class NetlinkTargetWatcher:
-    """TargetWatcher backed by live Linux netlink state."""
+    """``pyvpn.services.TargetWatcher`` backed by live Linux netlink state."""
 
     def __init__(self, targets: Iterable[Target], reader: NetlinkEventSource | None = None) -> None:
         self._targets = tuple(targets)
         self._reader = reader or NetlinkReader()
 
-    async def statuses(self) -> AsyncIterator[dict[str, TargetStatus]]:
-        # Netlink bursts include changes that do not affect any target (e.g.
-        # routes in pyvpn's own tables after an apply); emitting an identical
-        # map would trigger another reconcile for nothing.
-        last: dict[str, TargetStatus] | None = None
-        async for snapshots in self._reader.events():
-            statuses = self._statuses_for(snapshots)
-            if statuses != last:
-                last = statuses
-                yield statuses
-
-    def _statuses_for(self, snapshots: tuple[InterfaceSnapshot, ...]) -> dict[str, TargetStatus]:
-        return {target.name: status_for_target(target, snapshots) for target in self._targets}
+    def statuses(self) -> AsyncIterator[dict[str, TargetStatus]]:
+        return SnapshotTargetWatcher(self._targets, self._reader.events()).statuses()

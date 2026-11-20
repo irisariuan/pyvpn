@@ -1,19 +1,30 @@
-"""Optional TCP reachability probes bound to target interfaces."""
+"""Optional TCP reachability probes through target interfaces.
+
+This module is OS-agnostic: it parses probe endpoints and runs probes, but
+binding a socket to an interface is platform-specific (``SO_BINDTODEVICE`` on
+Linux, ``IP_BOUND_IF`` on macOS, see PLAN.md §2.1). The caller passes a
+:data:`Connector` from ``pyvpn.platform.<os>``; on Linux that is
+:func:`pyvpn.platform.linux.netlink.tcp_connect_bound`.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import ipaddress
-import socket
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
-# Linux-only socket option (value 25 on Linux); the constant is missing from
-# the ``socket`` module elsewhere, where binding to a device is unsupported.
-_SO_BINDTODEVICE: int = getattr(socket, "SO_BINDTODEVICE", 25)
+Connector = Callable[[str, str, int, float], bool]
+"""``connect(interface, host, port, timeout)``: whether a TCP connect bound to
+``interface`` succeeds. ``host`` is always an IP literal. Blocking; it is run
+in a worker thread."""
 
 
 def parse_probe(endpoint: str) -> tuple[str, int]:
-    """Parse a probe endpoint in ``host:port`` form."""
+    """Parse a probe endpoint in ``host:port`` form.
+
+    Only IP literals are accepted: resolving a hostname would go through the
+    system resolver, i.e. over the default route, outside the target.
+    """
 
     host, separator, port_text = endpoint.rpartition(":")
     if not separator or not host or not port_text:
@@ -28,51 +39,20 @@ def parse_probe(endpoint: str) -> tuple[str, int]:
     return str(address), port
 
 
-def tcp_probe(interface: str, host: str, port: int, timeout: float = 3.0) -> bool:
-    """Return whether a TCP connection succeeds while bound to interface."""
-
-    ipaddress.ip_address(host)
-    try:
-        addresses = socket.getaddrinfo(
-            host,
-            port,
-            type=socket.SOCK_STREAM,
-            flags=socket.AI_NUMERICHOST,
-        )
-    except socket.gaierror:
-        return False
-
-    for family, sock_type, proto, _, address in addresses:
-        sock = socket.socket(family, sock_type, proto)
-        try:
-            sock.settimeout(timeout)
-            try:
-                sock.setsockopt(
-                    socket.SOL_SOCKET,
-                    _SO_BINDTODEVICE,
-                    interface.encode(),
-                )
-            except OSError:
-                sock.close()
-                continue
-            sock.connect(address)
-            return True
-        except OSError:
-            pass
-        finally:
-            sock.close()
-    return False
-
-
 async def probe_target(
     interface: str,
     endpoints: Sequence[str],
+    connect: Connector,
     timeout: float = 3.0,
 ) -> bool:
-    """Run one or more configured TCP probes without blocking the event loop."""
+    """Return whether any endpoint is reachable through ``interface``.
+
+    Runs the blocking ``connect`` in a worker thread so the event loop is not
+    blocked.
+    """
 
     for endpoint in endpoints:
         host, port = parse_probe(endpoint)
-        if await asyncio.to_thread(tcp_probe, interface, host, port, timeout):
+        if await asyncio.to_thread(connect, interface, host, port, timeout):
             return True
     return False

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import socket
 from collections.abc import AsyncIterator, Iterable
 
 import pytest
 
 from pyvpn.config.models import Target
+from pyvpn.platform.linux import netlink
 from pyvpn.platform.linux.netlink import (
     NetlinkTargetWatcher,
     _default_gateways,
@@ -16,15 +18,16 @@ from pyvpn.platform.linux.netlink import (
     parse_address,
     parse_gateway,
 )
+from pyvpn.services import TargetWatcher
 from pyvpn.state import TargetStatus
 from pyvpn.targets import (
     InterfaceSnapshot,
-    TargetWatcher,
+    SnapshotTargetWatcher,
     resolve_interface,
     resolve_interfaces,
     status_for_target,
 )
-from pyvpn.targets.probes import parse_probe
+from pyvpn.targets.probes import parse_probe, probe_target
 
 
 def _address(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
@@ -225,7 +228,7 @@ def test_target_watcher_emits_status_for_each_event() -> None:
         yield (InterfaceSnapshot("tun0", 1, True, (_address("10.0.0.2"),)),)
 
     async def collect() -> list[dict[str, TargetStatus]]:
-        return [status async for status in TargetWatcher((target,), events()).statuses()]
+        return [status async for status in SnapshotTargetWatcher((target,), events()).statuses()]
 
     statuses = asyncio.run(collect())
     assert len(statuses) == 2
@@ -292,7 +295,7 @@ def test_watchers_skip_bursts_that_change_no_target() -> None:
 
     async def collect() -> tuple[int, int]:
         a = [s async for s in NetlinkTargetWatcher((target,), FakeReader()).statuses()]
-        b = [s async for s in TargetWatcher((target,), snapshots()).statuses()]
+        b = [s async for s in SnapshotTargetWatcher((target,), snapshots()).statuses()]
         return len(a), len(b)
 
     assert asyncio.run(collect()) == (1, 1)
@@ -304,3 +307,72 @@ def test_probe_target_is_unusable_and_warns(caplog: pytest.LogCaptureFixture) ->
     assert not status_for_target(target, (snapshot,)).usable
     assert not status_for_target(target, (snapshot,)).usable
     assert caplog.text.count("probe: true, which is not supported yet") == 1
+
+
+def test_watchers_conform_to_the_services_protocol() -> None:
+    async def nothing() -> AsyncIterator[tuple[InterfaceSnapshot, ...]]:
+        return
+        yield
+
+    class FakeReader:
+        def events(self) -> AsyncIterator[tuple[InterfaceSnapshot, ...]]:
+            return nothing()
+
+    # Typed assignments: mypy checks these against pyvpn.services.TargetWatcher.
+    snapshot_watcher: TargetWatcher = SnapshotTargetWatcher((), nothing())
+    netlink_watcher: TargetWatcher = NetlinkTargetWatcher((), FakeReader())
+
+    async def drain(watcher: TargetWatcher) -> list[dict[str, TargetStatus]]:
+        return [s async for s in watcher.statuses()]
+
+    assert asyncio.run(drain(snapshot_watcher)) == []
+    assert asyncio.run(drain(netlink_watcher)) == []
+
+
+def test_probe_target_uses_injected_connector_with_ip_literals() -> None:
+    calls: list[tuple[str, str, int, float]] = []
+
+    def connect(interface: str, host: str, port: int, timeout: float) -> bool:
+        calls.append((interface, host, port, timeout))
+        return host == "2001:db8::1"
+
+    endpoints = ("192.0.2.1:443", "[2001:db8::1]:53")
+    assert asyncio.run(probe_target("wg0", endpoints, connect, timeout=1.0))
+    assert calls == [("wg0", "192.0.2.1", 443, 1.0), ("wg0", "2001:db8::1", 53, 1.0)]
+    assert not asyncio.run(probe_target("wg0", ("192.0.2.1:443",), lambda *_: False))
+    with pytest.raises(ValueError, match="IP literals"):
+        asyncio.run(probe_target("wg0", ("example.com:443",), connect))
+
+
+class _FakeSocket:
+    def __init__(self, log: list[str], bind_ok: bool) -> None:
+        self._log = log
+        self._bind_ok = bind_ok
+
+    def __enter__(self) -> _FakeSocket:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._log.append("close")
+
+    def setsockopt(self, level: int, option: int, value: bytes) -> None:
+        self._log.append(f"bind {value.decode()} opt={option}")
+        if not self._bind_ok:
+            raise PermissionError("EPERM")
+
+    def settimeout(self, timeout: float) -> None:
+        pass
+
+    def connect(self, address: object) -> None:
+        self._log.append("connect")
+
+
+@pytest.mark.parametrize("bind_ok", [True, False])
+def test_tcp_connect_bound_never_connects_an_unbound_socket(
+    monkeypatch: pytest.MonkeyPatch, bind_ok: bool
+) -> None:
+    log: list[str] = []
+    monkeypatch.setattr(socket, "socket", lambda *args: _FakeSocket(log, bind_ok))
+    assert netlink.tcp_connect_bound("wg0", "192.0.2.1", 443) is bind_ok
+    bind = f"bind wg0 opt={netlink._SO_BINDTODEVICE}"
+    assert log == ([bind, "connect", "close"] if bind_ok else [bind, "close"])

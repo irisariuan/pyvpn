@@ -72,8 +72,12 @@ def status_for_target(
     )
 
 
-class TargetWatcher:
-    """Reconcile configured targets whenever an event stream changes."""
+class SnapshotTargetWatcher:
+    """Reconcile configured targets whenever a snapshot stream changes.
+
+    Implements the ``pyvpn.services.TargetWatcher`` protocol on top of any
+    OS-specific stream of interface snapshots (e.g. Linux netlink).
+    """
 
     def __init__(
         self,
@@ -84,12 +88,15 @@ class TargetWatcher:
         self._events = events
 
     async def statuses(self) -> AsyncIterator[dict[str, TargetStatus]]:
+        # Snapshot bursts include changes that affect no target (e.g. routes
+        # in pyvpn's own tables after an apply); emitting an identical map
+        # would trigger another reconcile for nothing.
         last: dict[str, TargetStatus] | None = None
         async for snapshots in self._events:
             snapshot_tuple = tuple(snapshots)
             statuses = {
                 target.name: status_for_target(target, snapshot_tuple) for target in self._targets
             }
-            if statuses != last:  # skip bursts that change no target
+            if statuses != last:
                 last = statuses
                 yield statuses
