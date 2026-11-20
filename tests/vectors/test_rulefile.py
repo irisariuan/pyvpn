@@ -119,3 +119,14 @@ def test_multiline_route_is_one_entry() -> None:
 def test_bom_and_crlf() -> None:
     r = parse_text("﻿@name X\r\nexample.com\r\n")
     assert r.file.name == "X" and r.file.domains == ["example.com"]
+
+
+def test_hosts_import_skips_addresses_and_loopback_aliases() -> None:
+    text = (
+        "0.0.0.0 0.0.0.0\n127.0.0.1 localhost localhost.localdomain\n"
+        "::1 ip6-localhost ip6-loopback localhost6\n0.0.0.0 ::1 ads.example\n"
+        "127.0.0.1 local broadcasthost tracker.example\n"
+    )
+    r = parse_text(text, convert=True)
+    assert r.errors == []
+    assert r.file.domains == ["=ads.example", "=tracker.example"]

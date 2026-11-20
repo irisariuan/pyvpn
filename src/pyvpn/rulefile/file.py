@@ -69,7 +69,23 @@ class ParseResult:
 _HOSTS_RE = re.compile(r"^(0\.0\.0\.0|127\.0\.0\.1|::1?)\s+(\S+)")
 _ABP_RE = re.compile(r"^\|\|([a-z0-9.\-_*]+)\^(\$.*)?$")
 _DNSMASQ_RE = re.compile(r"^(server|ipset|nftset|address|local)=/(.+)/")
-_HOSTS_SKIP = {"localhost", "localhost.localdomain", "broadcasthost", "local"}
+_HOSTS_SKIP = {
+    "localhost",
+    "localhost.localdomain",
+    "localhost4",
+    "localhost4.localdomain4",
+    "localhost6",
+    "localhost6.localdomain6",
+    "ip6-localhost",
+    "ip6-loopback",
+    "ip6-localnet",
+    "ip6-mcastprefix",
+    "ip6-allnodes",
+    "ip6-allrouters",
+    "ip6-allhosts",
+    "broadcasthost",
+    "local",
+}
 
 
 def _has_prefix(s: str, p: str) -> bool:
@@ -193,7 +209,8 @@ def convert_line(line: str) -> list[str] | None:
         for h in lo.split()[1:]:
             if h.startswith("#"):
                 break
-            if h not in _HOSTS_SKIP:
+            # Skip loopback aliases and addresses ("0.0.0.0 0.0.0.0").
+            if h not in _HOSTS_SKIP and canonical_ip(h) is None:
                 out.append("=" + h)
         return out
     m = _DNSMASQ_RE.match(lo)
