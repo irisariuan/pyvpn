@@ -186,8 +186,9 @@ process ── in cgroup pyvpn.slice/p-<id>, or matched by uid / unit cgroup
                     leak rejects for P: DoT, DoH IPs, QUIC, IPv6 (per policy)
               ──► ip rule pref 5200+id  fwmark P → table 1000+id
                     table 1000+id: default dev <iface> [via <gw>]   (active interface)
-                                 | unreachable                       (kill switch)
-                                 | (empty → main table)              (fall back to default route)
+                                   + higher-metric unreachable default (link-loss guard)
+                                 | unreachable default               (kill switch)
+                                 | no policy lookup for that mark    (fall back to host routing)
               ──► nft postrouting: masquerade marked traffic to the interface's address
                     (the source address was chosen for the default route before re-routing)
 ```
@@ -376,9 +377,11 @@ environment and desktop session are kept.
   `ip rule` that sends everything into the tunnel) can override us. Use our
   own table, rule priorities below theirs where possible, and document the
   ranges. `pyvpn audit` detects competing rules.
-* **Interface flaps**: a short window between the interface vanishing and the
-  table update. With `on_down: block` the table holds `unreachable` while
-  no target is usable, so the gap fails closed.
+* **Interface flaps**: the device route can disappear before the daemon sees
+  the link event. Keep a higher-metric, device-independent `unreachable`
+  default in each active policy table so the kernel stops there even if the
+  device route vanishes. A policy with `on_down: default` returns to the host's
+  normal routing only after reconciliation explicitly selects that fallback.
 * **Root daemon**: keep it small; everything else runs unprivileged.
 
 ## 10. Open questions
