@@ -28,9 +28,9 @@ route, or blocks (kill switch).
 * Python ≥ 3.11, `src/` layout, `pyproject.toml` with hatchling, one console
   script `pyvpn`. Pure-Python wheel.
 * Dependencies: `pyroute2` (netlink: routes, rules, link/address events,
-  sock_diag, process-event connector), `dnspython` (per-app DNS stubs,
-  DoT/DoH upstreams), `pydantic` v2 (config). Extra `snakevpn[ui]` →
-  `aiohttp` for a local web UI.
+  sock_diag, process-event connector), `dnspython` (DNS message parsing and
+  serialization), `aiohttp` (DoH with interface-bound sockets), and
+  `pydantic` v2 (config).
 * Release: on a `v*` tag, GitHub Actions runs the tests, builds sdist and
   wheel, and publishes with **PyPI Trusted Publishing** (no stored token).
 
@@ -247,20 +247,27 @@ A policy with only apps sends **all** of their traffic through the target. A
 policy with apps **and** destination rules sends only the matched
 destinations (snake's domain rules, `asn:`, `cidr:`) through it. A policy
 with destination rules and no apps applies those destinations to every
-process. Domain matches come from the per-policy DNS stub: the answered
-addresses go into nft sets *before* the reply is released, as snake's DNS
-inspector does.
+process. Domain matches come from the per-policy DNS stub: A and AAAA answers
+and HTTPS/SVCB address hints for a matching name go into nft sets *before* the
+reply is released, as snake's DNS inspector does for address answers.
 
 ### 3.5 Per-app DNS and leaks
 
 * Each policy gets its own stub (`127.0.0.1:53<id>`). nft redirects port 53
   **from that policy's apps** to it, which also catches hard-coded `8.8.8.8`.
-  The stub forwards through the policy's interface (bound socket; plain, DoT
-  or DoH; SERVFAIL rather than falling back to another path).
+  The stub listens on UDP and TCP. Upstream sockets bind to the target
+  interface before connecting. Configure `dns_server` with a numeric
+  address. DoT and DoH also accept `hostname@address` to verify the TLS
+  certificate against a name without consulting the system resolver.
+  DoH sends POST requests to `/dns-query`. The stub returns SERVFAIL if
+  the target or DNS upstream is unavailable, including during routing
+  fallback to the host default route. The daemon's bound upstream sockets
+  must be exempt from port-53 redirection so queries cannot loop into a stub.
 * Other apps keep the system resolver. **pyvpn does not take over system
   DNS.**
 * Per-policy leak toggles (snake's): block DoT 853, block known DoH
-  addresses, DoH canary NXDOMAIN, block QUIC, IPv6 `route`/`block`/`off`.
+  addresses, block QUIC, IPv6 `route`/`block`/`off`. A stub with
+  `block_doh` answers Firefox's `use-application-dns.net` canary with NXDOMAIN.
 * `pyvpn audit` lists, per policy, what is and is not protected.
 
 ### 3.6 Strict isolation (optional)
@@ -365,6 +372,11 @@ environment and desktop session are kept.
   (the fixture creates it, pyvpn does not). Tests launch processes through
   `pyvpn run`, delete and re-create interfaces, and assert by capture which
   interface the traffic and DNS left through.
+* **Standalone DNS integration (root on Linux):**
+  `sudo .venv/bin/python -m pytest -m integration tests/dns/test_namespace.py`
+  exercises the stubs with two DNS peers in disposable namespaces. It checks
+  target-only queries and SERVFAIL after target deletion, using fake rule
+  matching and destination-set updates.
 
 ## 9. Risks
 

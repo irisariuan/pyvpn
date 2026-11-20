@@ -10,6 +10,7 @@ readme = "PLAN.md"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = [
+    "aiohttp>=3.12",
     "pydantic>=2.6",
     "pyroute2>=0.7",
     "dnspython>=2.6",
