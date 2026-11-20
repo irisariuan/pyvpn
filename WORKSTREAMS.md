@@ -3,6 +3,10 @@
 How to split [PLAN.md](PLAN.md) so that several people can build it at the
 same time and merge it at the end with few conflicts.
 
+**Scope: Linux only.** macOS, Windows and proxy mode are deferred (see
+[Deferred](#deferred-macos-windows-proxy-mode)). Keep the `Backend` protocol
+in `platform/base.py` so they can be added later without touching the core.
+
 The idea: **agree on a small set of shared contracts first (Phase 0), then
 every workstream owns its own directory and codes only against those
 contracts and fakes.** Nobody waits for another stream's real code; a stream
@@ -14,11 +18,11 @@ everything is plugged together.
                     │ config models · state types · Backend protocol · API schema │
                     │ constants · fakes                                           │
                     └───────────────────────────────┬─────────────────────────────┘
-        ┌──────────┬──────────┬──────────┬──────────┼──────────┬──────────┬──────────┐
-        A          B          C          D          E          F          G          H
-     config     daemon     routing   targets     apps       DNS      rule engine  proxy +
-     + CLI      (hub)      + nft                          + leaks    (snake port) other OS
-        └──────────┴──────────┴──────────┴────┬─────┴──────────┴──────────┴──────────┘
+        ┌──────────┬──────────┬──────────┬──────┴───┬──────────┬──────────┐
+        A          B          C          D          E          F          G
+     config     daemon     routing   targets     apps       DNS      rule engine
+     + CLI      (hub)      + nft                          + leaks    (snake port)
+        └──────────┴──────────┴──────────┴────┬─────┴──────────┴──────────┘
                                               I: test bed, CI, release (supports all)
                                               │
                                     Phase 2: integration (B wires real parts)
@@ -91,7 +95,7 @@ class RoutingPlan:           # the whole desired state, applied atomically
 | `TargetWatcher` | D | B | `async def statuses() -> AsyncIterator[dict[str, TargetStatus]]` |
 | `AppManager` | E | B | `async def bind(policy, selectors) -> AppBinding`, `async def place_pid(pid, policy_id)`, `async def bindings() -> AsyncIterator[...]` |
 | `DnsService` | F | B | `async def start(plan)`, `async def stop(policy_id)`, `def on_answer(cb: Callable[[DestSet], Awaitable[None]])` |
-| `Backend` (platform) | C (Linux) / H (others) | B | `capabilities`, `async def apply(plan: RoutingPlan)`, `async def add_to_set(DestSet)`, `async def teardown()` |
+| `Backend` (platform) | C | B | `capabilities`, `async def apply(plan: RoutingPlan)`, `async def add_to_set(DestSet)`, `async def teardown()` |
 | `RuleMatcher` | G | F, B | `def match(domain: str) -> int | None` (policy id), `def static_sets() -> list[DestSet]` |
 | Daemon API | B | A, E (`pyvpn run`) | methods: `status`, `apps`, `reload`, `place_pid`, `disable`, `audit` |
 
@@ -148,24 +152,24 @@ code needed.
 - **Tests against:** snake's test vectors. **Fully independent — can start on day one, even before Phase 0 is merged.**
 - **Done when:** all of snake's vectors pass.
 
-### H — Proxy mode & macOS / Windows (pure Python parts)
-- **Owns:** `src/pyvpn/proxy/`, `src/pyvpn/platform/darwin/`, `src/pyvpn/platform/windows/`
-- **Builds:** per-policy SOCKS5 / HTTP CONNECT proxy with interface-bound upstream sockets (`IP_BOUND_IF`, `IP_UNICAST_IF`, `SO_BINDTODEVICE`), launchers for Chromium / Firefox / env-proxy apps, `TargetWatcher` for macOS (`PF_ROUTE`) and Windows (IP Helper), Windows WFP per-app block filters via ctypes.
-- **Tests against:** local test servers; CI on macOS and Windows runners.
-- **Done when:** M6's criterion — a browser launched via `pyvpn run` exits through the target on all three OSes.
-- **Skills:** needs someone with a Mac and/or Windows machine.
-
 ### I — Test bed, CI, release
 - **Owns:** `tests/integration/`, `tests/conftest.py` netns fixtures, `.github/workflows/`
-- **Builds:** pytest fixture that builds the namespace test bed from PLAN.md §8 ("host", "internet", veth WAN, fake VPN link), capture helpers ("which interface did this packet leave through?"), CI matrix (3.11–3.13, Linux root job, macOS, Windows), Trusted Publishing release workflow.
+- **Builds:** pytest fixture that builds the namespace test bed from PLAN.md §8 ("host", "internet", veth WAN, fake VPN link), capture helpers ("which interface did this packet leave through?"), CI matrix (Linux, Python 3.11–3.13, plus a root job for netns tests), Trusted Publishing release workflow.
 - **Done when:** other streams can write `def test_x(netbed): ...` and get a clean namespace setup with assertions on egress.
 - **Note:** small stream; whoever takes it can also take A or G.
 
-### Later / optional (separate repos-in-repo, fully independent)
-- **macOS native helper** (`native/macos/`, Swift, M8) — needs an Apple Developer ID.
-- **Windows native helper** (`native/windows/`, Rust/C + WinDivert, M9).
+### Deferred: macOS, Windows, proxy mode
 
-These only depend on the daemon ↔ helper JSON protocol, which H defines.
+Not part of the current work; nobody is assigned. When picked up later,
+they become their own streams and plug in through the `Backend` protocol:
+
+- **Proxy mode** (`src/pyvpn/proxy/`, PLAN.md §2.2 / M6): per-policy SOCKS5 /
+  HTTP CONNECT proxy with interface-bound sockets. Mainly useful for the
+  other OSes; on Linux, transparent mode already covers it.
+- **macOS / Windows pure-Python parts** (`platform/darwin/`,
+  `platform/windows/`): interface watching, pf `user` mode, WFP block filters.
+- **Native helpers** (`native/macos/` Swift, M8; `native/windows/` Rust/C +
+  WinDivert, M9): need an Apple Developer ID / Windows signing.
 
 ---
 
@@ -177,7 +181,7 @@ These only depend on the daemon ↔ helper JSON protocol, which H defines.
 |---|---|---|
 | **Hardest** | B daemon, C Linux routing & nft | B: concurrent events, fail-closed during flaps, owns integration. C: cgroup marks, ct marks, `ip rule`, masquerade, IPv6, competing VPN rules; leaks only show in root netns tests. |
 | **Hard** | F DNS & leaks, E apps | F: bound DoT/DoH upstreams, fill sets before replying, leaks are privacy bugs. E: cgroup v2, proc connector races (children fork before the move), systemd scopes. |
-| **Medium** | H proxy + other OS, D targets | H: WFP via ctypes, three OSes, needs a Mac/Windows machine. D: netlink events, gateway discovery, 100 ms target. |
+| **Medium** | D targets | Netlink events, gateway discovery, 100 ms target. |
 | **Lighter** | G rule engine, A config & CLI, I test bed & CI | G: large but fully specified by snake's vectors. A: pure Python. I: small; the netns fixture is the only tricky part. |
 
 Rules: put the strongest networking people on **B** and **C**, never give
@@ -191,18 +195,16 @@ Merge streams when the group is small:
 | Group size | Person 1 | Person 2 | Person 3 | Person 4 | Person 5 |
 |---|---|---|---|---|---|
 | **3** | B + A + I | C + D | E + F | | |
-| **4** | B + I | C + D | E + F | A + G + H | |
-| **5** | B + I | C + D | E + F | A + G | H |
-| **6+** | one stream each; the extra people take the native helpers | | | | |
+| **4** | B + I | C + D | E + F | A + G | |
+| **5** | B | C | D + E | F + G | A + I |
+| **6+** | one stream each (8 streams); extra people write integration tests with I | | | | |
 
 **G is a floater** in the 3-person split: it depends on nothing, so whoever
-finishes their streams first takes it (or it is shared). H in the 3-person
-split starts after v0.1 Linux work is stable, or goes to whoever owns a Mac
-or Windows machine.
+finishes their streams first takes it (or it is shared).
 
 Pairings keep each person's streams in neighbouring code (C + D are both
-netlink/pyroute2; E + F both act per app at runtime; A + G are both mostly
-pure Python; B + A + I all sit around the daemon API and tests).
+netlink/pyroute2; E + F and D + E both act on runtime events; A + G are both
+mostly pure Python; B + A + I all sit around the daemon API and tests).
 
 ---
 
@@ -231,7 +233,7 @@ Owned by B, with each stream owner on call for their part:
    After each swap, run the netns integration suite from I.
 2. M1 end-to-end: `pyvpn run -p X -- curl` leaves via the target, plain
    `curl` via the default route, and nothing leaks with `on_down: block`.
-3. Then M2–M5 criteria end-to-end, then H's proxy mode, then M7 release.
+3. Then M2–M5 criteria end-to-end, then the M7 release (Linux).
 
 ## Milestone → stream map
 
@@ -243,6 +245,6 @@ Owned by B, with each stream owner on call for their part:
 | M3 selectors + watcher | E, A (`pyvpn apps`) |
 | M4 DNS + leaks | F, C (redirect + leak rules) |
 | M5 destination filters | G, F, A |
-| M6 proxy mode | H |
-| M7 release | A (`install`, `--json`), E (netns), I (release) |
-| M8 / M9 native helpers | later, separate owners |
+| M6 proxy mode | deferred |
+| M7 release (Linux) | A (`install`, `--json`), E (netns), I (release) |
+| M8 / M9 native helpers | deferred |
