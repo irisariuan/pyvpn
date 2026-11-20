@@ -7,7 +7,7 @@ order and the first one whose rules route a name wins.
 Per policy, as in snake: ``!rule`` exempts a name from that policy (later
 policies are still tried); ``drop:`` claims the name for the policy but does
 not route it (blocking needs a drop set in the backend, not built yet);
-``build_matcher`` refuses to activate ``drop:`` rules until blocking exists;
+``build_matcher`` refuses to activate ``drop:`` and per-device rules;
 ``session:``, ``route:`` and ``drop[...]:`` sessions are per device in snake
 and not supported here yet (PLAN.md §4): they route nothing and ``check``
 reports them. The names in an ``if:`` condition are routed like plain rules,
@@ -190,18 +190,21 @@ class PolicyMatcher:
 
         Rejected: rules that do not parse (a typo would leave traffic
         outside its policy), ``drop:`` rules (they claim a name but nothing
-        blocks it yet, so it would take the host route) and ASNs with no
-        prefixes (the policy would silently match nothing).
+        blocks it yet, so it would take the host route), per-device rules
+        (``session:``, ``route:``, ``if:`` with ``then:``/``else:``: they
+        route nothing and are checked before plain rules, so they would hide
+        them) and ASNs with no prefixes (the policy would silently match
+        nothing).
         """
         out: list[str] = []
         for pr in self.policies:
             where = f"policy {pr.name!r}"
             out += [f"{where} rule {e.index + 1}: {e.error}: {e.rule}" for e in pr.errors]
-            r = pr.rules
-            drops = [p.raw for p in r.drop]
-            drops += [f"drop:asn:{a}" for a in r.drop_asns]
-            drops += [f"drop:cidr:{c}" for c in r.drop_cidrs]
-            out += [f"{where}: drop: rules are not enforced yet: {d}" for d in drops]
+            for raw in pr.unsupported():
+                if raw.lower().startswith("drop:"):
+                    out.append(f"{where}: drop: rules are not enforced yet: {raw}")
+                else:
+                    out.append(f"{where}: per-device rules are not supported yet: {raw}")
             for a in pr.asns:
                 if self._asn_prefixes is None:
                     out.append(f"{where}: asn:{a} needs the ASN cache")

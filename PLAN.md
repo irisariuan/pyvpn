@@ -255,8 +255,9 @@ Rule semantics (`match/policy.py`): policies are tried in config order and
 the first whose rules route a name wins; `!rule` exempts a name from that
 policy only. `drop:` rules parse but are not enforced yet (that needs a
 drop set in the backend contract), so the daemon refuses to load a config
-that has them. It also refuses rules that do not parse and `asn:` entries
-with no cached prefixes; `pyvpn rules check` reports all three. Rule
+that has them. It also refuses snake's per-device rules (they would hide
+plain rules in the same policy), rules that do not parse and `asn:` entries
+with no cached prefixes; `pyvpn rules check` reports all of these. Rule
 regexes and wildcards use RE2 syntax and are matched in linear time by the
 optional `google-re2` package (`snakevpn[re2]`), falling back to Python's
 `re` when it is not installed. snake's

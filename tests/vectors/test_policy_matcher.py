@@ -62,6 +62,19 @@ def test_runtime_rejects_unenforced_drop_rules() -> None:
         build_matcher(cfg)
 
 
+@pytest.mark.parametrize(
+    "rule",
+    ["session:**.example.com", "route:example.com", "if:example.com;then:drop:ads.example"],
+)
+def test_runtime_rejects_per_device_rules(rule: str) -> None:
+    cfg = _config({"name": "p", "targets": ["jp"], "domains": [rule, "example.com"]})
+    if not rule.startswith("if:"):
+        # Leniently built, session:/route: rules hide the plain rule.
+        assert PolicyMatcher.from_config(cfg).match("www.example.com") is None
+    with pytest.raises(RuleConfigError, match="per-device rules are not supported yet"):
+        build_matcher(cfg)
+
+
 def test_runtime_asn_rules_use_the_cache(tmp_path: Path) -> None:
     cfg = _config({"name": "asn-only", "targets": ["jp"], "domains": ["asn:AS2906"]})
     with pytest.raises(RuleConfigError, match="asn:2906 needs the ASN cache"):
