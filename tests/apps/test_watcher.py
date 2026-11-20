@@ -2,13 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from pyvpn.apps.watcher import ProcessWatcher
 from pyvpn.config.models import AppSelector, Policy
 
 
-@pytest.mark.asyncio
 async def test_startup_scan_places_matching_processes(tmp_path: Path) -> None:
     proc = tmp_path / "42"
     proc.mkdir()

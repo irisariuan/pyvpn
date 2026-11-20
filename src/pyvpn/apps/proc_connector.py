@@ -42,7 +42,7 @@ def _exec_pid(datagram: bytes) -> int | None:
         if length >= 16 + 20 + 16 + 8:
             what = struct.unpack_from("=I", datagram, start + 20)[0]
             if what == _PROC_EVENT_EXEC:
-                return struct.unpack_from("=I", datagram, start + 20 + 16 + 4)[0]
+                return int(struct.unpack_from("=I", datagram, start + 20 + 16 + 4)[0])
         offset += (length + 3) & ~3
     return None
 
@@ -62,4 +62,3 @@ async def proc_exec_events() -> AsyncIterator[int]:
                 yield pid
     finally:
         sock.close()
-

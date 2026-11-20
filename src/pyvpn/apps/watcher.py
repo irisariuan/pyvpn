@@ -49,9 +49,7 @@ class ProcessWatcher:
         moved = 0
         try:
             pids = sorted(
-                int(entry.name)
-                for entry in self.proc_root.iterdir()
-                if entry.name.isdecimal()
+                int(entry.name) for entry in self.proc_root.iterdir() if entry.name.isdecimal()
             )
         except OSError:
             return 0
@@ -79,4 +77,3 @@ class ProcessWatcher:
 
     def stop(self) -> None:
         self._stopped.set()
-

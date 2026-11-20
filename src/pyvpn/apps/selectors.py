@@ -82,8 +82,9 @@ class SelectorMatcher:
 
     @staticmethod
     def matches(selector: AppSelector, process: ProcessInfo) -> bool:
-        value = next(iter(selector.model_dump(exclude_none=True).items()))
-        field, expected = value
+        field: str
+        expected: object
+        field, expected = next(iter(selector.model_dump(exclude_none=True).items()))
         if field == "exe":
             return process.exe == expected
         if field == "name":
@@ -94,16 +95,14 @@ class SelectorMatcher:
             return process.user == expected
         if field == "flatpak":
             return process.flatpak == expected or (
-                process.flatpak is not None
-                and process.flatpak.startswith(f"{expected}-")
+                process.flatpak is not None and process.flatpak.startswith(f"{expected}-")
             )
         if field == "snap":
             return process.snap == expected
         if field == "unit":
             unit = str(expected)
             return any(
-                part == unit or part.endswith("/" + unit)
-                for part in process.cgroup.splitlines()
+                part == unit or part.endswith("/" + unit) for part in process.cgroup.splitlines()
             )
         return False
 

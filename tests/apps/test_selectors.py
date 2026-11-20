@@ -48,8 +48,12 @@ def test_matches_selector_types() -> None:
         snap="foo",
     )
     for selector in (
-        AppSelector(exe="/usr/bin/x"), AppSelector(name="x"), AppSelector(uid=1000),
-        AppSelector(user="alice"), AppSelector(unit="x.service"),
-        AppSelector(flatpak="org.x"), AppSelector(snap="foo"),
+        AppSelector(exe="/usr/bin/x"),
+        AppSelector(name="x"),
+        AppSelector(uid=1000),
+        AppSelector(user="alice"),
+        AppSelector(unit="x.service"),
+        AppSelector(flatpak="org.x"),
+        AppSelector(snap="foo"),
     ):
         assert matcher.matches(selector, process)

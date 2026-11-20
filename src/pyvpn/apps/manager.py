@@ -17,9 +17,7 @@ class AppManager:
         self.cgroups = cgroups
         self._bindings: dict[int, AppBinding] = {}
 
-    async def bind(
-        self, policy_id: int, policy: Policy, groups: Sequence[AppGroup]
-    ) -> AppBinding:
+    async def bind(self, policy_id: int, policy: Policy, groups: Sequence[AppGroup]) -> AppBinding:
         if not policy.apps:
             binding = AppBinding(policy_id, any_process=bool(policy.domains))
         else:
