@@ -249,22 +249,25 @@ destinations (snake's domain rules, `asn:`, `cidr:`) through it. A policy
 with destination rules and no apps applies those destinations to every
 process. The per-policy DNS stub matches the query name and its CNAME chain.
 A and AAAA answers, HTTPS/SVCB address hints, and additional addresses for
-referenced names go into nft sets *before* the reply is released. The daemon
-composition root supplies the active rule matcher when constructing the DNS
-service.
+referenced names go into the winning policy's nft sets *before* the reply
+is released, even when a different policy's stub handles the query. If the
+update fails, the stub returns SERVFAIL. The daemon composition root supplies
+the active rule matcher to all stubs, including app-only stubs.
 
 ### 3.5 Per-app DNS and leaks
 
 * Each policy gets its own stub (`127.0.0.1:53<id>`). nft redirects port 53
   **from that policy's apps** to it, which also catches hard-coded `8.8.8.8`.
-  The stub listens on UDP and TCP. Upstream sockets bind to the target
-  interface and set the policy's mark before connecting, so the policy's
-  route and gateway apply. With no `dns_server`, the stub uses Quad9 at
+  The stub listens on UDP and TCP. The composition root supplies the Linux
+  socket factory, which binds upstream sockets to the target interface and
+  sets the policy's mark before connecting so the policy's route and gateway
+  apply. With no `dns_server`, the stub uses Quad9 at
   `9.9.9.9` on that interface. Set a numeric address to override it.
   DoT and DoH accept `hostname@address` to verify the TLS certificate
   without consulting the system resolver. Encrypted requests to the
   default upstream verify `dns.quad9.net`. DoH sends POST requests to
-  `/dns-query` and reuses HTTPS connections per policy. The stub returns
+  `/dns-query`, requests uncompressed responses, and reuses HTTPS
+  connections per policy. The stub returns
   SERVFAIL if the target or DNS upstream is unavailable, including during
   routing fallback to the host default route. The daemon's bound upstream sockets
   must be exempt from port-53 redirection so queries cannot loop into a stub.

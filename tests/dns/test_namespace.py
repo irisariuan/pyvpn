@@ -24,6 +24,7 @@ from aiohttp import web
 
 from pyvpn.dns.service import PolicyDnsService
 from pyvpn.dns.upstream import BoundUpstream
+from pyvpn.platform.linux.dns import bound_dns_socket
 from pyvpn.services import DnsService
 from pyvpn.state import DestSet
 from tests.dns._helpers import plan_for_dns
@@ -249,7 +250,7 @@ async def _serve_peer(cert: Path, key: Path, ready: Path, hits: Path) -> None:
 
 
 async def _probe_client(cert: str, expected: str) -> None:
-    upstream = BoundUpstream(ssl.create_default_context(cafile=cert))
+    upstream = BoundUpstream(bound_dns_socket, tls_context=ssl.create_default_context(cafile=cert))
     backend = FakeBackend()
     matcher = FakeRuleMatcher({name.rstrip("."): 1 for _, _, name in _CASES})
     service: DnsService = PolicyDnsService(upstream, matcher_factory=lambda: matcher)

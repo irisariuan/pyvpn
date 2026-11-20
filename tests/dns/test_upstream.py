@@ -10,8 +10,8 @@ import dns.flags
 import dns.message
 import pytest
 
-from pyvpn.dns import upstream
-from pyvpn.dns.upstream import BoundUpstream, _bound_socket, upstream_endpoint
+from pyvpn.dns.upstream import BoundUpstream, upstream_endpoint
+from pyvpn.platform.linux.dns import bound_dns_socket
 from tests.dns._helpers import plan_for_dns as _plan
 
 
@@ -37,7 +37,7 @@ def test_failed_binding_closes_socket_without_connecting(monkeypatch: pytest.Mon
     monkeypatch.setattr(socket, "socket", Mock(return_value=sock))
 
     with pytest.raises(OSError, match="interface disappeared"):
-        _bound_socket("wg-jp", _plan().mark, socket.AF_INET, socket.SOCK_DGRAM)
+        bound_dns_socket("wg-jp", _plan().mark, socket.AF_INET, socket.SOCK_DGRAM)
 
     sock.setsockopt.assert_called_once_with(socket.SOL_SOCKET, 25, b"wg-jp\0")
     sock.close.assert_called_once()
@@ -55,7 +55,7 @@ def test_failed_route_mark_closes_socket_without_connecting(
     mark = _plan().mark
 
     with pytest.raises(PermissionError, match="mark denied"):
-        _bound_socket("wg-jp", mark, socket.AF_INET, socket.SOCK_DGRAM)
+        bound_dns_socket("wg-jp", mark, socket.AF_INET, socket.SOCK_DGRAM)
 
     assert sock.setsockopt.call_args_list == [
         call(socket.SOL_SOCKET, 25, b"wg-jp\0"),
@@ -69,7 +69,7 @@ def test_missing_dns_server_defaults_to_quad9_on_policy_socket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     query = dns.message.make_query("example.", "A")
-    client = BoundUpstream()
+    client = BoundUpstream(bound_dns_socket)
     udp = AsyncMock(return_value=dns.message.make_response(query).to_wire())
     monkeypatch.setattr(client, "_udp", udp)
     plan = _plan(dns_server=None)
@@ -83,7 +83,7 @@ def test_missing_dns_server_defaults_to_quad9_on_policy_socket(
 def test_doh_requires_its_install_extra(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "aiohttp", None)
     query = dns.message.make_query("example.", "A")
-    client = BoundUpstream()
+    client = BoundUpstream(bound_dns_socket)
 
     with pytest.raises(RuntimeError, match=r"snakevpn\[doh\]"):
         asyncio.run(client(_plan(dns_protocol="doh"), query))
@@ -99,16 +99,16 @@ def test_udp_binds_before_connecting_to_a_numeric_peer(monkeypatch: pytest.Monke
         calls.send = AsyncMock()
         calls.receive = AsyncMock(return_value=b"response")
         loop = asyncio.get_running_loop()
-        monkeypatch.setattr(upstream, "_bound_socket", calls.bind)
         monkeypatch.setattr(loop, "sock_connect", calls.connect)
         monkeypatch.setattr(loop, "sock_sendall", calls.send)
         monkeypatch.setattr(loop, "sock_recv", calls.receive)
 
         address = ip_address("192.0.2.53")
         mark = _plan().mark
-        assert await BoundUpstream()._udp("wg-jp", mark, address, b"query") == b"response"
+        client = BoundUpstream(calls.bind)
+        assert await client._udp("wg-jp", mark, address, b"query") == b"response"
         assert [call[0] for call in calls.method_calls] == ["bind", "connect", "send", "receive"]
-        calls.bind.assert_called_once_with("wg-jp", mark, socket.AF_INET, socket.SOCK_DGRAM)
+        calls.bind.assert_called_once_with("wg-jp", mark, socket.AF_INET, socket.SOCK_DGRAM, 0)
         calls.connect.assert_awaited_once_with(sock, ("192.0.2.53", 53))
         calls.send.assert_awaited_once_with(sock, b"query")
 
@@ -120,7 +120,7 @@ def test_plain_truncation_retries_tcp_on_same_target(monkeypatch: pytest.MonkeyP
     full = dns.message.make_response(query)
     truncated = dns.message.make_response(query)
     truncated.flags |= dns.flags.TC
-    client = BoundUpstream()
+    client = BoundUpstream(bound_dns_socket)
     udp = AsyncMock(return_value=truncated.to_wire())
     tcp = AsyncMock(return_value=full.to_wire())
     monkeypatch.setattr(client, "_udp", udp)
@@ -137,7 +137,7 @@ def test_plain_truncation_retries_tcp_on_same_target(monkeypatch: pytest.MonkeyP
 def test_dot_uses_bound_stream_and_configured_tls_name(monkeypatch: pytest.MonkeyPatch) -> None:
     query = dns.message.make_query("example.", "A")
     response = dns.message.make_response(query)
-    client = BoundUpstream()
+    client = BoundUpstream(bound_dns_socket)
     stream = AsyncMock(return_value=response.to_wire())
     monkeypatch.setattr(client, "_stream", stream)
     plan = _plan(dns_protocol="dot", dns_server="dns.example@192.0.2.53")
@@ -159,6 +159,7 @@ def test_doh_pins_address_uses_bound_socket_and_disallows_redirects(
     response = Mock(
         status=200,
         content_type="application/dns-message",
+        headers={},
         content=Mock(iter_chunked=chunks),
     )
     session = MagicMock()
@@ -169,11 +170,10 @@ def test_doh_pins_address_uses_bound_socket_and_disallows_redirects(
     binder = Mock()
     monkeypatch.setattr(aiohttp, "ClientSession", session_factory)
     monkeypatch.setattr(aiohttp, "TCPConnector", connector)
-    monkeypatch.setattr(upstream, "_bound_socket", binder)
     plan = _plan(dns_protocol="doh", dns_server="dns.example@2001:db8::53")
 
     async def run() -> None:
-        client = BoundUpstream()
+        client = BoundUpstream(binder)
         assert query.is_response(await client(plan, query))
         assert query.is_response(await client(plan, query))
         await client.close_policy(plan.policy_id)
@@ -187,6 +187,7 @@ def test_doh_pins_address_uses_bound_socket_and_disallows_redirects(
         data=query.to_wire(),
         headers={
             "Accept": "application/dns-message",
+            "Accept-Encoding": "identity",
             "Content-Type": "application/dns-message",
             "Host": "dns.example",
         },
@@ -202,12 +203,27 @@ def test_doh_pins_address_uses_bound_socket_and_disallows_redirects(
     )
 
 
-def test_inactive_plan_cannot_open_an_upstream_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_doh_rejects_unexpected_content_encoding_before_reading_the_body() -> None:
+    response = Mock(
+        status=200,
+        content_type="application/dns-message",
+        headers={"Content-Encoding": "gzip"},
+    )
+    session = MagicMock()
+    session.post.return_value.__aenter__.return_value = response
+    address = ip_address("192.0.2.53")
+
+    with pytest.raises(ValueError, match="unexpected DoH content encoding"):
+        asyncio.run(BoundUpstream(Mock())._https(session, address, str(address), b"query"))
+
+    response.content.iter_chunked.assert_not_called()
+
+
+def test_inactive_plan_cannot_open_an_upstream_socket() -> None:
     query = dns.message.make_query("example.", "A")
     binder = Mock()
-    monkeypatch.setattr(upstream, "_bound_socket", binder)
     plan = replace(_plan(), route="main")
 
     with pytest.raises(ValueError, match="active target"):
-        asyncio.run(BoundUpstream()(plan, query))
+        asyncio.run(BoundUpstream(binder)(plan, query))
     binder.assert_not_called()

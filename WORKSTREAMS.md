@@ -141,7 +141,7 @@ code needed.
 - **Done when:** M3's criterion is met — a started process lands in the right cgroup within 50 ms and its children follow.
 
 ### F — DNS & leak protection
-- **Owns:** `src/pyvpn/dns/`, `src/pyvpn/audit/`
+- **Owns:** `src/pyvpn/dns/`, `src/pyvpn/audit/`, `src/pyvpn/platform/linux/dns.py`
 - **Builds:** per-policy stub resolvers, upstreams (plain / DoT / DoH) on sockets bound to the target, SERVFAIL instead of fallback, "fill dest sets before replying", DoH canary, `pyvpn audit` checks.
 - **Tests against:** a fake `Backend.add_to_set`, a fake `RuleMatcher`, a local test DNS server.
 - **Done when:** stubs answer correctly, push `DestSet`s before replying, and never send a query out of the wrong socket.

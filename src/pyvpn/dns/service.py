@@ -9,6 +9,7 @@ import struct
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from copy import copy
+from dataclasses import replace
 from ipaddress import IPv4Network, IPv6Network
 from typing import Protocol, cast, runtime_checkable
 
@@ -51,12 +52,12 @@ class PolicyDnsService:
 
     def __init__(
         self,
-        upstream: Upstream | None = None,
+        upstream: Upstream,
         *,
         matcher_factory: Callable[[], RuleMatcher] | None = None,
     ) -> None:
         """The composition root supplies a factory for the active config's matcher."""
-        self._upstream = upstream if upstream is not None else BoundUpstream()
+        self._upstream = upstream
         self._stubs: dict[int, _Stub] = {}
         self._lock = asyncio.Lock()
         self._callback: DestCallback | None = None
@@ -109,7 +110,7 @@ class PolicyDnsService:
         return policy_id in self._stubs
 
     async def _publish(self, plan: PolicyPlan, response: dns.message.Message) -> None:
-        if plan.dests is None or not isinstance(response, dns.message.QueryMessage):
+        if not isinstance(response, dns.message.QueryMessage):
             return
         if response.rcode() != dns.rcode.NOERROR:
             return
@@ -118,12 +119,15 @@ class PolicyDnsService:
         if not dests:
             return
         if self._matcher_factory is None:
-            raise RuntimeError("DNS destination matching is unavailable")
-        if _match_chain(self._matcher_factory(), chain) != plan.policy_id:
+            if plan.dests is not None:
+                raise RuntimeError("DNS destination matching is unavailable")
+            return
+        winner = _match_chain(self._matcher_factory(), chain)
+        if winner is None:
             return
         if self._callback is None:
             raise RuntimeError("DNS destination publication is unavailable")
-        await self._callback(dests)
+        await self._callback(replace(dests, policy_id=winner))
 
 
 class _Stub(asyncio.DatagramProtocol):

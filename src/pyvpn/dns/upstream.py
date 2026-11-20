@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import socket
 import ssl
 import struct
+from collections.abc import Callable
 from ipaddress import IPv6Address, ip_address
 from typing import TYPE_CHECKING, Literal
 
@@ -19,6 +19,9 @@ if TYPE_CHECKING:
     import aiohttp
 
 DnsProtocol = Literal["plain", "dot", "doh"]
+BoundSocketFactory = Callable[
+    [str, int, socket.AddressFamily, socket.SocketKind, int], socket.socket
+]
 MAX_WIRE_SIZE = 65535
 _DNS_MEDIA_TYPE = "application/dns-message"
 _DEFAULT_ADDRESS = "9.9.9.9"
@@ -52,30 +55,13 @@ def upstream_endpoint(server: str | None, protocol: DnsProtocol) -> tuple[IPAddr
     return address, name
 
 
-def _bound_socket(
-    interface: str, mark: int, family: socket.AddressFamily, kind: socket.SocketKind, proto: int = 0
-) -> socket.socket:
-    bind_option = getattr(socket, "SO_BINDTODEVICE", None)
-    mark_option = getattr(socket, "SO_MARK", None)
-    if bind_option is None or mark_option is None:
-        raise OSError("policy DNS sockets require SO_BINDTODEVICE and SO_MARK")
-    if not interface or "\0" in interface:
-        raise ValueError("invalid interface for DNS upstream")
-    sock = socket.socket(family, kind, proto)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, bind_option, os.fsencode(interface) + b"\0")
-        sock.setsockopt(socket.SOL_SOCKET, mark_option, mark)
-        sock.setblocking(False)
-    except BaseException:
-        sock.close()
-        raise
-    return sock
-
-
 class BoundUpstream:
     """Wire-format transports; callers enforce a single deadline for the exchange."""
 
-    def __init__(self, tls_context: ssl.SSLContext | None = None) -> None:
+    def __init__(
+        self, socket_factory: BoundSocketFactory, *, tls_context: ssl.SSLContext | None = None
+    ) -> None:
+        self._socket_factory = socket_factory
         self._tls = tls_context if tls_context is not None else ssl.create_default_context()
         if not self._tls.check_hostname or self._tls.verify_mode != ssl.CERT_REQUIRED:
             raise ValueError("DNS over TLS and HTTPS require certificate and hostname verification")
@@ -111,7 +97,7 @@ class BoundUpstream:
 
     async def _udp(self, interface: str, mark: int, address: IPAddress, wire: bytes) -> bytes:
         loop = asyncio.get_running_loop()
-        with _bound_socket(interface, mark, _family(address), socket.SOCK_DGRAM) as sock:
+        with self._socket_factory(interface, mark, _family(address), socket.SOCK_DGRAM, 0) as sock:
             await loop.sock_connect(sock, (str(address), 53))
             await loop.sock_sendall(sock, wire)
             return await loop.sock_recv(sock, MAX_WIRE_SIZE)
@@ -126,7 +112,7 @@ class BoundUpstream:
         *,
         tls_name: str | None = None,
     ) -> bytes:
-        sock = _bound_socket(interface, mark, _family(address), socket.SOCK_STREAM)
+        sock = self._socket_factory(interface, mark, _family(address), socket.SOCK_STREAM, 0)
         try:
             await asyncio.get_running_loop().sock_connect(sock, (str(address), port))
             reader, writer = await asyncio.open_connection(
@@ -160,7 +146,7 @@ class BoundUpstream:
 
         def make_socket(info: tuple[int, int, int, str, object]) -> socket.socket:
             family, kind, proto, _, _ = info
-            return _bound_socket(
+            return self._socket_factory(
                 interface, mark, socket.AddressFamily(family), socket.SocketKind(kind), proto
             )
 
@@ -178,7 +164,11 @@ class BoundUpstream:
         self, client: aiohttp.ClientSession, address: IPAddress, name: str, wire: bytes
     ) -> bytes:
         authority = f"[{address}]" if address.version == 6 else str(address)
-        headers = {"Accept": _DNS_MEDIA_TYPE, "Content-Type": _DNS_MEDIA_TYPE}
+        headers = {
+            "Accept": _DNS_MEDIA_TYPE,
+            "Accept-Encoding": "identity",
+            "Content-Type": _DNS_MEDIA_TYPE,
+        }
         if name != str(address):
             headers["Host"] = name
         async with client.post(
@@ -191,6 +181,8 @@ class BoundUpstream:
         ) as response:
             if response.status != 200 or response.content_type != _DNS_MEDIA_TYPE:
                 raise ValueError("invalid DoH status or content type")
+            if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                raise ValueError("unexpected DoH content encoding")
             body = bytearray()
             async for chunk in response.content.iter_chunked(4096):
                 body.extend(chunk)

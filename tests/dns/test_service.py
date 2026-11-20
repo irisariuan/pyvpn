@@ -38,26 +38,30 @@ def _answer(query: dns.message.Message, address: str = "192.0.2.10") -> dns.mess
     ],
 )
 @pytest.mark.parametrize("matched_name", ["selected.example", "edge.example"])
+@pytest.mark.parametrize(("filtered", "winner"), [(True, 1), (True, 2), (False, 2)])
 def test_waits_for_destination_publication_before_answering(
     kind: str,
     address: str,
     dests: DestSet,
     matched_name: str,
+    filtered: bool,
+    winner: int,
 ) -> None:
     async def run() -> None:
         entered = asyncio.Event()
         release = asyncio.Event()
         backend = FakeBackend()
+        expected = replace(dests, policy_id=winner)
 
         async def publish(value: DestSet) -> None:
-            assert value == dests
+            assert value == expected
             entered.set()
             await release.wait()
             await backend.add_to_set(value)
 
-        plan = replace(_plan(), dests=DestSet(1))
+        plan = replace(_plan(), dests=DestSet(1) if filtered else None)
         upstream = AsyncMock(side_effect=lambda _, q: _answer(q, address))
-        matcher = FakeRuleMatcher({matched_name: 1})
+        matcher = FakeRuleMatcher({matched_name: winner})
         service = PolicyDnsService(upstream, matcher_factory=lambda: matcher)
         service.on_answer(publish)
         stub = _Stub(service, plan)
@@ -71,7 +75,7 @@ def test_waits_for_destination_publication_before_answering(
         assert query.is_response(reply)
         assert reply.rcode() == dns.rcode.NOERROR
         assert reply.answer[1][0].address == address
-        assert backend.sets == [dests]
+        assert backend.sets == [expected]
         assert upstream.await_args.args[0].interface == "wg-jp"
 
     asyncio.run(run())
@@ -110,11 +114,12 @@ def test_chain_matcher_gets_all_cnames_and_controls_publication(winner: int | No
     assert backend.sets == expected
 
 
-def test_failed_publication_returns_servfail_without_answer_records() -> None:
+@pytest.mark.parametrize("winner", [1, 2])
+def test_failed_publication_returns_servfail_without_answer_records(winner: int) -> None:
     plan = replace(_plan(), dests=DestSet(1))
     service = PolicyDnsService(
         AsyncMock(side_effect=lambda _, query: _answer(query)),
-        matcher_factory=lambda: FakeRuleMatcher({"selected.example": 1}),
+        matcher_factory=lambda: FakeRuleMatcher({"selected.example": winner}),
     )
     backend = FakeBackend()
     backend.fail_add = True
@@ -168,11 +173,11 @@ def test_https_hints_and_additional_target_addresses_are_installed_before_reply(
     ]
 
 
-def test_unmatched_domains_do_not_add_addresses_to_the_policy_set() -> None:
+def test_unmatched_domains_do_not_add_addresses_to_any_policy_set() -> None:
     plan = replace(_plan(), dests=DestSet(1))
     service = PolicyDnsService(
         AsyncMock(side_effect=lambda _, query: _answer(query)),
-        matcher_factory=lambda: FakeRuleMatcher({"selected.example": 2}),
+        matcher_factory=lambda: FakeRuleMatcher({}),
     )
     update = AsyncMock()
     service.on_answer(update)
