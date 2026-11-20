@@ -74,3 +74,37 @@ Run lint, types and unit tests before committing.
 - Write short, imperative commit subjects (e.g. `Plan: …`, `Add …`, `Fix …`).
 - Never force-push or rewrite history that has been pushed without explicit
   approval.
+
+## Branch names
+
+Lowercase, words separated by `-`, no spaces. `<s>` is the workstream
+letter from [WORKSTREAMS.md](WORKSTREAMS.md).
+
+| Template | Use for | Example |
+|---|---|---|
+| `stream/<s>-<name>` | the one long-lived branch per workstream | `stream/b-daemon` |
+| `feat/<s>-<topic>` | a new feature inside one workstream | `feat/d-gateway-discovery` |
+| `fix/<s>-<topic>` | a bug fix inside one workstream | `fix/c-ipv6-masquerade` |
+| `contracts/<topic>` | a change to a Phase 0 contract (needs approval from the streams that use it) | `contracts/destset-ports` |
+| `ci/<topic>` | CI, tooling, release workflow | `ci/pin-ruff` |
+| `docs/<topic>` | `PLAN.md`, `WORKSTREAMS.md`, `AGENTS.md`, README | `docs/branch-names` |
+
+Long-lived stream branches:
+
+| Stream | Branch |
+|---|---|
+| A config & CLI | `stream/a-cli` |
+| B daemon | `stream/b-daemon` |
+| C Linux routing & nft | `stream/c-routing` |
+| D targets | `stream/d-targets` |
+| E apps | `stream/e-apps` |
+| F DNS & leaks | `stream/f-dns` |
+| G rule engine | `stream/g-rules` |
+| I test bed & CI | `stream/i-ci` |
+
+- `feat/` and `fix/` branches start from their stream branch (or `main`)
+  and merge back into it; `contracts/`, `ci/` and `docs/` merge into `main`.
+- Agents: branches created automatically by a tool (e.g. `claude/<random>`)
+  must be renamed to one of these templates before pushing.
+- Delete a branch once it is merged; never delete another person's branch
+  without asking.
