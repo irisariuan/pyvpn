@@ -12,7 +12,7 @@ from pyvpn.config.models import Config
 from pyvpn.daemon.core import Daemon
 from pyvpn.daemon.persistence import PersistentState, StateStore
 from pyvpn.daemon.server import ApiError, PeerCred
-from pyvpn.state import AppBinding
+from pyvpn.state import AppBinding, RoutingPlan
 from tests.daemon.conftest import make_config
 from tests.fakes import FakeAppManager, FakeBackend, FakeDnsService, FakeTargetWatcher
 from tests.fakes.targets import up
@@ -85,6 +85,11 @@ def with_changed_target(config: Config) -> Config:
     first, *remaining = config.policies
     changed = first.model_copy(update={"targets": ("nl",)})
     return config.model_copy(update={"policies": (changed, *remaining)})
+
+
+def with_appended_app_policy(config: Config) -> Config:
+    added = config.policies[0].model_copy(update={"name": "Another Japan"})
+    return config.model_copy(update={"policies": (*config.policies, added)})
 
 
 ROOT = PeerCred(pid=1, uid=0, gid=0)
@@ -332,13 +337,15 @@ async def test_failed_initial_apply_keeps_placement_unavailable(rig: Rig) -> Non
 async def test_reload_apply_failure_keeps_old_config_and_bindings(rig: Rig) -> None:
     await rig.daemon.start()
     installed = rig.backend.installed
-    rig.config = with_changed_target(rig.config)
+    saved = rig.store.load()
+    rig.config = with_appended_app_policy(with_changed_target(rig.config))
     rig.backend.fail_apply = 1
     with pytest.raises(ApiError) as e:
         await rig.daemon.handle("reload", {}, ROOT)
     assert e.value.code == "internal"
     assert rig.backend.installed == installed
     assert rig.daemon.reconciler.applied == installed
+    assert rig.store.load() == saved
     assert [p.name for p in rig.daemon.config.policies] == ["Japan", "Torrents", "Office"]
     assert {pid: p.name for pid, p in rig.apps.bound.items()} == {
         1: "Japan",
@@ -349,6 +356,52 @@ async def test_reload_apply_failure_keeps_old_config_and_bindings(rig: Rig) -> N
     assert await rig.daemon.handle("place_pid", {"pid": 99, "policy": "Torrents"}, ROOT) == {
         "policy_id": 2
     }
+    await rig.daemon.stop()
+
+
+async def test_failed_slot_write_keeps_reload_unapplied(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await rig.daemon.start()
+    committed = rig.daemon.config
+    installed = rig.backend.installed
+    saved = rig.store.load()
+    rig.config = with_appended_app_policy(with_changed_target(rig.config))
+
+    def fail_save(state: PersistentState) -> None:
+        assert (4, "Another Japan") in state.policy_slots
+        raise OSError("state write failed")
+
+    monkeypatch.setattr(rig.store, "save", fail_save)
+    with pytest.raises(ApiError, match="previous config kept: state write failed"):
+        await rig.daemon.handle("reload", {}, ROOT)
+
+    assert rig.daemon.config is committed
+    assert rig.backend.installed is installed
+    assert rig.store.load() == saved
+    assert rig.apps.bound == dict(enumerate(committed.policies, start=1))
+    await rig.daemon.stop()
+
+
+async def test_failed_slot_write_prevents_first_placement(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await rig.daemon.start()
+    params = {"pid": 42, "policy": "Office"}
+
+    def fail_save(state: PersistentState) -> None:
+        assert (3, "Office") in state.policy_slots
+        raise OSError("state write failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(rig.store, "save", fail_save)
+        with pytest.raises(OSError, match="state write failed"):
+            await rig.daemon.handle("place_pid", params, ROOT)
+        assert rig.apps.placed == []
+
+    await rig.daemon.handle("place_pid", params, ROOT)
+    assert (3, "Office") in rig.store.load().policy_slots
+    assert rig.apps.placed == [(42, 3)]
     await rig.daemon.stop()
 
 
@@ -461,12 +514,42 @@ def test_unreadable_policy_slots_are_ignored(tmp_path: Path) -> None:
 
 async def test_second_daemon_does_not_take_over_the_socket(rig: Rig) -> None:
     await rig.daemon.start()
+    installed = rig.backend.installed
+    saved = rig.store.load()
+    rig.config = with_appended_app_policy(rig.config)
     second = rig.new_daemon()
     with pytest.raises(RuntimeError, match="another pyvpn daemon"):
-        await second.server.start()
+        await second.start()
+    await second.stop()
+    assert rig.backend.installed is installed
+    assert rig.store.load() == saved
+    assert 4 not in rig.apps.bound
     assert (await rig.call("status"))["ok"]  # the first daemon still serves
     await rig.daemon.stop()
     assert not rig.sock.exists()
+
+
+async def test_instance_lock_covers_startup_before_the_api_serves(rig: Rig) -> None:
+    started = asyncio.Event()
+    resume = asyncio.Event()
+    apply = rig.backend.apply
+
+    async def pause_apply(plan: RoutingPlan) -> None:
+        started.set()
+        await resume.wait()
+        await apply(plan)
+
+    rig.backend.apply = pause_apply  # type: ignore[method-assign]
+    first = asyncio.create_task(rig.daemon.start())
+    try:
+        await started.wait()
+        assert rig.backend.installed is None
+        with pytest.raises(RuntimeError, match="another pyvpn daemon"):
+            await rig.new_daemon().start()
+    finally:
+        resume.set()
+        await first
+        await rig.daemon.stop()
 
 
 async def test_close_leaves_a_successors_socket(rig: Rig) -> None:
@@ -477,6 +560,22 @@ async def test_close_leaves_a_successors_socket(rig: Rig) -> None:
     await rig.daemon.stop()
     assert rig.sock.exists()
     await successor.server.close()
+
+
+async def test_stop_closes_an_open_api_connection(rig: Rig) -> None:
+    await rig.daemon.start()
+    reader, writer = await asyncio.open_unix_connection(str(rig.sock))
+    try:
+        writer.write(b'{"method":"status"}\n')
+        await writer.drain()
+        assert json.loads(await reader.readline())["ok"]
+
+        await rig.daemon.stop()
+
+        assert await reader.read() == b""
+    finally:
+        writer.close()
+        await writer.wait_closed()
 
 
 async def test_stop_completes_when_teardown_fails(tmp_path: Path, config: Config) -> None:

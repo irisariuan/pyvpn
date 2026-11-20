@@ -20,7 +20,7 @@ from pyvpn.constants import SOCKET_PATH
 from pyvpn.daemon.api import AppsEntry, PlacePidParams, PolicyStatus, StatusResult
 from pyvpn.daemon.persistence import PersistentState, StateStore
 from pyvpn.daemon.reconciler import Reconciler
-from pyvpn.daemon.server import ApiError, ApiServer, PeerCred
+from pyvpn.daemon.server import ApiError, ApiServer, PeerCred, acquire_instance_lock
 from pyvpn.platform.base import Backend
 from pyvpn.services import AppManager, DnsService, RuleMatcherFactory, TargetWatcher
 from pyvpn.state import AppBinding
@@ -59,8 +59,9 @@ class Daemon:
         self.server = ApiServer(socket_path, self.handle)
         self._tasks: list[asyncio.Task[None]] = []
         self._stopped = asyncio.Event()
-        # Serializes reloads with pid placement, so a placement always resolves
-        # policy ids against the committed config.
+        self._lifecycle_lock = asyncio.Lock()
+        self._instance_fd: int | None = None
+        # Keep policy resolution, routing changes and state writes serialized.
         self._config_lock = asyncio.Lock()
         # Cgroups may still contain processes after their selectors change.
         self._cgroup_policy_names: dict[int, str] = {}
@@ -73,63 +74,96 @@ class Daemon:
     # --- lifecycle --------------------------------------------------------------
 
     async def start(self) -> None:
-        config = self._load()
-        if self._store is not None:
-            state = self._store.load()
-            self.reconciler.enabled = state.enabled
-            # Apps placed by a previous daemon are still in their cgroups.
-            self._cgroup_policy_names.update(state.policy_slots)
-        self._validate_policy_slots(config)
-        if self._dns is not None:
-            self._dns.on_answer(self.reconciler.add_dests)
-        await self._install(config, rollback=False)
-        if self.reconciler.enabled and self.reconciler.applied is None:
-            log.error(
-                "initial apply failed (%s); pid placement stays unavailable until it succeeds",
-                self.reconciler.last_error,
-            )
-        self._spawn(self._watch_targets(), "targets")
-        self._spawn(self._watch_bindings(), "bindings")
-        await self.server.start()
-        log.info("pyvpn daemon started with %d policies", len(config.policies))
+        async with self._lifecycle_lock:
+            if self._instance_fd is not None:
+                raise RuntimeError("daemon is already started")
+            self._instance_fd = acquire_instance_lock(self.server.path)
+            self._stopped.clear()
+            try:
+                await self.server.start(start_serving=False)
+                config = self._load()
+                if self._store is not None:
+                    state = self._store.load()
+                    self.reconciler.enabled = state.enabled
+                    # Apps placed by a previous daemon are still in their cgroups.
+                    self._cgroup_policy_names.update(state.policy_slots)
+                self._validate_policy_slots(config)
+                if self._dns is not None:
+                    self._dns.on_answer(self.reconciler.add_dests)
+                await self._install(config, reload=False)
+                if self.reconciler.enabled and self.reconciler.applied is None:
+                    log.error(
+                        "initial apply failed (%s); placement unavailable until it succeeds",
+                        self.reconciler.last_error,
+                    )
+                self._spawn(self._watch_targets(), "targets")
+                self._spawn(self._watch_bindings(), "bindings")
+                await self.server.serve()
+            except BaseException:
+                await self._stop(teardown=False)
+                raise
+            log.info("pyvpn daemon started with %d policies", len(config.policies))
 
     async def stop(self) -> None:
         """Stop serving. Installed rules stay in force (kill switches keep
         blocking across a restart; the next daemon's apply replaces them
         atomically). Only ``disable`` or ``teardown_on_stop`` (uninstall)
         removes them."""
+        async with self._lifecycle_lock:
+            await self._stop(teardown=self._teardown_on_stop)
+
+    async def _stop(self, *, teardown: bool) -> None:
         try:
-            await self.server.close()
-            for t in self._tasks:
-                t.cancel()
-            for t in self._tasks:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await t
-            self._tasks.clear()
-            await self.reconciler.close()
-            if self._teardown_on_stop and self.reconciler.enabled:
+            if self._instance_fd is None:
+                return
+            try:
+                await self.server.close()
+            finally:
+                for t in self._tasks:
+                    t.cancel()
+                for t in self._tasks:
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await t
+                self._tasks.clear()
+                await self.reconciler.close()
+            if teardown and self.reconciler.enabled:
                 await self.reconciler.disable()
         finally:
+            if self._instance_fd is not None:
+                os.close(self._instance_fd)
+                self._instance_fd = None
             self._stopped.set()  # wait_stopped() must not hang on a failed teardown
 
     async def wait_stopped(self) -> None:
         await self._stopped.wait()
 
-    async def _install(self, config: Config, *, rollback: bool) -> None:
+    async def _install(self, config: Config, *, reload: bool) -> None:
         """Stage a config's bindings, then commit config + bindings in one apply.
 
         The previous config stays in force (and keeps resolving policy ids)
-        until the commit. With ``rollback``, a failed bind or apply restores the
-        previous bindings and raises; without it (startup), a failed apply is
-        retried by the reconciler.
+        until the commit. On reload, a failed bind, state write or apply
+        restores the previous bindings and raises. Startup apply failures
+        are retried by the reconciler.
         """
         static = self._matcher_factory(config).static_sets() if self._matcher_factory else []
         old = self.reconciler.config
+        old_slots = self._cgroup_policy_names
+        was_enabled = self.reconciler.enabled
+        enabled = was_enabled or reload
+        saved = False
         staged: dict[int, AppBinding] = {}
         try:
             for pid, policy in enumerate(config.policies, start=1):
                 staged[pid] = await self._apps.bind(pid, policy, config.app_groups)
-            if rollback:
+            slots = old_slots | {
+                pid: policy.name
+                for pid, policy in enumerate(config.policies, start=1)
+                if policy.apps or staged[pid].cgroup_paths
+            }
+            if slots != old_slots or enabled != was_enabled:
+                self._save_state(enabled=enabled, slots=slots)
+                saved = True
+            if reload:
                 await self.reconciler.commit_config(config, static, staged)
             else:
                 async with self.reconciler.batch():  # one apply; failures are retried
@@ -137,16 +171,16 @@ class Daemon:
                     for binding in staged.values():
                         await self.reconciler.update_binding(binding)
         except Exception:
+            if saved:
+                try:
+                    self._save_state(enabled=was_enabled, slots=old_slots)
+                except OSError:
+                    # Keep the saved reservations if restoring the file fails.
+                    log.exception("could not restore previous daemon state")
             if old is not None:
                 # Include the id whose bind failed: it may be half-changed.
                 await self._rebind(old, min(len(staged) + 1, len(config.policies)))
             raise
-        self._cgroup_policy_names.update(
-            (pid, policy.name)
-            for pid, policy in enumerate(config.policies, start=1)
-            if policy.apps or staged[pid].cgroup_paths
-        )
-        self._persist()
         if old is not None:
             for pid in range(len(config.policies) + 1, len(old.policies) + 1):
                 with contextlib.suppress(Exception):
@@ -291,11 +325,10 @@ class Daemon:
             if r.applied is None:
                 raise ApiError("unavailable", "routing rules are not installed yet")
             pid = self._resolve_policy(p.policy)
+            if pid not in self._cgroup_policy_names:
+                name = self.config.policies[pid - 1].name
+                self._save_state(enabled=True, slots=self._cgroup_policy_names | {pid: name})
             await self._apps.place_pid(p.pid, pid)
-            name = self.config.policies[pid - 1].name
-            if self._cgroup_policy_names.get(pid) != name:
-                self._cgroup_policy_names[pid] = name
-                self._persist()
         return {"policy_id": pid}
 
     def _resolve_policy(self, ref: str | int) -> int:
@@ -316,23 +349,24 @@ class Daemon:
         async with self._config_lock:
             self._validate_policy_slots(config)
             try:
-                await self._install(config, rollback=True)
+                await self._install(config, reload=True)
             except Exception as e:
                 log.exception("reload failed; previous config kept")
                 raise ApiError("internal", f"reload failed, previous config kept: {e}") from None
-        if not self.reconciler.enabled:
-            await self.reconciler.enable()
-            self._persist()
+            if not self.reconciler.enabled:
+                await self.reconciler.enable()
 
     async def disable(self) -> None:
-        await self.reconciler.disable()
-        self._persist()
+        async with self._config_lock:
+            await self.reconciler.disable()
+            self._save_state(enabled=False, slots=self._cgroup_policy_names)
 
-    def _persist(self) -> None:
+    def _save_state(self, *, enabled: bool, slots: dict[int, str]) -> None:
         if self._store is not None:
             self._store.save(
                 PersistentState(
-                    enabled=self.reconciler.enabled,
-                    policy_slots=tuple(sorted(self._cgroup_policy_names.items())),
+                    enabled=enabled,
+                    policy_slots=tuple(sorted(slots.items())),
                 )
             )
+        self._cgroup_policy_names = slots

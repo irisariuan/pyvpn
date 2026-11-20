@@ -248,7 +248,8 @@ Existing cgroups can still contain running apps after an app selector is
 changed or removed, so reload rejects changes that would remove or reuse
 those positions. Reload can still update policy settings, append policies,
 and edit domain-only policies that have never used an app cgroup when
-those changes preserve the reserved positions.
+those changes preserve the reserved positions. The daemon saves new
+reservations before applying a routing plan or moving a process.
 
 ### 3.4 Destination filters (optional, from snake)
 
@@ -346,6 +347,10 @@ The root daemon owns nft, routes and cgroups. The CLI and `pyvpn run` are
 unprivileged: `run` asks the daemon over the unix socket to place its own
 PID in the policy's cgroup, then `exec`s the command, so the user's
 environment and desktop session are kept.
+
+The daemon locks its socket's companion lock file before changing routing
+and holds the lock through shutdown. It binds the API socket during startup
+and begins serving requests after the initial install attempt.
 
 ## 7. Milestones
 

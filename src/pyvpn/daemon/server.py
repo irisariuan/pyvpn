@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import json
 import logging
 import os
 import socket
+import stat
 import struct
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -48,6 +50,22 @@ def peer_cred(sock: socket.socket | None) -> PeerCred | None:
     return PeerCred(pid, uid, gid)
 
 
+def acquire_instance_lock(path: Path) -> int:
+    """Lock the daemon instance until the caller closes the returned descriptor."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(f"{path.name}.lock")
+    # Keep this file in place so competing daemons always lock the same inode.
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BaseException as exc:
+        os.close(fd)
+        if isinstance(exc, BlockingIOError):
+            raise RuntimeError(f"another pyvpn daemon owns {path}") from None
+        raise
+    return fd
+
+
 class ApiServer:
     def __init__(self, path: str | os.PathLike[str], handler: Handler, mode: int = 0o666) -> None:
         self.path = Path(path)
@@ -55,22 +73,35 @@ class ApiServer:
         self._mode = mode
         self._server: asyncio.Server | None = None
         self._inode: int | None = None
+        self._clients: dict[asyncio.Task[None], asyncio.StreamWriter] = {}
+        self._closing = False
 
-    async def start(self) -> None:
+    async def start(self, *, start_serving: bool = True) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if await _accepts_connections(self.path):
-            raise RuntimeError(f"another pyvpn daemon is serving {self.path}")
         with contextlib.suppress(FileNotFoundError):
-            self.path.unlink()  # stale socket from a previous run
+            if not stat.S_ISSOCK(self.path.lstat().st_mode):
+                raise RuntimeError(f"API socket path is occupied: {self.path}")
+            if await _accepts_connections(self.path):
+                raise RuntimeError(f"another pyvpn daemon is serving {self.path}")
+            self.path.unlink(missing_ok=True)  # stale socket from a previous run
+        self._closing = False
         self._server = await asyncio.start_unix_server(
-            self._client, path=str(self.path), limit=MAX_LINE
+            self._accept, path=str(self.path), limit=MAX_LINE, start_serving=start_serving
         )
-        os.chmod(self.path, self._mode)
         self._inode = self.path.stat().st_ino
+        os.chmod(self.path, self._mode)
+
+    async def serve(self) -> None:
+        assert self._server is not None
+        await self._server.start_serving()
 
     async def close(self) -> None:
+        self._closing = True
         if self._server is not None:
             self._server.close()
+            for writer in self._clients.values():
+                writer.close()
+            await asyncio.gather(*self._clients, return_exceptions=True)
             await self._server.wait_closed()
             self._server = None
         # Remove the socket only if it is still ours, not a successor's.
@@ -79,10 +110,18 @@ class ApiServer:
                 self.path.unlink()
         self._inode = None
 
+    def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if self._closing:
+            writer.close()
+            return
+        task = asyncio.create_task(self._client(reader, writer))
+        self._clients[task] = writer
+        task.add_done_callback(self._clients.pop)
+
     async def _client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = peer_cred(writer.get_extra_info("socket"))
         try:
-            while True:
+            while not self._closing:
                 try:
                     line = await reader.readline()
                 except (asyncio.LimitOverrunError, ValueError):
@@ -90,7 +129,7 @@ class ApiServer:
                         Response(None, False, error=Error("bad_request", "line too long")).encode()
                     )
                     break
-                if not line:
+                if not line or self._closing:
                     break
                 writer.write((await self._dispatch(line, peer)).encode())
                 await writer.drain()
@@ -130,7 +169,7 @@ async def _accepts_connections(path: Path) -> bool:
     """Whether a live server is listening on the unix socket at ``path``."""
     try:
         _, writer = await asyncio.wait_for(asyncio.open_unix_connection(str(path)), 1.0)
-    except (OSError, TimeoutError):
+    except (FileNotFoundError, ConnectionRefusedError):
         return False
     writer.close()
     with contextlib.suppress(OSError):
