@@ -350,3 +350,12 @@ def test_group_is_linear() -> None:
     start = time.monotonic()
     g = group(big)
     assert len(g) == 1 and time.monotonic() - start < 2
+
+
+def test_trailing_semicolon_does_not_swallow_the_next_rule() -> None:
+    from pyvpn.match import group
+
+    rules = ["if:a.example;then:route:b.example;", "if:c.example;then:route:d.example"]
+    assert [g.text for g in group(rules)] == rules
+    legacy = ["route:a.example;", "if:b.example"]  # old route:EXPR;if:COND form
+    assert [g.text for g in group(legacy)] == ["route:a.example;\nif:b.example"]

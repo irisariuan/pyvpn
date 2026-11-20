@@ -313,3 +313,16 @@ def test_regex_with_trailing_comment_parses() -> None:
 )
 def test_needs_re2(rule: str, needs: bool) -> None:
     assert parse(rule).needs_re2() is needs
+
+
+def test_class_starting_with_bracket_is_scanned_to_its_end() -> None:
+    with pytest.raises(RuleError):
+        parse("/[]]{1001}/")  # over RE2's repetition limit with either engine
+    assert parse("/^[]a]+\\.example$/").match("]a.example")
+
+
+def test_fractional_ttl_round_trips() -> None:
+    from pyvpn.match.opts import format_ttl, parse_duration
+
+    assert format_ttl(10.5) == "10.5s" and parse_duration(format_ttl(10.5)) == 10.5
+    assert (format_ttl(3600), format_ttl(600), format_ttl(90)) == ("1h", "10m", "90s")

@@ -494,7 +494,7 @@ def _scan_unsupported(expr: str) -> str | None:
             i += 2
             continue
         if in_class:
-            if c == "]" and i > class_start:
+            if c == "]" and i >= class_start:
                 in_class = False
             elif c == "[":
                 return "[ inside a character class"

@@ -130,3 +130,9 @@ def test_hosts_import_skips_addresses_and_loopback_aliases() -> None:
     r = parse_text(text, convert=True)
     assert r.errors == []
     assert r.file.domains == ["=ads.example", "=tracker.example"]
+
+
+def test_convert_keeps_exclusions_with_inline_comments() -> None:
+    r = parse_text("example.com\n!ads.example.com # tracking\n! Title: a list\n", convert=True)
+    assert r.file.domains == ["example.com", "!ads.example.com"]
+    assert r.converted == 1  # only the "! Title:" line was an AdBlock comment

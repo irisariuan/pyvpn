@@ -18,7 +18,7 @@ as snake does.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from ipaddress import IPv4Network, IPv6Network, ip_network
 from typing import Literal
 
@@ -67,6 +67,8 @@ class PolicyRules:
     errors: tuple[LineError, ...] = ()  # index = position in the policy's domains
     # (position, rule) of rules that need RE2 to match in bounded time
     needs_re2: tuple[tuple[int, str], ...] = ()
+    # The policy has no app selectors, so its rules apply to every process.
+    any_process: bool = True
 
     @classmethod
     def build(cls, policy_id: int, name: str, entries: Sequence[str]) -> PolicyRules:
@@ -152,11 +154,25 @@ class PolicyMatcher:
     def from_config(cls, config: Config, asn_prefixes: AsnResolver | None = None) -> PolicyMatcher:
         return cls(
             [
-                PolicyRules.build(i, p.name, p.domains)
+                replace(PolicyRules.build(i, p.name, p.domains), any_process=not p.apps)
                 for i, p in enumerate(config.policies, start=1)
                 if p.domains
             ],
             asn_prefixes,
+        )
+
+    def scoped(self, policy_id: int) -> PolicyMatcher:
+        """The matcher for DNS asked through ``policy_id``'s stub.
+
+        Only policies that apply to that stub's apps take part: the policy
+        itself and policies without app selectors. Otherwise an earlier app
+        policy with the same domain (Firefox's) would win a name asked by a
+        later one's apps (Chrome's), and the answer's addresses would never
+        reach the asking policy's set.
+        """
+        return PolicyMatcher(
+            [pr for pr in self.policies if pr.policy_id == policy_id or pr.any_process],
+            self._asn_prefixes,
         )
 
     def explain(self, *names: str) -> Decision:
@@ -227,8 +243,8 @@ class PolicyMatcher:
             for a in pr.asns:
                 if self._asn_prefixes is None:
                     out.append(f"{where}: asn:{a} needs the ASN cache")
-                elif not list(self._asn_prefixes(a)):
-                    out.append(f"{where}: asn:{a} has no cached prefixes; refresh the ASN cache")
+                else:
+                    out += asn_problems(where, a, self._asn_prefixes(a))
         return out
 
     def bases(self, policy_id: int) -> list[str]:
@@ -237,6 +253,21 @@ class PolicyMatcher:
             if pr.policy_id == policy_id:
                 return pr.rules.bases()
         return []
+
+
+def asn_problems(where: str, asn: int, prefixes: Iterable[str]) -> list[str]:
+    """Why cached ``prefixes`` for ``asn`` cannot be activated: none at all, or
+    entries that are not networks (they would be dropped silently)."""
+    nets = list(prefixes)
+    if not nets:
+        return [f"{where}: asn:{asn} has no cached prefixes; refresh the ASN cache"]
+    out = []
+    for c in nets:
+        try:
+            ip_network(c, strict=False)
+        except ValueError:
+            out.append(f"{where}: asn:{asn} cached prefix {c!r} is not a network")
+    return out
 
 
 def build_matcher(config: Config, asn_cache: AsnCache | None = None) -> PolicyMatcher:

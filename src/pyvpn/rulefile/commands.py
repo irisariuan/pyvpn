@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pyvpn.config.models import Config, Policy
 from pyvpn.match import PolicyMatcher, PolicyRules, RuleSet
 from pyvpn.match.pattern import regex_engine
-from pyvpn.match.policy import NEEDS_RE2, normalize_name
+from pyvpn.match.policy import NEEDS_RE2, AsnResolver, asn_problems, normalize_name
 from pyvpn.match.ruleset import Result
 from pyvpn.rulefile.file import ParseResult, RuleFile, format_file, parse_text
 
@@ -45,11 +45,13 @@ def check(text: str, path: str = "<rules>", convert: bool = False) -> CommandRes
     return CommandResult(1 if r.errors else 0, "\n".join([*lines, summary]) + "\n")
 
 
-def check_config(config: Config) -> CommandResult:
+def check_config(config: Config, asn_prefixes: AsnResolver | None = None) -> CommandResult:
     """``pyvpn rules check`` without a file: the config's policy rules.
 
     Rules the daemon refuses to activate are errors; regexes without RE2 are
-    warnings (installing ``google-re2`` makes them activatable).
+    warnings (installing ``google-re2`` makes them activatable). ASN rules are
+    checked against ``asn_prefixes`` (cached prefixes only, e.g.
+    ``AsnCache.cached``; never fetched) with the same errors as activation.
     """
     lines = []
     bad = False
@@ -66,6 +68,16 @@ def check_config(config: Config) -> CommandResult:
                 f"policy {p.name!r}: error: not supported by pyvpn yet, "
                 f"the daemon refuses to activate it: {u}"
             )
+        where = f"policy {p.name!r}"
+        for a in pr.asns:
+            found = (
+                [f"{where}: asn:{a} needs the ASN cache"]
+                if asn_prefixes is None
+                else asn_problems(where, a, asn_prefixes(a))
+            )
+            if found:
+                bad = True
+                lines += [msg.replace(f"{where}: ", f"{where}: error: ", 1) for msg in found]
         if regex_engine() != "re2":
             lines += [
                 f"policy {p.name!r} rule {j + 1}: warning: {NEEDS_RE2} ({raw})"

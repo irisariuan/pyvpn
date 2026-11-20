@@ -284,3 +284,35 @@ def test_asn_cache_writes_atomically(tmp_path: Path, monkeypatch: pytest.MonkeyP
         c.prefixes(1, force=True)
     assert [p.name for p in tmp_path.iterdir()] == [name]
     assert c.cached(1) == ["1.2.3.0/24"]
+
+
+def test_scoped_matcher_only_considers_the_asking_policys_apps() -> None:
+    cfg = _config(
+        {"name": "firefox", "targets": ["jp"], "apps": [{"name": "firefox"}],
+         "domains": ["office.example"]},
+        {"name": "chrome", "targets": ["jp"], "apps": [{"name": "chrome"}],
+         "domains": ["office.example"]},
+        {"name": "all", "targets": ["jp"], "domains": ["shared.example"]},
+    )  # fmt: skip
+    m = build_matcher(cfg)
+    assert m.match("office.example") == 1  # unscoped: first policy wins
+    assert m.scoped(2).match("office.example") == 2  # Chrome's stub
+    assert m.scoped(1).match("office.example") == 1
+    assert m.scoped(2).match("shared.example") == 3  # domain-only policies apply to all
+
+
+def test_malformed_cached_asn_prefix_is_refused() -> None:
+    cfg = _config({"name": "asn-only", "targets": ["jp"], "domains": ["asn:AS2906"]})
+    problems = PolicyMatcher.from_config(cfg, asn_prefixes=lambda n: ["not-a-network"]).problems()
+    assert problems == [
+        "policy 'asn-only': asn:2906 cached prefix 'not-a-network' is not a network"
+    ]
+
+
+def test_rules_check_reports_asn_cache_problems() -> None:
+    cfg = _config({"name": "asn-only", "targets": ["jp"], "domains": ["asn:AS2906"]})
+    res = commands.check_config(cfg)
+    assert res.code == 1 and "asn:2906 needs the ASN cache" in res.output
+    res = commands.check_config(cfg, asn_prefixes=lambda n: [])
+    assert res.code == 1 and "asn:2906 has no cached prefixes" in res.output
+    assert commands.check_config(cfg, asn_prefixes=lambda n: ["198.38.96.0/19"]).code == 0

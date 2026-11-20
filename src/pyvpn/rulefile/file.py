@@ -169,6 +169,7 @@ def parse_text(text: str, convert: bool = False) -> ParseResult:
             and line.startswith("!")
             and not line[1:].strip().startswith("/")
             and re.search(r"[ \t]", line[1:].strip())
+            and not _is_rule(line)
         ):
             r.converted += 1  # AdBlock comment ("! Title: ...")
         else:
@@ -249,3 +250,13 @@ def _dedup(items: list[str], keep_comments: bool = False) -> list[str]:
             seen.add(s)
             out.append(s)
     return out
+
+
+def _is_rule(line: str) -> bool:
+    """Whether ``line`` parses as a rule (``!rule # note`` is an exclusion,
+    not an AdBlock comment)."""
+    try:
+        parse(line)
+    except RuleError:
+        return False
+    return True

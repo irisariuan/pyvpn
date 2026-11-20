@@ -75,11 +75,13 @@ class Opts:
 
 
 def format_ttl(seconds: float) -> str:
-    """Shortest whole unit (1h, 10m, 90s)."""
+    """Shortest whole unit (1h, 10m, 90s); fractional seconds stay exact (10.5s)."""
     s = round(seconds)
-    if seconds == s and s % 3600 == 0:
+    if seconds != s:
+        return f"{seconds!r}s"
+    if s % 3600 == 0:
         return f"{s // 3600}h"
-    if seconds == s and s % 60 == 0:
+    if s % 60 == 0:
         return f"{s // 60}m"
     return f"{s}s"
 

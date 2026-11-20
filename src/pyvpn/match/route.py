@@ -444,6 +444,15 @@ def group(lines: Sequence[str]) -> list[Logical]:
                     or nxt.startswith((")", ",", ";"))
                     or _starts_branch(nxt)
                 )
+            elif is_route(nxt):
+                # A new if:/route: rule starts here, except the if: that
+                # completes the legacy ``route:EXPR;`` / ``if:COND`` form.
+                more = (
+                    last.endswith(";")
+                    and nxt[:3].lower() == "if:"
+                    and head[:5].lower() == "route"
+                    and not _has_if(lines[i : end + 1])
+                )
             else:
                 more = last.endswith(";") or nxt.startswith(";") or _starts_branch(nxt)
             if not more:
@@ -455,6 +464,13 @@ def group(lines: Sequence[str]) -> list[Logical]:
         out.append(Logical(i, "\n".join(lines[i : end + 1])))
         i = end + 1
     return out
+
+
+def _has_if(rule_lines: Sequence[str]) -> bool:
+    """Whether a legacy ``route:`` rule already has its ``;if:`` part."""
+    return any(";if:" in strip_comment(x).lower().replace(" ", "") for x in rule_lines) or any(
+        strip_comment(x).strip().lower().startswith("if:") for x in rule_lines[1:]
+    )
 
 
 def _depth(line: str) -> int:
