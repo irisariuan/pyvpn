@@ -47,6 +47,11 @@ class _ChainMatcher(Protocol):
     def match_chain(self, *domains: str) -> int | None: ...
 
 
+@runtime_checkable
+class _ScopedMatcher(Protocol):
+    def scoped(self, policy_id: int) -> RuleMatcher: ...
+
+
 class PolicyDnsService:
     """Manage one UDP/TCP listener pair per plan with a DNS stub port."""
 
@@ -122,7 +127,10 @@ class PolicyDnsService:
             if plan.dests is not None:
                 raise RuntimeError("DNS destination matching is unavailable")
             return
-        winner = _match_chain(self._matcher_factory(), chain)
+        matcher = self._matcher_factory()
+        if isinstance(matcher, _ScopedMatcher):
+            matcher = matcher.scoped(plan.policy_id)
+        winner = _match_chain(matcher, chain)
         if winner is None:
             return
         if self._callback is None:

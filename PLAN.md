@@ -246,13 +246,14 @@ cgroup (as in snake: "connections keep their route").
 A policy with only apps sends **all** of their traffic through the target. A
 policy with apps **and** destination rules sends only the matched
 destinations (snake's domain rules, `asn:`, `cidr:`) through it. A policy
-with destination rules and no apps applies those destinations to every
-process. The per-policy DNS stub matches the query name and its CNAME chain.
-A and AAAA answers, HTTPS/SVCB address hints, and additional addresses for
-referenced names go into the winning policy's nft sets *before* the reply
-is released, even when a different policy's stub handles the query. If the
-update fails, the stub returns SERVFAIL. The daemon composition root supplies
-the active rule matcher to all stubs, including app-only stubs.
+with destination rules and no app selectors or exclusions applies those
+destinations to every process. The per-policy DNS stub scopes the active
+rule matcher to its own policy and those global policies before matching the
+query name and its CNAME chain. A and AAAA answers, HTTPS/SVCB address hints,
+and additional addresses for referenced names go into the winning policy's
+nft sets *before* the reply is released. If the update fails, the stub
+returns SERVFAIL. The daemon composition root supplies the active rule matcher
+to all stubs, including app-only stubs.
 
 ### 3.5 Per-app DNS and leaks
 

@@ -114,6 +114,29 @@ def test_chain_matcher_gets_all_cnames_and_controls_publication(winner: int | No
     assert backend.sets == expected
 
 
+@pytest.mark.parametrize("winner", [1, 3, None], ids=["own-policy", "global-policy", "unmatched"])
+def test_scopes_active_matcher_to_requesting_stub(winner: int | None) -> None:
+    class ActiveMatcher(FakeRuleMatcher):
+        def scoped(self, policy_id: int) -> FakeRuleMatcher:
+            assert policy_id == 1
+            return FakeRuleMatcher({"edge.example": winner} if winner is not None else {})
+
+    plan = replace(_plan(), dests=DestSet(1))
+    service = PolicyDnsService(
+        AsyncMock(side_effect=lambda _, query: _answer(query)),
+        matcher_factory=lambda: ActiveMatcher({"selected.example": 2}),
+    )
+    backend = FakeBackend()
+    service.on_answer(backend.add_to_set)
+    query = dns.message.make_query("selected.example.", "A")
+
+    wire = asyncio.run(_Stub(service, plan).answer(query.to_wire(), tcp=False))
+
+    assert dns.message.from_wire(wire).rcode() == dns.rcode.NOERROR
+    expected = [] if winner is None else [DestSet(winner, v4=frozenset({ip_network("192.0.2.10")}))]
+    assert backend.sets == expected
+
+
 @pytest.mark.parametrize("winner", [1, 2])
 def test_failed_publication_returns_servfail_without_answer_records(winner: int) -> None:
     plan = replace(_plan(), dests=DestSet(1))
