@@ -115,16 +115,27 @@ def valid_domain(d: str) -> bool:
 
 
 def strip_comment(s: str) -> str:
-    """Remove a trailing `` # comment`` and surrounding space."""
+    """Remove a trailing `` # comment`` and surrounding space.
+
+    Regexes may contain `` #``: after ``/regex/`` only a `` #`` that follows
+    the closing ``/`` starts a comment; ``re:regex`` runs to the end of the
+    line.
+    """
     s = s.strip()
     if s.startswith("#"):
         return ""
-    # Regexes may legitimately contain '#'; only strip " #" outside them.
-    body = s.removeprefix("!")
-    if not body.startswith("/") and not body.startswith("re:"):
-        i = s.find(" #")
-        if i >= 0:
-            s = s[:i].strip()
+    body = s.removeprefix("!").lstrip()
+    if body.startswith("re:"):
+        return s
+    i = s.find(" #")
+    if body.startswith("/"):
+        while i >= 0:
+            head = s[:i].rstrip().removeprefix("!").lstrip()
+            if len(head) > 1 and head.endswith("/"):
+                break
+            i = s.find(" #", i + 1)
+    if i >= 0:
+        s = s[:i].strip()
     return s
 
 
@@ -388,8 +399,8 @@ def glob_base(g: str) -> str:
 # it, Python's backtracking ``re`` compiles them, but ``build_matcher``
 # refuses to activate rules whose ``Pattern.needs_re2()`` (a regex can take
 # exponential time in ``re``); ``pyvpn rules check`` only warns. Syntax is the
-# same either way: the walk below rejects what RE2 lacks before either engine
-# compiles.
+# same either way: the checks below reject what RE2 lacks or reads
+# differently before either engine compiles.
 
 
 class Regex(Protocol):
@@ -456,8 +467,76 @@ def _children(op: Any, av: Any) -> list[Any]:
     return []
 
 
+_RE2_ESCAPES = {
+    "Z": r"\Z (use $)",
+    "N": r"\N{...}",
+    "u": r"\u",
+    "U": r"\U",
+}
+_RE2_FLAGS = set("ims-")  # inline flags both engines read the same way
+_REPEAT_RE = re.compile(r"\{(\d*)(,?)(\d*)\}")
+_RE2_REPEAT_RE = re.compile(r"\{(0|[1-9]\d*)(,(0|[1-9]\d*)?)?\}")
+_RE2_MAX_REPEAT = 1000
+
+
+def _scan_unsupported(expr: str) -> str | None:
+    """Constructs Python's ``re`` parses that RE2 rejects or reads differently
+    (the parse tree no longer shows them)."""
+    i, n = 0, len(expr)
+    in_class = False
+    class_start = 0
+    while i < n:
+        c = expr[i]
+        if c == "\\":
+            nxt = expr[i + 1 : i + 2]
+            if nxt in _RE2_ESCAPES:
+                return _RE2_ESCAPES[nxt]
+            i += 2
+            continue
+        if in_class:
+            if c == "]" and i > class_start:
+                in_class = False
+            elif c == "[":
+                return "[ inside a character class"
+            i += 1
+            continue
+        if c == "[":
+            in_class = True
+            class_start = i + 1
+            if expr[class_start : class_start + 1] == "^":
+                class_start += 1
+            if expr[class_start : class_start + 1] == "]":
+                class_start += 1  # a leading ] is a literal
+            i += 1
+            continue
+        if c == "(" and expr[i + 1 : i + 2] == "?":
+            rest = expr[i + 2 :]
+            if rest.startswith("#"):
+                return "a (?#...) comment"
+            m = re.match(r"[A-Za-z-]+", rest)
+            if m and not rest.startswith("P"):
+                bad = set(m.group()) - _RE2_FLAGS
+                if bad:
+                    return f"inline flag {''.join(sorted(bad))!r}"
+        if c == "{":
+            m = _REPEAT_RE.match(expr, i)
+            if m and m.group() != "{}":
+                r = _RE2_REPEAT_RE.fullmatch(m.group())
+                if not r:
+                    return f"repetition {m.group()}"
+                if any(int(g) > _RE2_MAX_REPEAT for g in (r.group(1), r.group(3)) if g):
+                    return f"repetition {m.group()} (more than {_RE2_MAX_REPEAT})"
+                i = m.end()
+                continue
+        i += 1
+    return None
+
+
 def compile_regex(expr: str) -> Regex:
     """Compile a rule regex: RE2 syntax, case-insensitive (raises RuleError)."""
+    bad = _scan_unsupported(expr)
+    if bad:
+        raise RuleError(f"bad regex: {bad} is not supported (RE2 syntax)")
     try:
         tree = sre_parse.parse(expr)
         re.compile(expr, re.IGNORECASE | re.ASCII)

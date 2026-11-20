@@ -226,6 +226,75 @@ def test_re2_matches_in_linear_time() -> None:
 
 
 @pytest.mark.parametrize(
+    "bad",
+    [
+        r"/a\Z/",  # RE2 has no \Z
+        r"/(?x)a b/",  # verbose flag
+        r"/(?x:a b)/",
+        r"/(?a)a/",
+        r"/(?#note)a/",
+        r"/a{,3}/",  # Python: {0,3}; RE2: the literal text
+        r"/a{,}/",
+        r"/a{0001}/",
+        r"/a{1001}/",  # over RE2's repeat limit
+        r"/[[:alpha:]]/",  # RE2: POSIX class; Python: a set and a literal ]
+        r"/\N{LATIN SMALL LETTER A}/",
+        r"/\u0061/",
+        r"/\U00000061/",
+    ],
+)
+def test_regex_rejects_what_re2_reads_differently(bad: str) -> None:
+    # Rejected with either engine, so validity does not depend on google-re2.
+    with pytest.raises(RuleError, match="RE2 syntax"):
+        parse(bad)
+
+
+@pytest.mark.parametrize(
+    "ok", [r"/a{2,5}/", r"/a{1000}/", r"/(?i)a/", r"/(?s:a.)/", r"/[]a]/", r"/a{/", r"/[{,3}]/"]
+)
+def test_regex_accepts_what_both_engines_read_alike(ok: str) -> None:
+    assert parse(ok).regex is not None
+
+
+def test_re2_agrees_on_accepted_constructs() -> None:
+    from pyvpn.match import pattern
+
+    if pattern.regex_engine() != "re2":
+        pytest.skip("google-re2 is not installed")
+    for rule, yes, no in [
+        (r"/^a{2,3}$/", "aa", "a"),
+        (r"/^[]a]+$/", "]a", "b"),
+        (r"/^a{$/", "a{", "a"),
+        (r"/(?s:^a.$)/", "ab", "a"),
+    ]:
+        p = parse(rule)
+        assert p.match(yes) and not p.match(no), rule
+
+
+@pytest.mark.parametrize(
+    ("line", "want"),
+    [
+        (r"/^foo\.com$/ # comment", r"/^foo\.com$/"),
+        (r"!/^foo\.com$/   # comment", r"!/^foo\.com$/"),
+        (r"/a #b/", r"/a #b/"),  # inside the regex
+        (r"/a #b/ # c", r"/a #b/"),
+        ("re:^a #b$", "re:^a #b$"),  # re: runs to the end of the line
+        ("example.com # c", "example.com"),
+        ("# only a comment", ""),
+    ],
+)
+def test_strip_comment(line: str, want: str) -> None:
+    from pyvpn.match.pattern import strip_comment
+
+    assert strip_comment(line) == want
+
+
+def test_regex_with_trailing_comment_parses() -> None:
+    p = parse(r"/^foo\.com$/ # c")
+    assert p.kind is Kind.REGEX and p.match("foo.com")
+
+
+@pytest.mark.parametrize(
     ("rule", "needs"),
     [
         ("example.com", False),
