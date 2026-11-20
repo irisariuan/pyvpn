@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from ipaddress import IPv4Network
 
 import pytest
 
 from pyvpn.config.models import Config
 from pyvpn.daemon.reconciler import DnsNotGoverned, Reconciler
-from pyvpn.state import AppBinding, DestSet, PolicyPlan
+from pyvpn.state import AppBinding, DestSet, PolicyPlan, RoutingPlan
 from tests.fakes import FakeBackend, FakeDnsService
 from tests.fakes.targets import down, up
 
@@ -251,4 +252,55 @@ async def test_reload_keeps_learned_dests_for_unchanged_policies(config: Config)
         reordered.model_copy(update={"policies": (changed, *reordered.policies[1:])}), (), {}
     )
     assert r.dynamic_dests == {}
+    await r.close()
+
+
+class GatedBackend(FakeBackend):
+    """``apply`` waits for ``gate`` once ``hold`` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hold = False
+        self.entered = asyncio.Event()
+        self.gate = asyncio.Event()
+
+    async def apply(self, plan: RoutingPlan) -> None:
+        if self.hold:
+            self.entered.set()
+            await self.gate.wait()
+        await super().apply(plan)
+
+
+async def _binding_during_commit(config: Config, *, fail: bool) -> tuple[Reconciler, AppBinding]:
+    backend = GatedBackend()
+    r = Reconciler(backend, FakeDnsService())
+    await r.set_config(config)
+    await r.update_binding(AppBinding(1, cgroup_paths=("pyvpn.slice/p-1",)))
+    backend.hold, backend.fail_apply = True, int(fail)
+    new = config.model_copy(update={"policies": tuple(reversed(config.policies))})
+    commit = asyncio.ensure_future(r.commit_config(new, (), {}))
+    await backend.entered.wait()
+    # The app manager reports a binding made under the config in force now.
+    late = AppBinding(1, cgroup_paths=("pyvpn.slice/p-1", "user.slice/late.scope"))
+    binding = asyncio.ensure_future(r.update_binding(late))
+    await asyncio.sleep(0)
+    backend.gate.set()
+    with contextlib.suppress(RuntimeError):
+        await commit
+    await binding
+    return r, late
+
+
+async def test_binding_sent_during_failed_commit_survives_restore(config: Config) -> None:
+    r, late = await _binding_during_commit(config, fail=True)
+    assert r.config is config
+    assert r.bindings[1] == late  # not lost by _restore
+    assert r.applied is not None and r.applied.policies[0].apps == late
+    await r.close()
+
+
+async def test_stale_binding_is_dropped_after_commit(config: Config) -> None:
+    r, _ = await _binding_during_commit(config, fail=False)
+    assert r.config is not None and r.config.policies[0].name == "Office"
+    assert 1 not in r.bindings  # never attached to the policy that now has id 1
     await r.close()

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import logging
 from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import replace
@@ -98,7 +99,16 @@ class Reconciler:
         self.applied: RoutingPlan | None = None
         self.dns_applied: dict[int, PolicyPlan] = {}
         self.last_error: str | None = None
-        self._generation = 0  # bumped whenever policy ids may change meaning
+        # ``_generation`` identifies the config held in ``self.config``: every
+        # swap takes a fresh value and a rollback restores the old one, so a
+        # value is never reused. ``_committed`` is the generation of the last
+        # committed config; it only moves once a commit succeeds. Inputs that
+        # arrive outside the lock (DNS answers, app bindings) capture
+        # ``_committed`` and are dropped if ``_generation`` differs once they
+        # hold the lock, i.e. if their policy ids may mean something else.
+        self._generations = itertools.count(1)
+        self._generation = 0
+        self._committed = 0
 
     # --- inputs ---------------------------------------------------------------
 
@@ -111,6 +121,7 @@ class Reconciler:
         ``commit_config`` to apply config and bindings in one step."""
         async with self._lock:
             self._swap_config(config, static_sets, {})
+            self._committed = self._generation
         await self.reconcile()
 
     async def commit_config(
@@ -128,16 +139,16 @@ class Reconciler:
         async with self._lock:
             saved = self._snapshot()
             self._swap_config(config, static_sets, bindings)
-            if not self.enabled:
-                return
-            plan = self.plan()
-            assert plan is not None
-            try:
-                await self._apply_locked(plan)
-            except Exception:
-                self._restore(saved)
-                raise
-            await self._sync_dns_locked(plan)
+            if self.enabled:
+                plan = self.plan()
+                assert plan is not None
+                try:
+                    await self._apply_locked(plan)
+                except Exception:
+                    self._restore(saved)
+                    raise
+                await self._sync_dns_locked(plan)
+            self._committed = self._generation
 
     def _swap_config(
         self,
@@ -152,7 +163,7 @@ class Reconciler:
         for s in static_sets:
             prev = self.static_dests.get(s.policy_id)
             self.static_dests[s.policy_id] = s if prev is None else prev | s
-        self._generation += 1
+        self._generation = next(self._generations)
 
     def _snapshot(self) -> tuple[object, ...]:
         return (
@@ -177,15 +188,30 @@ class Reconciler:
         await self.reconcile()
 
     async def update_binding(self, binding: AppBinding) -> None:
-        if self.config is None or not 1 <= binding.policy_id <= len(self.config.policies):
-            log.warning("ignoring binding for unknown policy %d", binding.policy_id)
-            return
-        self.bindings[binding.policy_id] = binding
-        await self.reconcile()
+        """Record an app manager binding for the config committed when it arrived.
+
+        Runs under the lock, so it cannot interleave with ``commit_config``
+        (whose ``_restore`` would otherwise drop it). A binding that was
+        waiting while the config changed is dropped: its policy id may now
+        name a different policy, and the commit installed fresh bindings for
+        the new config. A binding that arrives while a commit is in flight belongs
+        to the old config: it survives if the commit is rolled back.
+        """
+        generation = self._committed
+        async with self._lock:
+            if generation != self._generation:
+                log.info("dropping binding for policy %d: config changed", binding.policy_id)
+                return
+            if self.config is None or not 1 <= binding.policy_id <= len(self.config.policies):
+                log.warning("ignoring binding for unknown policy %d", binding.policy_id)
+                return
+            self.bindings[binding.policy_id] = binding
+            if not self._batch_depth:
+                await self._reconcile_locked()
 
     async def add_dests(self, dests: DestSet) -> None:
         """DNS callback: return only once ``dests`` is governed by installed rules."""
-        generation = self._generation
+        generation = self._committed
         async with self._lock:
             if generation != self._generation:
                 raise DnsNotGoverned("config changed while the answer was pending")
