@@ -251,9 +251,10 @@ destinations to every process. The per-policy DNS stub scopes the active
 rule matcher to its own policy and those global policies before matching the
 query name and its CNAME chain. A and AAAA answers, HTTPS/SVCB address hints,
 and additional addresses for referenced names go into the winning policy's
-nft sets *before* the reply is released. If the update fails, the stub
-returns SERVFAIL. The daemon composition root supplies the active rule matcher
-to all stubs, including app-only stubs.
+nft sets *before* the reply is released. For HTTPS and SVCB, the stub follows
+alias records included in the response to collect the endpoint addresses and
+hints. If the update fails, the stub returns SERVFAIL. The daemon composition
+root supplies the active rule matcher to all stubs, including app-only stubs.
 
 ### 3.5 Per-app DNS and leaks
 

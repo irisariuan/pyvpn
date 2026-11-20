@@ -6,7 +6,8 @@ import asyncio
 import logging
 import secrets
 import struct
-from collections.abc import Awaitable, Callable
+from collections import defaultdict
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import suppress
 from copy import copy
 from dataclasses import replace
@@ -25,6 +26,7 @@ from dns.rdtypes.ANY.MX import MX
 from dns.rdtypes.ANY.NS import NS
 from dns.rdtypes.IN.SRV import SRV
 from dns.rdtypes.svcbbase import IPv4HintParam, IPv6HintParam, ParamKey, SVCBBase
+from dns.rrset import RRset
 
 from pyvpn.dns.upstream import MAX_WIRE_SIZE, BoundUpstream
 from pyvpn.services import DestCallback, RuleMatcher
@@ -275,6 +277,34 @@ def _match_chain(matcher: RuleMatcher, chain: dns.message.ChainingResult) -> int
     return min((policy_id for policy_id in matches if policy_id is not None), default=None)
 
 
+def _service_bindings(
+    answer: RRset, additional: dict[dns.name.Name, list[RRset]], related: set[dns.name.Name]
+) -> Iterator[SVCBBase]:
+    """Follow in-message AliasMode and CNAME records to ServiceMode bindings."""
+    pending = [answer.name]
+    visited: set[dns.name.Name] = set()
+    while pending:
+        name = pending.pop()
+        if name in visited:
+            continue
+        visited.add(name)
+        related.add(name)
+        bindings: list[SVCBBase] = []
+        rrsets = [answer] if name == answer.name else additional.get(name, [])
+        for rrset in rrsets:
+            if rrset.rdtype == answer.rdtype:
+                bindings.extend(record for record in rrset if isinstance(record, SVCBBase))
+            elif rrset.rdtype == dns.rdatatype.CNAME:
+                pending.extend(record.target for record in rrset if isinstance(record, CNAME))
+
+        aliases = [record.target for record in bindings if record.priority == 0]
+        if aliases:
+            # RFC 9460 §2.4.1 gives AliasMode precedence over ServiceMode.
+            pending.extend(target for target in aliases if target != dns.name.root)
+        else:
+            yield from bindings
+
+
 def _destinations(
     policy_id: int, response: dns.message.QueryMessage, chain: dns.message.ChainingResult
 ) -> DestSet:
@@ -291,31 +321,43 @@ def _destinations(
     v4: set[IPv4Network] = set()
     v6: set[IPv6Network] = set()
     related = {chain.canonical_name}
+    additional: dict[dns.name.Name, list[RRset]] = defaultdict(list)
+    for rrset in response.additional:
+        if rrset.rdclass == question.rdclass:
+            additional[rrset.name].append(rrset)
+
     for rrset in answers:
         if rrset.rdtype == dns.rdatatype.A:
             v4.update(IPv4Network(str(record)) for record in rrset)
         elif rrset.rdtype == dns.rdatatype.AAAA:
             v6.update(IPv6Network(str(record)) for record in rrset)
+        elif rrset.rdtype in (dns.rdatatype.HTTPS, dns.rdatatype.SVCB):
+            for record in _service_bindings(rrset, additional, related):
+                if record.target != dns.name.root:
+                    related.add(record.target)
+                hint4 = record.params.get(ParamKey.IPV4HINT)
+                hint6 = record.params.get(ParamKey.IPV6HINT)
+                if isinstance(hint4, IPv4HintParam):
+                    v4.update(IPv4Network(address) for address in hint4.addresses)
+                if isinstance(hint6, IPv6HintParam):
+                    v6.update(IPv6Network(address) for address in hint6.addresses)
         else:
             for record in rrset:
-                if isinstance(record, SVCBBase):
-                    if record.target != dns.name.root:
-                        related.add(record.target)
-                    hint4 = record.params.get(ParamKey.IPV4HINT)
-                    hint6 = record.params.get(ParamKey.IPV6HINT)
-                    if isinstance(hint4, IPv4HintParam):
-                        v4.update(IPv4Network(address) for address in hint4.addresses)
-                    if isinstance(hint6, IPv6HintParam):
-                        v6.update(IPv6Network(address) for address in hint6.addresses)
-                elif isinstance(record, (CNAME, NS, SRV)):
+                if isinstance(record, (CNAME, NS, SRV)):
                     related.add(record.target)
                 elif isinstance(record, MX):
                     related.add(record.exchange)
-    for rrset in response.additional:
-        if rrset.name not in related or rrset.rdclass != question.rdclass:
-            continue
-        if rrset.rdtype == dns.rdatatype.A:
-            v4.update(IPv4Network(str(record)) for record in rrset)
-        elif rrset.rdtype == dns.rdatatype.AAAA:
-            v6.update(IPv6Network(str(record)) for record in rrset)
+
+    pending = list(related)
+    while pending:
+        for rrset in additional.get(pending.pop(), []):
+            if rrset.rdtype == dns.rdatatype.A:
+                v4.update(IPv4Network(str(record)) for record in rrset)
+            elif rrset.rdtype == dns.rdatatype.AAAA:
+                v6.update(IPv6Network(str(record)) for record in rrset)
+            elif rrset.rdtype == dns.rdatatype.CNAME:
+                for record in rrset:
+                    if isinstance(record, CNAME) and record.target not in related:
+                        related.add(record.target)
+                        pending.append(record.target)
     return DestSet(policy_id, frozenset(v4), frozenset(v6))

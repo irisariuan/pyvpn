@@ -156,23 +156,46 @@ def test_failed_publication_returns_servfail_without_answer_records(winner: int)
     assert not reply.answer
 
 
-def test_https_hints_and_additional_target_addresses_are_installed_before_reply() -> None:
+@pytest.mark.parametrize(
+    ("kind", "alias", "fail_publication"),
+    [("HTTPS", False, False), ("HTTPS", True, False), ("SVCB", True, False), ("HTTPS", True, True)],
+)
+def test_service_binding_endpoint_addresses_are_published(
+    kind: str, alias: bool, fail_publication: bool
+) -> None:
     async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
         response = dns.message.make_response(query)
-        response.answer.append(
-            dns.rrset.from_text(
-                "selected.example.",
-                60,
-                "IN",
-                "HTTPS",
-                "1 edge.example. ipv4hint=192.0.2.10 ipv6hint=2001:db8::1",
-            )
+        address_owner = "edge.example."
+        service = dns.rrset.from_text(
+            "svc.example." if alias else "selected.example.",
+            60,
+            "IN",
+            kind,
+            "1 edge.example. ipv4hint=192.0.2.10 ipv6hint=2001:db8::1",
         )
+        if alias:
+            address_owner = "node.example."
+            response.answer.append(
+                dns.rrset.from_text("selected.example.", 60, "IN", kind, "0 first.example.")
+            )
+            response.additional.extend(
+                [
+                    dns.rrset.from_text("first.example.", 60, "IN", "CNAME", "hop.example."),
+                    dns.rrset.from_text("hop.example.", 60, "IN", kind, "0 svc.example."),
+                    service,
+                    dns.rrset.from_text("edge.example.", 60, "IN", "CNAME", address_owner),
+                ]
+            )
+        else:
+            response.answer.append(service)
         response.additional.extend(
             [
-                dns.rrset.from_text("edge.example.", 60, "IN", "A", "192.0.2.11"),
-                dns.rrset.from_text("edge.example.", 60, "IN", "AAAA", "2001:db8::2"),
+                dns.rrset.from_text(address_owner, 60, "IN", "A", "192.0.2.11"),
+                dns.rrset.from_text(address_owner, 60, "IN", "AAAA", "2001:db8::2"),
                 dns.rrset.from_text("unrelated.example.", 60, "IN", "A", "192.0.2.99"),
+                dns.rrset.from_text(
+                    "unrelated.example.", 60, "IN", kind, "1 . ipv4hint=192.0.2.98"
+                ),
             ]
         )
         return dns.message.from_wire(response.to_wire())
@@ -181,12 +204,20 @@ def test_https_hints_and_additional_target_addresses_are_installed_before_reply(
         upstream, matcher_factory=lambda: FakeRuleMatcher({"selected.example": 1})
     )
     backend = FakeBackend()
+    backend.fail_add = fail_publication
     service.on_answer(backend.add_to_set)
-    query = dns.message.make_query("selected.example.", "HTTPS")
+    query = dns.message.make_query("selected.example.", kind)
     policy = replace(_plan(), dests=DestSet(1))
 
-    wire = asyncio.run(_Stub(service, policy).answer(query.to_wire(), tcp=False))
-    assert dns.message.from_wire(wire).rcode() == dns.rcode.NOERROR
+    wire = asyncio.run(_Stub(service, policy).answer(query.to_wire(), tcp=True))
+    reply = dns.message.from_wire(wire)
+    assert query.is_response(reply)
+    if fail_publication:
+        assert reply.rcode() == dns.rcode.SERVFAIL
+        assert not reply.answer
+        assert not reply.additional
+        return
+    assert reply.rcode() == dns.rcode.NOERROR
     assert backend.sets == [
         DestSet(
             1,
