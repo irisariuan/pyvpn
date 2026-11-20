@@ -1,0 +1,21 @@
+# pyvpn
+
+> pyvpn is per-process policy routing for Linux. It sends each app's traffic and DNS out through a chosen, already-existing network interface (wg-jp, tun0, wlan1, ...), with fallback to another interface or the default route, or a kill switch. It does not create or manage VPN connections. Status: pre-release; no command works yet except `pyvpn --version`. PyPI package: snakevpn. Command and import package: pyvpn. Python >= 3.11, Linux with cgroup v2. License: GPL-3.0-or-later.
+
+Treat commands and configuration on these pages as planned, not available, until a release on PyPI says otherwise.
+
+## Docs
+
+- [pyvpn wiki (Markdown)](https://irisariuan.github.io/pyvpn/index.md): concepts, configuration, commands, how it works, DNS and leak protection, limitations, roadmap, FAQ
+- [pyvpn wiki (HTML)](https://irisariuan.github.io/pyvpn/): the same content as a web page
+
+## Source of truth
+
+- [PLAN.md](https://raw.githubusercontent.com/irisariuan/pyvpn/main/PLAN.md): design, scope and milestones
+- [README.md](https://raw.githubusercontent.com/irisariuan/pyvpn/main/README.md): project overview
+- [AGENTS.md](https://raw.githubusercontent.com/irisariuan/pyvpn/main/AGENTS.md): working rules for coding agents in this repository
+
+## Optional
+
+- [WORKSTREAMS.md](https://raw.githubusercontent.com/irisariuan/pyvpn/main/WORKSTREAMS.md): which workstream owns which directory
+- [LICENSE](https://raw.githubusercontent.com/irisariuan/pyvpn/main/LICENSE): GNU GPL v3 text
