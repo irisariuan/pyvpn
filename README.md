@@ -19,7 +19,7 @@ which picks a tunnel per *device* on a router.
 
 Early development. Nothing described below as a command works yet; the CLI
 currently only prints its version. Work follows the milestones in
-[PLAN.md §7](PLAN.md#7-milestones):
+[PLAN.md §7](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md#7-milestones):
 
 | | Milestone |
 |---|---|
@@ -47,7 +47,7 @@ pyvpn --version
 ## Configuration (planned)
 
 Targets are interfaces (or patterns); policies map apps to an ordered list of
-targets. From [PLAN.md §5](PLAN.md#5-configuration-sketch), shortened:
+targets. From [PLAN.md §5](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md#5-configuration-sketch), shortened:
 
 ```json
 {
@@ -76,10 +76,12 @@ pyvpn run -p "Japan browsing" -- firefox   # start an app inside a policy
 pyvpn status                               # policies, active targets
 pyvpn apps                                 # live PID → policy → interface
 pyvpn audit                                # what each policy does and does not protect
-pyvpn rules check|test|import|export       # destination rules (snake format)
+pyvpn rules check example.rules            # validate destination rules (snake format)
 pyvpn install                              # systemd unit for the daemon
 pyvpn disable                              # remove all pyvpn rules and routes
 ```
+
+`pyvpn rules` also has `test`, `import` and `export` subcommands.
 
 ## How it works
 
@@ -89,7 +91,8 @@ pyvpn disable                              # remove all pyvpn rules and routes
   the command.
 - Apps are identified by cgroup v2 (`pyvpn.slice/p-<id>`, systemd units,
   Flatpak scopes) or by uid. An nft `output` chain matches them with
-  `socket cgroupv2` and sets a **fwmark**; an **`ip rule`** sends that mark
+  `socket cgroupv2` (cgroups) or `meta skuid` (uids) and sets a **fwmark**;
+  an **`ip rule`** sends that mark
   to a per-policy routing table (`default dev <iface>`, or `unreachable` for
   the kill switch). Marked traffic is masqueraded to the interface's address.
 - A **netlink** watcher reconciles as soon as an interface goes up or down,
@@ -100,7 +103,7 @@ pyvpn disable                              # remove all pyvpn rules and routes
 
 All Linux-specific code sits behind the `Backend` protocol in
 `src/pyvpn/platform/base.py` (using `pyroute2`), so other OSes can be added
-later. Details: [PLAN.md §3](PLAN.md#3-how-it-works).
+later. Details: [PLAN.md §3](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md#3-how-it-works).
 
 ## Development
 
@@ -109,15 +112,21 @@ pip install -e '.[dev]'
 ruff check . && ruff format --check .
 mypy src
 pytest                         # unit tests, no root, never touch the host network
-sudo pytest -m integration     # network-namespace integration tests (Linux, root)
+```
+
+Once the Linux network-namespace suite lands ([PLAN.md §8](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md#8-testing)),
+integration tests run as root with:
+
+```bash
+sudo pytest -m integration
 ```
 
 Before contributing, read:
 
-- [PLAN.md](PLAN.md): design, scope and milestones (source of truth)
-- [WORKSTREAMS.md](WORKSTREAMS.md): which workstream owns which directory,
+- [PLAN.md](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md): design, scope and milestones (source of truth)
+- [WORKSTREAMS.md](https://github.com/irisariuan/pyvpn/blob/main/WORKSTREAMS.md): which workstream owns which directory,
   and the shared Phase 0 contracts
-- [AGENTS.md](AGENTS.md): working rules (fail closed, test rules, commits,
+- [AGENTS.md](https://github.com/irisariuan/pyvpn/blob/main/AGENTS.md): working rules (fail closed, test rules, commits,
   branch names)
 
 ## License
