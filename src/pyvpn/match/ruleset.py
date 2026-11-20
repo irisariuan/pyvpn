@@ -116,6 +116,8 @@ class RuleSet:
         self.steps: list[Step] = []
         self.drop_asns: list[int] = []  # drop:asn:
         self.drop_cidrs: list[str] = []  # drop:cidr:
+        # (line, rule) of rules that need RE2 to match in bounded time.
+        self.needs_re2: list[tuple[int, str]] = []
         self._built = False
 
     # --- compiling --------------------------------------------------------
@@ -136,6 +138,8 @@ class RuleSet:
                     continue
                 s.routes.append(rt)
                 s.steps.append(Step(i, route=rt))
+                if any(p.needs_re2() for p in _route_patterns(rt)):
+                    s.needs_re2.append((i, rt.raw))
                 continue
             if not strip_comment(r):
                 continue
@@ -144,6 +148,8 @@ class RuleSet:
             except RuleError as e:
                 errs.append(LineError(i, r, str(e)))
                 continue
+            if p.needs_re2():
+                s.needs_re2.append((i, p.raw))
             if p.negate:
                 s.exclude.append(p)
             elif p.kind is Kind.ASN:
@@ -313,6 +319,12 @@ class RuleSet:
                 if x is not None:
                     pats.extend(a.atom for a in x.positive() if a.atom is not None)
         return _unique(p.base for p in pats if p.base)
+
+
+def _route_patterns(r: Route) -> list[Pattern]:
+    """Every domain rule in a conditional rule's condition and branches."""
+    xs = [r.if_, *(a.expr for a in r.branches())]
+    return [a.atom for x in xs if x is not None for a in x.all() if a.atom is not None]
 
 
 def _unique(items: Iterable[str]) -> list[str]:

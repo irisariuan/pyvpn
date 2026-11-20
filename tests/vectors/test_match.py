@@ -217,9 +217,30 @@ def test_re2_matches_in_linear_time() -> None:
 
     from pyvpn.match import pattern
 
-    if pattern.ENGINE != "re2":
+    if pattern.regex_engine() != "re2":
         pytest.skip("google-re2 is not installed")
     rx = parse(r"/^(a+)+$/")
     start = time.monotonic()
     assert not rx.match("a" * 64 + "!")  # catastrophic backtracking in Python's re
     assert time.monotonic() - start < 1
+
+
+@pytest.mark.parametrize(
+    ("rule", "needs"),
+    [
+        ("example.com", False),
+        ("~flix", False),
+        ("*.example.com", False),
+        ("**.example.com", False),
+        ("api-?.example.com", False),
+        ("**.cdn-*.example.com", False),
+        ("*.*.*.example.com", False),
+        ("**.a.**.example.com", True),  # two ** nest their backtracking
+        ("a*b*c.example.com", True),  # two * in one label
+        ("a**b*.example.com", True),
+        (r"/^a$/", True),  # every regex
+        (r"!/ads/", True),
+    ],
+)
+def test_needs_re2(rule: str, needs: bool) -> None:
+    assert parse(rule).needs_re2() is needs

@@ -11,7 +11,8 @@ from dataclasses import dataclass
 
 from pyvpn.config.models import Config, Policy
 from pyvpn.match import PolicyMatcher, PolicyRules, RuleSet
-from pyvpn.match.policy import normalize_name
+from pyvpn.match.pattern import regex_engine
+from pyvpn.match.policy import NEEDS_RE2, normalize_name
 from pyvpn.match.ruleset import Result
 from pyvpn.rulefile.file import ParseResult, RuleFile, format_file, parse_text
 
@@ -34,6 +35,8 @@ def check(text: str, path: str = "<rules>", convert: bool = False) -> CommandRes
     lines = _issues(path, r)
     pr = PolicyRules.build(0, path, [*r.file.domains])
     lines += [f"{path}: warning: not supported by pyvpn yet: {u}" for u in pr.unsupported()]
+    if regex_engine() != "re2":
+        lines += [f"{path}: warning: {NEEDS_RE2}: {raw}" for _, raw in pr.needs_re2]
     f = r.file
     n_rules = sum(1 for d in f.domains if not d.startswith("#"))
     summary = f"{path}: {n_rules} domain rules, {len(f.asns)} ASNs, {len(f.cidrs)} CIDRs"
@@ -43,7 +46,11 @@ def check(text: str, path: str = "<rules>", convert: bool = False) -> CommandRes
 
 
 def check_config(config: Config) -> CommandResult:
-    """``pyvpn rules check`` without a file: the config's policy rules."""
+    """``pyvpn rules check`` without a file: the config's policy rules.
+
+    Rules the daemon refuses to activate are errors; regexes without RE2 are
+    warnings (installing ``google-re2`` makes them activatable).
+    """
     lines = []
     bad = False
     for i, p in enumerate(config.policies, start=1):
@@ -53,9 +60,17 @@ def check_config(config: Config) -> CommandResult:
         for e in pr.errors:
             bad = True
             lines.append(f"policy {p.name!r} rule {e.index + 1}: error: {e.error} ({e.rule})")
-        lines += [
-            f"policy {p.name!r}: warning: not supported by pyvpn yet: {u}" for u in pr.unsupported()
-        ]
+        for u in pr.unsupported():
+            bad = True
+            lines.append(
+                f"policy {p.name!r}: error: not supported by pyvpn yet, "
+                f"the daemon refuses to activate it: {u}"
+            )
+        if regex_engine() != "re2":
+            lines += [
+                f"policy {p.name!r} rule {j + 1}: warning: {NEEDS_RE2} ({raw})"
+                for j, raw in pr.needs_re2
+            ]
     lines.append("errors found" if bad else "ok")
     return CommandResult(1 if bad else 0, "\n".join(lines) + "\n")
 
@@ -96,6 +111,11 @@ def explain_config(config: Config, names: Sequence[str]) -> CommandResult:
     d = PolicyMatcher.from_config(config).explain(*names)
     chain = " -> ".join(normalize_name(n) for n in names)
     lines = [f"skipped policy {p!r}: excluded by {rule}" for p, rule in d.excluded_by]
+    lines += [
+        f"skipped policy {p!r}: per-device rule {rule} matched; not supported yet, "
+        "the daemon refuses to activate this config"
+        for p, rule in d.skipped
+    ]
     if d.action == "route":
         lines.append(f"{chain}: policy {d.policy!r} ({describe(d.result)})")
     elif d.action == "drop":

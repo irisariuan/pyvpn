@@ -16,7 +16,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Linear-time matching for rule regexes and wildcards (match/pattern.py).
+# Linear-time matching for rule regexes and wildcards (match/pattern.py);
+# without it the daemon refuses to activate regex rules.
 re2 = ["google-re2>=1.1"]
 dev = ["pytest>=8", "mypy>=1.10", "ruff==0.17.6", "google-re2>=1.1"]
 

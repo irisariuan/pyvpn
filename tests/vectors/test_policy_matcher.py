@@ -64,14 +64,70 @@ def test_runtime_rejects_unenforced_drop_rules() -> None:
 
 @pytest.mark.parametrize(
     "rule",
-    ["session:**.example.com", "route:example.com", "if:example.com;then:drop:ads.example"],
+    [
+        "session:**.example.com",
+        "route:example.com",
+        "if:example.com;then:drop:ads.example",
+        "if:a.example;then:drop:example.com",
+        "if:a.example;then:route:b.example;else:drop:example.com",
+    ],
 )
 def test_runtime_rejects_per_device_rules(rule: str) -> None:
     cfg = _config({"name": "p", "targets": ["jp"], "domains": [rule, "example.com"]})
-    if not rule.startswith("if:"):
-        # Leniently built, session:/route: rules hide the plain rule.
-        assert PolicyMatcher.from_config(cfg).match("www.example.com") is None
+    lenient = PolicyMatcher.from_config(cfg)
+    hidden = lenient.match("www.example.com") is None
+    if not rule.startswith("if:example.com"):
+        # Leniently built, the per-device rule hides the plain rule...
+        assert hidden
+    # ...so activation fails and problems() says why,
+    [problem] = lenient.problems()
+    assert problem == f"policy 'p': per-device rules are not supported yet: {rule}"
     with pytest.raises(RuleConfigError, match="per-device rules are not supported yet"):
+        build_matcher(cfg)
+    # rules check fails, and rules test does not just say "no policy".
+    res = commands.check_config(cfg)
+    assert res.code == 1 and "error: not supported by pyvpn yet, the daemon refuses" in res.output
+    if hidden:
+        out = commands.explain_config(cfg, ["www.example.com"]).output
+        assert "skipped policy 'p': per-device rule" in out
+
+
+REGEX_CFG = _config(
+    {"name": "safe", "targets": ["jp"], "domains": ["*.a.example", "**.cdn-*.b.example"]},
+    {"name": "re", "targets": ["jp"],
+     "domains": ["c.example", r"/^ipv4-c\d+\.x\.net$/", "**.d.**.example", r"!/^ads\./"]},
+)  # fmt: skip
+
+
+def test_runtime_requires_re2_for_regex_rules(regex_engine: str) -> None:
+    if regex_engine == "re2":
+        m = build_matcher(REGEX_CFG)
+        assert m.match("ipv4-c1.x.net") == 2 and m.match("ads.c.example") is None
+        assert "re2" not in commands.check_config(REGEX_CFG).output
+        return
+    # Python's re backtracks: refuse rules that could stall the DNS path.
+    with pytest.raises(RuleConfigError) as e:
+        build_matcher(REGEX_CFG)
+    msg = str(e.value)
+    assert "policy 'safe'" not in msg  # bounded wildcards are fine with re
+    for pos in (2, 3, 4):
+        assert f"policy 're' rule {pos}: " in msg
+    assert "snakevpn[re2]" in msg
+    # rules check still parses them and warns.
+    res = commands.check_config(REGEX_CFG)
+    assert res.code == 0 and "policy 're' rule 2: warning:" in res.output
+    assert "snakevpn[re2]" in res.output
+    assert "warning:" in commands.check(r"/^a+$/" + "\n").output
+    # The lenient matcher still matches (rules test, rules check).
+    assert PolicyMatcher.from_config(REGEX_CFG).match("ipv4-c1.x.net") == 2
+
+
+def test_redos_rule_is_refused_without_re2(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pyvpn.match import pattern
+
+    monkeypatch.setattr(pattern, "_re2", None)
+    cfg = _config({"name": "p", "targets": ["jp"], "domains": [r"/^(a+)+$/"]})
+    with pytest.raises(RuleConfigError, match=r"policy 'p' rule 1: .*google-re2"):
         build_matcher(cfg)
 
 

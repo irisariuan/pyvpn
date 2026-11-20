@@ -97,6 +97,13 @@ class Pattern:
         """Whether a plain suffix lookup implements the rule exactly."""
         return self.kind is Kind.SUFFIX and not self.negate
 
+    def needs_re2(self) -> bool:
+        """Whether matching needs RE2 to run in bounded time: regexes, and
+        wildcards that Python's backtracking ``re`` could match slowly."""
+        if self.kind is Kind.REGEX:
+            return True
+        return self.kind is Kind.GLOB and not glob_bounded(self.value)
+
 
 _LABEL_RE = re.compile(r"[a-z0-9_]([a-z0-9_\-]{0,61}[a-z0-9_])?")
 
@@ -349,6 +356,19 @@ def glob_to_regex(g: str) -> str:
     return "".join(out)
 
 
+def glob_bounded(g: str) -> bool:
+    """Whether Python's ``re`` matches the wildcard in bounded time.
+
+    At most one ``**`` (``.+``) and at most one ``*``/``**`` per label: each
+    ``[^.]*`` then stops at its label's dot, so only the one ``.+`` can
+    backtrack across the name (quadratic at worst in a 253-byte name). More
+    unbounded stars nest their backtracking and need RE2.
+    """
+    if g.count("**") > 1:
+        return False
+    return all(len(re.findall(r"\*+", label)) <= 1 for label in g.split("."))
+
+
 def glob_base(g: str) -> str:
     """The labels after the last label containing a wildcard."""
     labels = g.split(".")
@@ -365,8 +385,11 @@ def glob_base(g: str) -> str:
 # Rule regexes and wildcards run on the DNS path and may come from imported
 # lists, so they are matched with RE2 (linear time) when the optional
 # ``google-re2`` package is installed (``pip install snakevpn[re2]``). Without
-# it, Python's backtracking ``re`` is used. Syntax is the same either way: the
-# walk below rejects what RE2 lacks before either engine compiles.
+# it, Python's backtracking ``re`` compiles them, but ``build_matcher``
+# refuses to activate rules whose ``Pattern.needs_re2()`` (a regex can take
+# exponential time in ``re``); ``pyvpn rules check`` only warns. Syntax is the
+# same either way: the walk below rejects what RE2 lacks before either engine
+# compiles.
 
 
 class Regex(Protocol):
@@ -382,7 +405,12 @@ except ImportError:  # optional dependency
     _Re2Error = re.error
 
 ENGINE = "re" if _re2 is None else "re2"
-"""The regex engine in use: "re2" (linear time) or "re" (backtracking)."""
+"""The regex engine at import: "re2" (linear time) or "re" (backtracking)."""
+
+
+def regex_engine() -> str:
+    """The regex engine in use: "re2" (linear time) or "re" (backtracking)."""
+    return "re" if _re2 is None else "re2"
 
 
 def _compile(expr: str, *, ignore_case: bool) -> Regex:

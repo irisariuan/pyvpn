@@ -7,7 +7,8 @@ order and the first one whose rules route a name wins.
 Per policy, as in snake: ``!rule`` exempts a name from that policy (later
 policies are still tried); ``drop:`` claims the name for the policy but does
 not route it (blocking needs a drop set in the backend, not built yet);
-``build_matcher`` refuses to activate ``drop:`` and per-device rules;
+``build_matcher`` refuses to activate ``drop:`` and per-device rules, and,
+without ``google-re2``, rules that need RE2 (``Pattern.needs_re2``);
 ``session:``, ``route:`` and ``drop[...]:`` sessions are per device in snake
 and not supported here yet (PLAN.md §4): they route nothing and ``check``
 reports them. The names in an ``if:`` condition are routed like plain rules,
@@ -23,7 +24,7 @@ from typing import Literal
 
 from pyvpn.config.models import Config, Policy
 from pyvpn.match.asn import AsnCache
-from pyvpn.match.pattern import RuleError, parse_asn, parse_cidr
+from pyvpn.match.pattern import RuleError, parse_asn, parse_cidr, regex_engine
 from pyvpn.match.route import group
 from pyvpn.match.ruleset import LineError, Result, RuleSet
 from pyvpn.services import RuleMatcherFactory
@@ -33,6 +34,12 @@ AsnResolver = Callable[[int], Iterable[str]]
 """ASN -> announced prefixes, e.g. ``AsnCache.cached`` (must not block long)."""
 
 Action = Literal["route", "drop", "none"]
+
+
+NEEDS_RE2 = (
+    "regexes and complex wildcards need the google-re2 package to match in bounded "
+    "time; install it with: pip install 'snakevpn[re2]'"
+)
 
 
 class RuleConfigError(ValueError):
@@ -58,6 +65,8 @@ class PolicyRules:
     asns: tuple[int, ...] = ()
     cidrs: tuple[str, ...] = ()
     errors: tuple[LineError, ...] = ()  # index = position in the policy's domains
+    # (position, rule) of rules that need RE2 to match in bounded time
+    needs_re2: tuple[tuple[int, str], ...] = ()
 
     @classmethod
     def build(cls, policy_id: int, name: str, entries: Sequence[str]) -> PolicyRules:
@@ -87,7 +96,8 @@ class PolicyRules:
         rules, errs = RuleSet.compile(domain_lines)
         errors.extend(LineError(where[e.index], e.rule, e.error) for e in errs)
         errors.sort(key=lambda e: e.index)
-        return cls(policy_id, name, rules, tuple(asns), tuple(cidrs), tuple(errors))
+        slow = tuple((where[i], raw) for i, raw in rules.needs_re2)
+        return cls(policy_id, name, rules, tuple(asns), tuple(cidrs), tuple(errors), slow)
 
     def unsupported(self) -> list[str]:
         """Rules that parse but pyvpn does not act on yet."""
@@ -125,6 +135,8 @@ class Decision:
     result: Result = field(default_factory=Result)
     # policies whose exclusions vetoed the name before the decision
     excluded_by: tuple[tuple[str, str], ...] = ()
+    # policies passed over because an unsupported per-device rule matched
+    skipped: tuple[tuple[str, str], ...] = ()
 
 
 class PolicyMatcher:
@@ -151,6 +163,7 @@ class PolicyMatcher:
         """Decide for a query name followed by its CNAME chain."""
         chain = [n for n in (normalize_name(x) for x in names) if n]
         excluded: list[tuple[str, str]] = []
+        skipped: list[tuple[str, str]] = []
         for pr in self.policies:
             r = pr.rules.match_any(*chain)
             if r.excluded:
@@ -159,11 +172,12 @@ class PolicyMatcher:
             if not r.matched:
                 continue
             if r.drop:
-                return Decision(pr.policy_id, pr.name, "drop", r, tuple(excluded))
+                return Decision(pr.policy_id, pr.name, "drop", r, tuple(excluded), tuple(skipped))
             if r.session or r.route:
-                continue  # per-device sessions: not supported yet
-            return Decision(pr.policy_id, pr.name, "route", r, tuple(excluded))
-        return Decision(excluded_by=tuple(excluded))
+                skipped.append((pr.name, r.rule))  # per-device sessions: not supported yet
+                continue
+            return Decision(pr.policy_id, pr.name, "route", r, tuple(excluded), tuple(skipped))
+        return Decision(excluded_by=tuple(excluded), skipped=tuple(skipped))
 
     def match_chain(self, *names: str) -> int | None:
         d = self.explain(*names)
@@ -193,13 +207,18 @@ class PolicyMatcher:
         blocks it yet, so it would take the host route), per-device rules
         (``session:``, ``route:``, ``if:`` with ``then:``/``else:``: they
         route nothing and are checked before plain rules, so they would hide
-        them) and ASNs with no prefixes (the policy would silently match
-        nothing).
+        them), ASNs with no prefixes (the policy would silently match
+        nothing) and, without the ``google-re2`` package, regexes and
+        complex wildcards (Python's ``re`` can take exponential time on a
+        crafted name, on the DNS path).
         """
         out: list[str] = []
+        re2 = regex_engine() == "re2"
         for pr in self.policies:
             where = f"policy {pr.name!r}"
             out += [f"{where} rule {e.index + 1}: {e.error}: {e.rule}" for e in pr.errors]
+            if not re2:
+                out += [f"{where} rule {i + 1}: {NEEDS_RE2}: {raw}" for i, raw in pr.needs_re2]
             for raw in pr.unsupported():
                 if raw.lower().startswith("drop:"):
                     out.append(f"{where}: drop: rules are not enforced yet: {raw}")
