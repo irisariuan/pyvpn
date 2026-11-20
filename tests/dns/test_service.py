@@ -227,6 +227,80 @@ def test_service_binding_endpoint_addresses_are_published(
     ]
 
 
+@pytest.mark.parametrize("kind", ["HTTPS", "SVCB"])
+def test_service_alias_followups_keep_the_original_policy(
+    kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Mock(return_value=100.0)
+    monkeypatch.setattr(dns_service, "monotonic", clock)
+    monkeypatch.setattr(dns_service, "_MAX_ALIAS_ORIGINS", 2)
+
+    async def run() -> None:
+        answers = {
+            ("selected.example.", kind): (kind, "0 svc.example."),
+            ("second.example.", kind): (kind, "0 other.example."),
+            ("svc.example.", kind): (kind, "1 edge.example. ipv4hint=192.0.2.10"),
+            ("edge.example.", "AAAA"): ("AAAA", "2001:db8::2"),
+        }
+
+        async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
+            question = query.question[0]
+            owner = question.name.to_text()
+            record_type, value = answers[owner, dns.rdatatype.to_text(question.rdtype)]
+            reply = dns.message.make_response(query)
+            reply.answer.append(dns.rrset.from_text(owner, 60, "IN", record_type, value))
+            return dns.message.from_wire(reply.to_wire())
+
+        matcher = FakeRuleMatcher({"selected.example": 1, "second.example": 1})
+        service = PolicyDnsService(upstream, matcher_factory=lambda: matcher)
+        backend = FakeBackend()
+        service.on_answer(backend.add_to_set)
+        plan = replace(_plan(), dests=DestSet(1))
+        stub = _Stub(service, plan)
+        other_stub = _Stub(service, replace(plan, policy_id=2, dests=DestSet(2)))
+
+        async def query(stub: _Stub, name: str, rdtype: str) -> dns.message.Message:
+            request = dns.message.make_query(name, rdtype)
+            wire = await stub.answer(request.to_wire(), tcp=True)
+            reply = dns.message.from_wire(wire)
+            assert request.is_response(reply)
+            return reply
+
+        assert (await query(stub, "selected.example.", kind)).rcode() == dns.rcode.NOERROR
+        assert not backend.sets
+        assert (await query(other_stub, "svc.example.", kind)).rcode() == dns.rcode.NOERROR
+        assert not backend.sets
+        # An active follow-up must still carry the origin's policy after recreating the listener.
+        stub = _Stub(service, plan)
+        matcher.domains["svc.example"] = 2
+        assert (await query(stub, "svc.example.", kind)).rcode() == dns.rcode.NOERROR
+        assert backend.sets == [DestSet(1, v4=frozenset({ip_network("192.0.2.10")}))]
+        full = await query(stub, "second.example.", kind)
+        assert full.rcode() == dns.rcode.SERVFAIL
+        assert not full.answer
+
+        backend.fail_add = True
+        failed = await query(stub, "edge.example.", "AAAA")
+        assert failed.rcode() == dns.rcode.SERVFAIL
+        assert not failed.answer
+        backend.fail_add = False
+        assert (await query(stub, "edge.example.", "AAAA")).rcode() == dns.rcode.NOERROR
+        assert backend.sets[-1] == DestSet(1, v6=frozenset({ip_network("2001:db8::2")}))
+
+        # A reload can change the origin's winner without retaining a stale policy ID.
+        matcher.domains["selected.example"] = 2
+        assert (await query(stub, "edge.example.", "AAAA")).rcode() == dns.rcode.NOERROR
+        assert backend.sets[-1].policy_id == 2
+
+        clock.return_value = 161.0
+        backend.sets.clear()
+        assert (await query(stub, "edge.example.", "AAAA")).rcode() == dns.rcode.NOERROR
+        assert not backend.sets
+        assert (await query(stub, "second.example.", kind)).rcode() == dns.rcode.NOERROR
+
+    asyncio.run(run())
+
+
 def test_unmatched_domains_do_not_add_addresses_to_any_policy_set() -> None:
     plan = replace(_plan(), dests=DestSet(1))
     service = PolicyDnsService(

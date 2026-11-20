@@ -253,8 +253,12 @@ query name and its CNAME chain. A and AAAA answers, HTTPS/SVCB address hints,
 and additional addresses for referenced names go into the winning policy's
 nft sets *before* the reply is released. For HTTPS and SVCB, the stub follows
 alias records included in the response to collect the endpoint addresses and
-hints. If the update fails, the stub returns SERVFAIL. The daemon composition
-root supplies the active rule matcher to all stubs, including app-only stubs.
+hints. It retains the originating names in memory, scoped to the issuing stub
+and the records' TTLs, so separate lookups for aliases and service addresses
+still use the origin's policy. It rechecks those names against the active
+matcher. If publication fails or the stub cannot keep a new alias reference,
+it returns SERVFAIL. The daemon composition root supplies the active rule
+matcher to all stubs, including app-only stubs.
 
 ### 3.5 Per-app DNS and leaks
 
