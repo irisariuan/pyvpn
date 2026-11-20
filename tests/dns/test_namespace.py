@@ -11,6 +11,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
+from ipaddress import ip_address
 from pathlib import Path
 
 import dns.asyncquery
@@ -23,6 +24,7 @@ from aiohttp import web
 
 from pyvpn.dns.service import PolicyDnsService
 from pyvpn.dns.upstream import BoundUpstream
+from pyvpn.services import DnsService
 from pyvpn.state import DestSet
 from tests.dns._helpers import plan_for_dns
 from tests.fakes.backend import FakeBackend
@@ -32,6 +34,7 @@ pytestmark = pytest.mark.integration
 _UPSTREAM = "203.0.113.53"
 _TLS_NAME = "dns.example"
 _ANSWER = "203.0.113.17"
+_POLICY = plan_for_dns()
 _CASES = (
     ("plain", "udp", "udp.example."),
     ("plain", "tcp", "truncated.example."),
@@ -118,9 +121,9 @@ def test_bound_dns_uses_target_and_fails_closed_after_link_loss(tmp_path: Path) 
             stack.callback(_ip, "netns", "delete", ns)
             _ip("-n", ns, "link", "set", "lo", "up")
 
-        for ns, device, subnet, metric in (
-            (wan, "wan0", "198.51.100", "10"),
-            (target, "vpn0", "192.0.2", "100"),
+        for ns, device, subnet, table in (
+            (wan, "wan0", "198.51.100", "main"),
+            (target, "vpn0", "192.0.2", str(_POLICY.table)),
         ):
             _ip(
                 "-n",
@@ -150,12 +153,25 @@ def test_bound_dns_uses_target_and_fails_closed_after_link_loss(tmp_path: Path) 
                 f"{subnet}.2",
                 "dev",
                 device,
-                "metric",
-                metric,
+                "table",
+                table,
             )
 
+        _ip(
+            "-n",
+            client,
+            "rule",
+            "add",
+            "pref",
+            str(_POLICY.rule_pref),
+            "fwmark",
+            f"{_POLICY.mark:#x}",
+            "lookup",
+            str(_POLICY.table),
+        )
         assert "dev wan0" in _ip("-n", client, "route", "get", _UPSTREAM)
-        assert "dev vpn0" in _ip("-n", client, "route", "get", _UPSTREAM, "oif", "vpn0")
+        assert "dev vpn0" not in _ip("-n", client, "route", "show", "table", "main", "default")
+        assert "dev vpn0" in _ip("-n", client, "route", "get", _UPSTREAM, "mark", hex(_POLICY.mark))
         wan_hits = stack.enter_context(_peer(wan, tmp_path, cert, key))
         target_hits = stack.enter_context(_peer(target, tmp_path, cert, key))
         subprocess.run(_worker(client, "client", str(cert), "up"), check=True, timeout=45)
@@ -235,8 +251,8 @@ async def _serve_peer(cert: Path, key: Path, ready: Path, hits: Path) -> None:
 async def _probe_client(cert: str, expected: str) -> None:
     upstream = BoundUpstream(ssl.create_default_context(cafile=cert))
     backend = FakeBackend()
-    service = PolicyDnsService(upstream)
-    service.set_matcher(FakeRuleMatcher({name.rstrip("."): 1 for _, _, name in _CASES}))
+    matcher = FakeRuleMatcher({name.rstrip("."): 1 for _, _, name in _CASES})
+    service: DnsService = PolicyDnsService(upstream, matcher_factory=lambda: matcher)
     service.on_answer(backend.add_to_set)
     try:
         for protocol, transport, name in _CASES:
@@ -244,6 +260,7 @@ async def _probe_client(cert: str, expected: str) -> None:
             plan = replace(
                 plan_for_dns(dns_protocol=protocol, dns_server=address),
                 interface="vpn0",
+                gateway=ip_address("192.0.2.2"),
                 dests=DestSet(1),
             )
             await service.start(plan)

@@ -19,6 +19,10 @@ import dns.name
 import dns.opcode
 import dns.rcode
 import dns.rdatatype
+from dns.rdtypes.ANY.CNAME import CNAME
+from dns.rdtypes.ANY.MX import MX
+from dns.rdtypes.ANY.NS import NS
+from dns.rdtypes.IN.SRV import SRV
 from dns.rdtypes.svcbbase import IPv4HintParam, IPv6HintParam, ParamKey, SVCBBase
 
 from pyvpn.dns.upstream import MAX_WIRE_SIZE, BoundUpstream
@@ -29,7 +33,8 @@ log = logging.getLogger(__name__)
 _CANARY = dns.name.from_text("use-application-dns.net.")
 _RESOLVE_TIMEOUT = 5.0
 _TCP_IDLE_TIMEOUT = 10.0
-_MAX_CLIENT_TASKS = 256
+_MAX_UDP_QUERIES = 256
+_MAX_TCP_CLIENTS = 256
 _LISTEN_ADDRESS = "127.0.0.1"
 
 Upstream = Callable[[PolicyPlan, dns.message.Message], Awaitable[dns.message.Message]]
@@ -39,21 +44,21 @@ ClientAddress = tuple[str, int]
 class PolicyDnsService:
     """Manage one UDP/TCP listener pair per plan with a DNS stub port."""
 
-    def __init__(self, upstream: Upstream | None = None) -> None:
+    def __init__(
+        self,
+        upstream: Upstream | None = None,
+        *,
+        matcher_factory: Callable[[], RuleMatcher] | None = None,
+    ) -> None:
+        """The composition root supplies a factory for the active config's matcher."""
         self._upstream = upstream if upstream is not None else BoundUpstream()
         self._stubs: dict[int, _Stub] = {}
         self._lock = asyncio.Lock()
         self._callback: DestCallback | None = None
-        self._matcher: RuleMatcher | None = None
+        self._matcher_factory = matcher_factory
 
     def on_answer(self, cb: DestCallback) -> None:
         self._callback = cb
-
-    def set_matcher(self, matcher: RuleMatcher) -> None:
-        """Supply the current rule matcher, including after config reload."""
-        self._matcher = matcher
-        for stub in self._stubs.values():
-            stub.cancel_queries()
 
     async def start(self, plan: PolicyPlan) -> None:
         async with self._lock:
@@ -68,10 +73,15 @@ class PolicyDnsService:
                 if stub.plan != plan:
                     stub.plan = plan
                     stub.cancel_queries()
+                    await self._close_upstream(pid)
                 return
             await self._stop(pid)
             stub = _Stub(self, plan)
-            await stub.open(port)
+            try:
+                await stub.open(port)
+            except BaseException:
+                await self._close_upstream(pid)
+                raise
             self._stubs[pid] = stub
 
     async def stop(self, policy_id: int) -> None:
@@ -81,7 +91,14 @@ class PolicyDnsService:
     async def _stop(self, policy_id: int) -> None:
         stub = self._stubs.pop(policy_id, None)
         if stub is not None:
-            await stub.close()
+            try:
+                await stub.close()
+            finally:
+                await self._close_upstream(policy_id)
+
+    async def _close_upstream(self, policy_id: int) -> None:
+        if isinstance(self._upstream, BoundUpstream):
+            await self._upstream.close_policy(policy_id)
 
     def is_listening(self, policy_id: int) -> bool:
         return policy_id in self._stubs
@@ -94,10 +111,10 @@ class PolicyDnsService:
         dests = _destinations(plan.policy_id, response)
         if not dests:
             return
-        if self._matcher is None:
+        if self._matcher_factory is None:
             raise RuntimeError("DNS destination matching is unavailable")
         domain = response.question[0].name.canonicalize().to_text(omit_final_dot=True)
-        if self._matcher.match(domain) != plan.policy_id:
+        if self._matcher_factory().match(domain) != plan.policy_id:
             return
         if self._callback is None:
             raise RuntimeError("DNS destination publication is unavailable")
@@ -110,7 +127,8 @@ class _Stub(asyncio.DatagramProtocol):
         self.plan = plan
         self._udp: asyncio.DatagramTransport | None = None
         self._tcp: asyncio.Server | None = None
-        self._tasks: set[asyncio.Task[None]] = set()
+        self._udp_tasks: set[asyncio.Task[None]] = set()
+        self._tcp_tasks: set[asyncio.Task[None]] = set()
         self._generation = 0
         self._closed = False
 
@@ -131,26 +149,23 @@ class _Stub(asyncio.DatagramProtocol):
         if self._tcp is not None:
             self._tcp.close()
         self.cancel_queries()
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+        await asyncio.gather(*self._udp_tasks, *self._tcp_tasks, return_exceptions=True)
         if self._tcp is not None:
             await self._tcp.wait_closed()
 
     def cancel_queries(self) -> None:
         self._generation += 1
-        for task in self._tasks:
+        for task in self._udp_tasks | self._tcp_tasks:
             task.cancel()
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self._udp = cast(asyncio.DatagramTransport, transport)
 
     def datagram_received(self, data: bytes, addr: ClientAddress) -> None:
-        if len(self._tasks) < _MAX_CLIENT_TASKS:
-            self._track(asyncio.create_task(self._reply_udp(data, addr)))
-
-    def _track(self, task: asyncio.Task[None]) -> None:
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        if len(self._udp_tasks) < _MAX_UDP_QUERIES:
+            task = asyncio.create_task(self._reply_udp(data, addr))
+            self._udp_tasks.add(task)
+            task.add_done_callback(self._udp_tasks.discard)
 
     async def _reply_udp(self, data: bytes, addr: ClientAddress) -> None:
         reply = await self.answer(data, tcp=False)
@@ -158,13 +173,14 @@ class _Stub(asyncio.DatagramProtocol):
             self._udp.sendto(reply, addr)
 
     def _accept_tcp(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        if len(self._tasks) >= _MAX_CLIENT_TASKS:
+        if len(self._tcp_tasks) >= _MAX_TCP_CLIENTS:
             writer.close()
             return
         task = asyncio.create_task(self._reply_tcp(reader, writer))
         # A task cancelled before its first step never enters its try/finally.
         task.add_done_callback(lambda _: writer.close())
-        self._track(task)
+        self._tcp_tasks.add(task)
+        task.add_done_callback(self._tcp_tasks.discard)
 
     async def _reply_tcp(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         with suppress(TimeoutError, OSError, asyncio.IncompleteReadError):
@@ -230,7 +246,7 @@ def _error(query: dns.message.Message, code: dns.rcode.Rcode) -> dns.message.Mes
 
 
 def _destinations(policy_id: int, response: dns.message.QueryMessage) -> DestSet:
-    """Extract addresses at the end of the queried name's CNAME chain."""
+    """Collect the answer, service hints, and addresses for referenced names."""
     chain = response.resolve_chaining()
     question = response.question[0]
     if question.rdtype == dns.rdatatype.ANY:
@@ -243,6 +259,7 @@ def _destinations(policy_id: int, response: dns.message.QueryMessage) -> DestSet
         answers = [chain.answer] if chain.answer is not None else []
     v4: set[IPv4Network] = set()
     v6: set[IPv6Network] = set()
+    related = {chain.canonical_name}
     for rrset in answers:
         if rrset.rdtype == dns.rdatatype.A:
             v4.update(IPv4Network(str(record)) for record in rrset)
@@ -251,10 +268,23 @@ def _destinations(policy_id: int, response: dns.message.QueryMessage) -> DestSet
         else:
             for record in rrset:
                 if isinstance(record, SVCBBase):
+                    if record.target != dns.name.root:
+                        related.add(record.target)
                     hint4 = record.params.get(ParamKey.IPV4HINT)
                     hint6 = record.params.get(ParamKey.IPV6HINT)
                     if isinstance(hint4, IPv4HintParam):
                         v4.update(IPv4Network(address) for address in hint4.addresses)
                     if isinstance(hint6, IPv6HintParam):
                         v6.update(IPv6Network(address) for address in hint6.addresses)
+                elif isinstance(record, (CNAME, NS, SRV)):
+                    related.add(record.target)
+                elif isinstance(record, MX):
+                    related.add(record.exchange)
+    for rrset in response.additional:
+        if rrset.name not in related or rrset.rdclass != question.rdclass:
+            continue
+        if rrset.rdtype == dns.rdatatype.A:
+            v4.update(IPv4Network(str(record)) for record in rrset)
+        elif rrset.rdtype == dns.rdatatype.AAAA:
+            v6.update(IPv6Network(str(record)) for record in rrset)
     return DestSet(policy_id, frozenset(v4), frozenset(v6))

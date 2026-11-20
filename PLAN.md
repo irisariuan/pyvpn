@@ -29,8 +29,8 @@ route, or blocks (kill switch).
   script `pyvpn`. Pure-Python wheel.
 * Dependencies: `pyroute2` (netlink: routes, rules, link/address events,
   sock_diag, process-event connector), `dnspython` (DNS message parsing and
-  serialization), `aiohttp` (DoH with interface-bound sockets), and
-  `pydantic` v2 (config).
+  serialization), and `pydantic` v2 (config). The `snakevpn[doh]` extra
+  installs `aiohttp` for DNS over HTTPS.
 * Release: on a `v*` tag, GitHub Actions runs the tests, builds sdist and
   wheel, and publishes with **PyPI Trusted Publishing** (no stored token).
 
@@ -247,21 +247,25 @@ A policy with only apps sends **all** of their traffic through the target. A
 policy with apps **and** destination rules sends only the matched
 destinations (snake's domain rules, `asn:`, `cidr:`) through it. A policy
 with destination rules and no apps applies those destinations to every
-process. Domain matches come from the per-policy DNS stub: A and AAAA answers
-and HTTPS/SVCB address hints for a matching name go into nft sets *before* the
-reply is released, as snake's DNS inspector does for address answers.
+process. Domain matches come from the per-policy DNS stub: A and AAAA answers,
+HTTPS/SVCB address hints, and additional addresses for referenced names go
+into nft sets *before* the reply is released. The daemon composition root
+supplies the active rule matcher when constructing the DNS service.
 
 ### 3.5 Per-app DNS and leaks
 
 * Each policy gets its own stub (`127.0.0.1:53<id>`). nft redirects port 53
   **from that policy's apps** to it, which also catches hard-coded `8.8.8.8`.
   The stub listens on UDP and TCP. Upstream sockets bind to the target
-  interface before connecting. Configure `dns_server` with a numeric
-  address. DoT and DoH also accept `hostname@address` to verify the TLS
-  certificate against a name without consulting the system resolver.
-  DoH sends POST requests to `/dns-query`. The stub returns SERVFAIL if
-  the target or DNS upstream is unavailable, including during routing
-  fallback to the host default route. The daemon's bound upstream sockets
+  interface and set the policy's mark before connecting, so the policy's
+  route and gateway apply. With no `dns_server`, the stub uses Quad9 at
+  `9.9.9.9` on that interface. Set a numeric address to override it.
+  DoT and DoH accept `hostname@address` to verify the TLS certificate
+  without consulting the system resolver. Encrypted requests to the
+  default upstream verify `dns.quad9.net`. DoH sends POST requests to
+  `/dns-query` and reuses HTTPS connections per policy. The stub returns
+  SERVFAIL if the target or DNS upstream is unavailable, including during
+  routing fallback to the host default route. The daemon's bound upstream sockets
   must be exempt from port-53 redirection so queries cannot loop into a stub.
 * Other apps keep the system resolver. **pyvpn does not take over system
   DNS.**

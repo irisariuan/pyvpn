@@ -1,6 +1,7 @@
 """Describe DNS policy configuration and stub readiness for the daemon's audit."""
 
 from dataclasses import dataclass
+from importlib.util import find_spec
 
 from pyvpn.dns.upstream import upstream_endpoint
 from pyvpn.state import PolicyPlan
@@ -25,11 +26,13 @@ def audit_dns(plan: PolicyPlan, *, listening: bool) -> DnsAudit:
         problem = "Per-policy DNS stub is not listening"
     elif plan.route != "dev" or not plan.interface:
         problem = "No active target interface"
+    elif leak.dns_protocol == "doh" and find_spec("aiohttp") is None:
+        problem = "DNS over HTTPS requires the snakevpn[doh] extra"
     else:
         try:
             upstream_endpoint(leak.dns_server, leak.dns_protocol)
         except ValueError:
-            problem = "Missing or invalid DNS upstream address"
+            problem = "Invalid DNS upstream address"
         else:
             problem = None
             interface = plan.interface

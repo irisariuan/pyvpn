@@ -10,6 +10,7 @@ import dns.rrset
 import pytest
 
 from pyvpn.audit import audit_dns
+from pyvpn.dns import service as dns_service
 from pyvpn.dns.service import PolicyDnsService, _Stub
 from pyvpn.state import DestSet, PolicyPlan
 from tests.dns._helpers import plan_for_dns as _plan
@@ -54,8 +55,8 @@ def test_waits_for_destination_publication_before_answering(
 
         plan = replace(_plan(), dests=DestSet(1))
         upstream = AsyncMock(side_effect=lambda _, q: _answer(q, address))
-        service = PolicyDnsService(upstream)
-        service.set_matcher(FakeRuleMatcher({"selected.example": 1}))
+        matcher = FakeRuleMatcher({"selected.example": 1})
+        service = PolicyDnsService(upstream, matcher_factory=lambda: matcher)
         service.on_answer(publish)
         stub = _Stub(service, plan)
         query = dns.message.make_query("Selected.Example.", kind)
@@ -76,8 +77,10 @@ def test_waits_for_destination_publication_before_answering(
 
 def test_failed_publication_returns_servfail_without_answer_records() -> None:
     plan = replace(_plan(), dests=DestSet(1))
-    service = PolicyDnsService(AsyncMock(side_effect=lambda _, query: _answer(query)))
-    service.set_matcher(FakeRuleMatcher({"selected.example": 1}))
+    service = PolicyDnsService(
+        AsyncMock(side_effect=lambda _, query: _answer(query)),
+        matcher_factory=lambda: FakeRuleMatcher({"selected.example": 1}),
+    )
     backend = FakeBackend()
     backend.fail_add = True
     service.on_answer(backend.add_to_set)
@@ -90,7 +93,7 @@ def test_failed_publication_returns_servfail_without_answer_records() -> None:
     assert not reply.answer
 
 
-def test_https_address_hints_are_installed_before_reply() -> None:
+def test_https_hints_and_additional_target_addresses_are_installed_before_reply() -> None:
     async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
         response = dns.message.make_response(query)
         response.answer.append(
@@ -99,13 +102,21 @@ def test_https_address_hints_are_installed_before_reply() -> None:
                 60,
                 "IN",
                 "HTTPS",
-                "1 . ipv4hint=192.0.2.10 ipv6hint=2001:db8::1",
+                "1 edge.example. ipv4hint=192.0.2.10 ipv6hint=2001:db8::1",
             )
+        )
+        response.additional.extend(
+            [
+                dns.rrset.from_text("edge.example.", 60, "IN", "A", "192.0.2.11"),
+                dns.rrset.from_text("edge.example.", 60, "IN", "AAAA", "2001:db8::2"),
+                dns.rrset.from_text("unrelated.example.", 60, "IN", "A", "192.0.2.99"),
+            ]
         )
         return dns.message.from_wire(response.to_wire())
 
-    service = PolicyDnsService(upstream)
-    service.set_matcher(FakeRuleMatcher({"selected.example": 1}))
+    service = PolicyDnsService(
+        upstream, matcher_factory=lambda: FakeRuleMatcher({"selected.example": 1})
+    )
     backend = FakeBackend()
     service.on_answer(backend.add_to_set)
     query = dns.message.make_query("selected.example.", "HTTPS")
@@ -116,22 +127,37 @@ def test_https_address_hints_are_installed_before_reply() -> None:
     assert backend.sets == [
         DestSet(
             1,
-            v4=frozenset({ip_network("192.0.2.10")}),
-            v6=frozenset({ip_network("2001:db8::1")}),
+            v4=frozenset({ip_network("192.0.2.10"), ip_network("192.0.2.11")}),
+            v6=frozenset({ip_network("2001:db8::1"), ip_network("2001:db8::2")}),
         )
     ]
 
 
 def test_unmatched_domains_do_not_add_addresses_to_the_policy_set() -> None:
     plan = replace(_plan(), dests=DestSet(1))
-    service = PolicyDnsService(AsyncMock(side_effect=lambda _, query: _answer(query)))
-    service.set_matcher(FakeRuleMatcher({"selected.example": 2}))
+    service = PolicyDnsService(
+        AsyncMock(side_effect=lambda _, query: _answer(query)),
+        matcher_factory=lambda: FakeRuleMatcher({"selected.example": 2}),
+    )
     update = AsyncMock()
     service.on_answer(update)
     query = dns.message.make_query("selected.example.", "A")
 
     wire = asyncio.run(_Stub(service, plan).answer(query.to_wire(), tcp=False))
     assert dns.message.from_wire(wire).rcode() == dns.rcode.NOERROR
+    update.assert_not_awaited()
+
+
+def test_missing_matcher_fails_closed_for_a_filtered_answer() -> None:
+    plan = replace(_plan(), dests=DestSet(1))
+    service = PolicyDnsService(AsyncMock(side_effect=lambda _, query: _answer(query)))
+    update = AsyncMock()
+    service.on_answer(update)
+    query = dns.message.make_query("selected.example.", "A")
+
+    wire = asyncio.run(_Stub(service, plan).answer(query.to_wire(), tcp=False))
+
+    assert dns.message.from_wire(wire).rcode() == dns.rcode.SERVFAIL
     update.assert_not_awaited()
 
 
@@ -201,6 +227,33 @@ def test_tcp_accepts_dns_frames_and_udp_truncates_to_client_size() -> None:
         framed = writer.write.call_args.args[0]
         assert int.from_bytes(framed[:2], "big") == len(framed[2:])
         assert not dns.message.from_wire(framed[2:]).flags & dns.flags.TC
+
+    asyncio.run(run())
+
+
+def test_idle_tcp_limit_does_not_starve_udp(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> None:
+        sent = asyncio.Event()
+        monkeypatch.setattr(dns_service, "_MAX_TCP_CLIENTS", 1)
+        upstream = AsyncMock(side_effect=lambda _, query: _answer(query))
+        stub = _Stub(PolicyDnsService(upstream), _plan())
+        udp = Mock(sendto=Mock(side_effect=lambda *_: sent.set()))
+        stub.connection_made(udp)
+        idle_client = Mock()
+        refused_client = Mock()
+        stub._accept_tcp(asyncio.StreamReader(), idle_client)
+        stub._accept_tcp(asyncio.StreamReader(), refused_client)
+        query = dns.message.make_query("selected.example.", "A")
+        try:
+            refused_client.close.assert_called_once()
+            stub.datagram_received(query.to_wire(), ("127.0.0.1", 49999))
+            await asyncio.wait_for(sent.wait(), 1)
+            reply = dns.message.from_wire(udp.sendto.call_args.args[0])
+            assert query.is_response(reply)
+            assert reply.rcode() == dns.rcode.NOERROR
+            idle_client.close.assert_not_called()
+        finally:
+            await stub.close()
 
     asyncio.run(run())
 

@@ -1,9 +1,11 @@
 import asyncio
 import socket
+import sys
 from dataclasses import replace
 from ipaddress import ip_address
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, call
 
+import aiohttp
 import dns.flags
 import dns.message
 import pytest
@@ -31,14 +33,60 @@ def test_failed_binding_closes_socket_without_connecting(monkeypatch: pytest.Mon
     sock = Mock()
     sock.setsockopt.side_effect = OSError("interface disappeared")
     monkeypatch.setattr(socket, "SO_BINDTODEVICE", 25, raising=False)
+    monkeypatch.setattr(socket, "SO_MARK", 36, raising=False)
     monkeypatch.setattr(socket, "socket", Mock(return_value=sock))
 
     with pytest.raises(OSError, match="interface disappeared"):
-        _bound_socket("wg-jp", socket.AF_INET, socket.SOCK_DGRAM)
+        _bound_socket("wg-jp", _plan().mark, socket.AF_INET, socket.SOCK_DGRAM)
 
     sock.setsockopt.assert_called_once_with(socket.SOL_SOCKET, 25, b"wg-jp\0")
     sock.close.assert_called_once()
     sock.connect.assert_not_called()
+
+
+def test_failed_route_mark_closes_socket_without_connecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sock = Mock()
+    sock.setsockopt.side_effect = [None, PermissionError("mark denied")]
+    monkeypatch.setattr(socket, "SO_BINDTODEVICE", 25, raising=False)
+    monkeypatch.setattr(socket, "SO_MARK", 36, raising=False)
+    monkeypatch.setattr(socket, "socket", Mock(return_value=sock))
+    mark = _plan().mark
+
+    with pytest.raises(PermissionError, match="mark denied"):
+        _bound_socket("wg-jp", mark, socket.AF_INET, socket.SOCK_DGRAM)
+
+    assert sock.setsockopt.call_args_list == [
+        call(socket.SOL_SOCKET, 25, b"wg-jp\0"),
+        call(socket.SOL_SOCKET, 36, mark),
+    ]
+    sock.close.assert_called_once()
+    sock.connect.assert_not_called()
+
+
+def test_missing_dns_server_defaults_to_quad9_on_policy_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query = dns.message.make_query("example.", "A")
+    client = BoundUpstream()
+    udp = AsyncMock(return_value=dns.message.make_response(query).to_wire())
+    monkeypatch.setattr(client, "_udp", udp)
+    plan = _plan(dns_server=None)
+
+    assert query.is_response(asyncio.run(client(plan, query)))
+    udp.assert_awaited_once_with("wg-jp", plan.mark, ip_address("9.9.9.9"), query.to_wire())
+    assert upstream_endpoint(None, "dot") == (ip_address("9.9.9.9"), "dns.quad9.net")
+    assert upstream_endpoint(None, "doh") == (ip_address("9.9.9.9"), "dns.quad9.net")
+
+
+def test_doh_requires_its_install_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "aiohttp", None)
+    query = dns.message.make_query("example.", "A")
+    client = BoundUpstream()
+
+    with pytest.raises(RuntimeError, match=r"snakevpn\[doh\]"):
+        asyncio.run(client(_plan(dns_protocol="doh"), query))
 
 
 def test_udp_binds_before_connecting_to_a_numeric_peer(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -57,9 +105,10 @@ def test_udp_binds_before_connecting_to_a_numeric_peer(monkeypatch: pytest.Monke
         monkeypatch.setattr(loop, "sock_recv", calls.receive)
 
         address = ip_address("192.0.2.53")
-        assert await BoundUpstream()._udp("wg-jp", address, b"query") == b"response"
+        mark = _plan().mark
+        assert await BoundUpstream()._udp("wg-jp", mark, address, b"query") == b"response"
         assert [call[0] for call in calls.method_calls] == ["bind", "connect", "send", "receive"]
-        calls.bind.assert_called_once_with("wg-jp", socket.AF_INET, socket.SOCK_DGRAM)
+        calls.bind.assert_called_once_with("wg-jp", mark, socket.AF_INET, socket.SOCK_DGRAM)
         calls.connect.assert_awaited_once_with(sock, ("192.0.2.53", 53))
         calls.send.assert_awaited_once_with(sock, b"query")
 
@@ -77,11 +126,12 @@ def test_plain_truncation_retries_tcp_on_same_target(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(client, "_udp", udp)
     monkeypatch.setattr(client, "_stream", tcp)
 
-    response = asyncio.run(client(_plan(), query))
+    plan = _plan()
+    response = asyncio.run(client(plan, query))
 
     assert query.is_response(response)
-    udp.assert_awaited_once_with("wg-jp", ip_address("192.0.2.53"), query.to_wire())
-    tcp.assert_awaited_once_with("wg-jp", ip_address("192.0.2.53"), 53, query.to_wire())
+    udp.assert_awaited_once_with("wg-jp", plan.mark, ip_address("192.0.2.53"), query.to_wire())
+    tcp.assert_awaited_once_with("wg-jp", plan.mark, ip_address("192.0.2.53"), 53, query.to_wire())
 
 
 def test_dot_uses_bound_stream_and_configured_tls_name(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -94,7 +144,7 @@ def test_dot_uses_bound_stream_and_configured_tls_name(monkeypatch: pytest.Monke
 
     assert query.is_response(asyncio.run(client(plan, query)))
     stream.assert_awaited_once_with(
-        "wg-jp", ip_address("192.0.2.53"), 853, query.to_wire(), tls_name="dns.example"
+        "wg-jp", plan.mark, ip_address("192.0.2.53"), 853, query.to_wire(), tls_name="dns.example"
     )
 
 
@@ -112,19 +162,27 @@ def test_doh_pins_address_uses_bound_socket_and_disallows_redirects(
         content=Mock(iter_chunked=chunks),
     )
     session = MagicMock()
-    session.__aenter__.return_value = session
+    session.close = AsyncMock()
     session.post.return_value.__aenter__.return_value = response
     session_factory = Mock(return_value=session)
     connector = Mock()
     binder = Mock()
-    monkeypatch.setattr(upstream.aiohttp, "ClientSession", session_factory)
-    monkeypatch.setattr(upstream.aiohttp, "TCPConnector", connector)
+    monkeypatch.setattr(aiohttp, "ClientSession", session_factory)
+    monkeypatch.setattr(aiohttp, "TCPConnector", connector)
     monkeypatch.setattr(upstream, "_bound_socket", binder)
     plan = _plan(dns_protocol="doh", dns_server="dns.example@2001:db8::53")
 
-    assert query.is_response(asyncio.run(BoundUpstream()(plan, query)))
+    async def run() -> None:
+        client = BoundUpstream()
+        assert query.is_response(await client(plan, query))
+        assert query.is_response(await client(plan, query))
+        await client.close_policy(plan.policy_id)
+
+    asyncio.run(run())
+    session_factory.assert_called_once()
+    session.close.assert_awaited_once()
     assert session_factory.call_args.kwargs["trust_env"] is False
-    session.post.assert_called_once_with(
+    expected = call(
         "https://[2001:db8::53]/dns-query",
         data=query.to_wire(),
         headers={
@@ -134,10 +192,14 @@ def test_doh_pins_address_uses_bound_socket_and_disallows_redirects(
         },
         server_hostname="dns.example",
         allow_redirects=False,
+        proxy=None,
     )
+    assert session.post.call_args_list == [expected, expected]
     socket_factory = connector.call_args.kwargs["socket_factory"]
     socket_factory((socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ()))
-    binder.assert_called_once_with("wg-jp", socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+    binder.assert_called_once_with(
+        "wg-jp", plan.mark, socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP
+    )
 
 
 def test_inactive_plan_cannot_open_an_upstream_socket(monkeypatch: pytest.MonkeyPatch) -> None:
