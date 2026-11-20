@@ -44,7 +44,7 @@ class Daemon:
         audit: AuditFn | None = None,
         store: StateStore | None = None,
         socket_path: str | os.PathLike[str] = SOCKET_PATH,
-        teardown_on_stop: bool = True,
+        teardown_on_stop: bool = False,
     ) -> None:
         self._load = config_loader
         self._backend = backend
@@ -88,6 +88,10 @@ class Daemon:
         log.info("pyvpn daemon started with %d policies", len(config.policies))
 
     async def stop(self) -> None:
+        """Stop serving. Installed rules stay in force (kill switches keep
+        blocking across a restart; the next daemon's apply replaces them
+        atomically). Only ``disable`` or ``teardown_on_stop`` (uninstall)
+        removes them."""
         await self.server.close()
         for t in self._tasks:
             t.cancel()
@@ -256,7 +260,9 @@ class Daemon:
             raise ApiError("forbidden", "unprivileged callers may only place their own pid")
         async with self._config_lock:
             r = self.reconciler
-            if r.enabled and r.applied is None:
+            if not r.enabled:
+                raise ApiError("unavailable", "routing is disabled")
+            if r.applied is None:
                 raise ApiError("unavailable", "routing rules are not installed yet")
             pid = self._resolve_policy(p.policy)
             await self._apps.place_pid(p.pid, pid)

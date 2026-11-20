@@ -97,7 +97,7 @@ async def test_start_binds_apps_in_one_apply(rig: Rig) -> None:
     assert apps[0].cgroup_paths == ("pyvpn.slice/p-1",)
     assert apps[2].any_process
     await rig.daemon.stop()
-    assert rig.backend.teardowns == 1
+    assert rig.backend.teardowns == 0  # rules survive a normal stop
     assert not rig.sock.exists()
 
 
@@ -305,4 +305,47 @@ async def test_missing_peer_credentials_are_rejected(rig: Rig) -> None:
     assert rig.apps.placed == []
     assert rig.daemon.reconciler.enabled
     await rig.daemon.handle("status", {}, None)  # read-only methods stay open
+    await rig.daemon.stop()
+
+
+async def test_restart_keeps_kill_switch_enforced(rig: Rig) -> None:
+    await rig.daemon.start()
+    installed = rig.backend.installed
+    assert installed is not None and installed.policies[1].route == "unreachable"
+    await rig.daemon.stop()
+    assert rig.backend.teardowns == 0
+    assert rig.backend.installed == installed  # still blocking between daemons
+    rig.daemon = rig.new_daemon()
+    await rig.daemon.start()
+    assert rig.backend.teardowns == 0
+    assert rig.backend.installed is not None
+    await rig.daemon.stop()
+
+
+async def test_teardown_on_stop_removes_rules(tmp_path: Path, config: Config) -> None:
+    rig = Rig(tmp_path, config)
+    rig.daemon = Daemon(
+        config_loader=lambda: rig.config,
+        backend=rig.backend,
+        targets=rig.targets,
+        apps=rig.apps,
+        socket_path=rig.sock,
+        teardown_on_stop=True,  # uninstall path
+    )
+    await rig.daemon.start()
+    await rig.daemon.stop()
+    assert rig.backend.teardowns == 1 and rig.backend.installed is None
+
+
+async def test_place_pid_unavailable_while_disabled(rig: Rig) -> None:
+    await rig.daemon.start()
+    await rig.daemon.handle("disable", {}, ROOT)
+    with pytest.raises(ApiError) as e:
+        await rig.daemon.handle("place_pid", {"pid": 99, "policy": "Torrents"}, ROOT)
+    assert e.value.code == "unavailable"
+    assert rig.apps.placed == []
+    await rig.daemon.handle("reload", {}, ROOT)  # re-enables
+    assert await rig.daemon.handle("place_pid", {"pid": 99, "policy": "Torrents"}, ROOT) == {
+        "policy_id": 2
+    }
     await rig.daemon.stop()
