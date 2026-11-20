@@ -7,12 +7,11 @@ fully testable without opening privileged netlink sockets.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from pathlib import Path
 
-from pyvpn.apps.selectors import ProcessInfo, SelectorMatcher, read_process
+from pyvpn.apps.selectors import SelectorMatcher, read_process
 from pyvpn.config.models import AppGroup, Policy
 
 log = logging.getLogger(__name__)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pwd
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from collections.abc import Iterable
 
 from pyvpn.config.models import AppGroup, AppSelector, Policy
 
