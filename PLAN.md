@@ -247,10 +247,11 @@ A policy with only apps sends **all** of their traffic through the target. A
 policy with apps **and** destination rules sends only the matched
 destinations (snake's domain rules, `asn:`, `cidr:`) through it. A policy
 with destination rules and no apps applies those destinations to every
-process. Domain matches come from the per-policy DNS stub: A and AAAA answers,
-HTTPS/SVCB address hints, and additional addresses for referenced names go
-into nft sets *before* the reply is released. The daemon composition root
-supplies the active rule matcher when constructing the DNS service.
+process. The per-policy DNS stub matches the query name and its CNAME chain.
+A and AAAA answers, HTTPS/SVCB address hints, and additional addresses for
+referenced names go into nft sets *before* the reply is released. The daemon
+composition root supplies the active rule matcher when constructing the DNS
+service.
 
 ### 3.5 Per-app DNS and leaks
 

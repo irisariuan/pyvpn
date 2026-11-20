@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from copy import copy
 from ipaddress import IPv4Network, IPv6Network
-from typing import cast
+from typing import Protocol, cast, runtime_checkable
 
 import dns.exception
 import dns.flags
@@ -39,6 +39,11 @@ _LISTEN_ADDRESS = "127.0.0.1"
 
 Upstream = Callable[[PolicyPlan, dns.message.Message], Awaitable[dns.message.Message]]
 ClientAddress = tuple[str, int]
+
+
+@runtime_checkable
+class _ChainMatcher(Protocol):
+    def match_chain(self, *domains: str) -> int | None: ...
 
 
 class PolicyDnsService:
@@ -108,13 +113,13 @@ class PolicyDnsService:
             return
         if response.rcode() != dns.rcode.NOERROR:
             return
-        dests = _destinations(plan.policy_id, response)
+        chain = response.resolve_chaining()
+        dests = _destinations(plan.policy_id, response, chain)
         if not dests:
             return
         if self._matcher_factory is None:
             raise RuntimeError("DNS destination matching is unavailable")
-        domain = response.question[0].name.canonicalize().to_text(omit_final_dot=True)
-        if self._matcher_factory().match(domain) != plan.policy_id:
+        if _match_chain(self._matcher_factory(), chain) != plan.policy_id:
             return
         if self._callback is None:
             raise RuntimeError("DNS destination publication is unavailable")
@@ -245,9 +250,23 @@ def _error(query: dns.message.Message, code: dns.rcode.Rcode) -> dns.message.Mes
     return response
 
 
-def _destinations(policy_id: int, response: dns.message.QueryMessage) -> DestSet:
+def _match_chain(matcher: RuleMatcher, chain: dns.message.ChainingResult) -> int | None:
+    names = [rrset.name for rrset in chain.cnames]
+    names.append(chain.canonical_name)
+    if chain.answer is not None and chain.answer.rdtype == dns.rdatatype.CNAME:
+        names.extend(record.target for record in chain.answer if isinstance(record, CNAME))
+    domains = tuple(name.canonicalize().to_text(omit_final_dot=True) for name in names)
+    if isinstance(matcher, _ChainMatcher):
+        return matcher.match_chain(*domains)
+    # Phase 0 matchers can compare individual names. Policy IDs follow config order.
+    matches = (matcher.match(domain) for domain in domains)
+    return min((policy_id for policy_id in matches if policy_id is not None), default=None)
+
+
+def _destinations(
+    policy_id: int, response: dns.message.QueryMessage, chain: dns.message.ChainingResult
+) -> DestSet:
     """Collect the answer, service hints, and addresses for referenced names."""
-    chain = response.resolve_chaining()
     question = response.question[0]
     if question.rdtype == dns.rdatatype.ANY:
         answers = [

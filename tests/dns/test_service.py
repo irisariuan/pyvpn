@@ -37,10 +37,12 @@ def _answer(query: dns.message.Message, address: str = "192.0.2.10") -> dns.mess
         ("AAAA", "2001:db8::1", DestSet(1, v6=frozenset({ip_network("2001:db8::1/128")}))),
     ],
 )
+@pytest.mark.parametrize("matched_name", ["selected.example", "edge.example"])
 def test_waits_for_destination_publication_before_answering(
     kind: str,
     address: str,
     dests: DestSet,
+    matched_name: str,
 ) -> None:
     async def run() -> None:
         entered = asyncio.Event()
@@ -55,7 +57,7 @@ def test_waits_for_destination_publication_before_answering(
 
         plan = replace(_plan(), dests=DestSet(1))
         upstream = AsyncMock(side_effect=lambda _, q: _answer(q, address))
-        matcher = FakeRuleMatcher({"selected.example": 1})
+        matcher = FakeRuleMatcher({matched_name: 1})
         service = PolicyDnsService(upstream, matcher_factory=lambda: matcher)
         service.on_answer(publish)
         stub = _Stub(service, plan)
@@ -73,6 +75,39 @@ def test_waits_for_destination_publication_before_answering(
         assert upstream.await_args.args[0].interface == "wg-jp"
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("winner", [1, None])
+def test_chain_matcher_gets_all_cnames_and_controls_publication(winner: int | None) -> None:
+    async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
+        response = dns.message.make_response(query)
+        response.answer.extend(
+            [
+                dns.rrset.from_text(query.question[0].name, 60, "IN", "CNAME", "Hop.Example."),
+                dns.rrset.from_text("Hop.Example.", 60, "IN", "CNAME", "Edge.Example."),
+                dns.rrset.from_text("Edge.Example.", 60, "IN", "A", "192.0.2.10"),
+                dns.rrset.from_text("unrelated.example.", 60, "IN", "CNAME", "ignored.example."),
+            ]
+        )
+        return dns.message.from_wire(response.to_wire())
+
+    class ChainMatcher(FakeRuleMatcher):
+        def match_chain(self, *names: str) -> int | None:
+            assert names == ("selected.example", "hop.example", "edge.example")
+            return winner
+
+    matcher = ChainMatcher({"selected.example": 1})
+    service = PolicyDnsService(upstream, matcher_factory=lambda: matcher)
+    backend = FakeBackend()
+    service.on_answer(backend.add_to_set)
+    query = dns.message.make_query("Selected.Example.", "A")
+    plan = replace(_plan(), dests=DestSet(1))
+
+    wire = asyncio.run(_Stub(service, plan).answer(query.to_wire(), tcp=False))
+
+    assert dns.message.from_wire(wire).rcode() == dns.rcode.NOERROR
+    expected = [DestSet(1, v4=frozenset({ip_network("192.0.2.10/32")}))] if winner else []
+    assert backend.sets == expected
 
 
 def test_failed_publication_returns_servfail_without_answer_records() -> None:
