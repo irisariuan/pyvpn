@@ -198,6 +198,12 @@ class Daemon:
                     for binding in staged.values():
                         await self.reconciler.update_binding(binding)
         except (Exception, asyncio.CancelledError):
+            if self.reconciler.config is config:
+                # Past the commit point (e.g. cancelled while the new DNS
+                # listeners start): the new rules are installed, so keep the
+                # new bindings and saved reservations that go with them.
+                log.warning("new config committed; interrupted while starting its DNS listeners")
+                raise
             if saved:
                 try:
                     self._save_state(enabled=enabled, slots=old_slots)

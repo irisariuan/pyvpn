@@ -881,3 +881,57 @@ async def test_api_bounds_clients_and_idle_connections(tmp_path: Path) -> None:
     assert json.loads(await asyncio.wait_for(reader.readline(), 1))["ok"] is True
     writer.close()
     await server.close()
+
+
+async def test_reload_cancelled_after_commit_keeps_new_bindings(rig: Rig) -> None:
+    await rig.daemon.start()
+    started = asyncio.Event()
+    start = rig.dns.start
+
+    async def slow_start(plan: PolicyPlan) -> None:
+        if plan.policy_id == 4:
+            started.set()
+            await asyncio.Event().wait()  # cancelled here, after the commit
+        await start(plan)
+
+    rig.dns.start = slow_start  # type: ignore[method-assign]
+    extra = {"name": "Extra", "targets": ["jp"], "apps": [{"name": "curl"}]}
+    rig.config = make_config(policies=[*rig.config.model_dump()["policies"], extra])
+    task = asyncio.ensure_future(rig.daemon.handle("reload", {}, ROOT))
+    await asyncio.wait_for(started.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert rig.daemon.config is rig.config and len(rig.backend.installed.policies) == 4
+    assert rig.apps.bound[4].name == "Extra" and 4 not in rig.apps.unbound
+    assert (4, "Extra") in rig.store.load().policy_slots
+    rig.dns.start = start  # type: ignore[method-assign]
+    await rig.daemon.stop()
+
+
+async def test_reload_cancelled_before_commit_restores_old_state(rig: Rig) -> None:
+    await rig.daemon.start()
+    committed, slots = rig.config, rig.store.load().policy_slots
+    entered = asyncio.Event()
+    bind = rig.apps.bind
+
+    async def slow_bind(policy_id: int, policy: Any, groups: Any) -> AppBinding:
+        if policy_id == 4:
+            entered.set()
+            await asyncio.Event().wait()
+        return await bind(policy_id, policy, groups)
+
+    rig.apps.bind = slow_bind  # type: ignore[method-assign]
+    extra = {"name": "Extra", "targets": ["jp"], "apps": [{"name": "curl"}]}
+    rig.config = make_config(policies=[*committed.model_dump()["policies"], extra])
+    task = asyncio.ensure_future(rig.daemon.handle("reload", {}, ROOT))
+    await asyncio.wait_for(entered.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    rig.apps.bind = bind  # type: ignore[method-assign]
+
+    assert rig.daemon.config is committed and len(rig.backend.installed.policies) == 3
+    assert rig.store.load().policy_slots == slots
+    await rig.daemon.stop()
