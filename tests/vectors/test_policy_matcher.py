@@ -316,3 +316,15 @@ def test_rules_check_reports_asn_cache_problems() -> None:
     res = commands.check_config(cfg, asn_prefixes=lambda n: [])
     assert res.code == 1 and "asn:2906 has no cached prefixes" in res.output
     assert commands.check_config(cfg, asn_prefixes=lambda n: ["198.38.96.0/19"]).code == 0
+
+
+def test_scoped_matcher_skips_policies_that_may_exclude_the_asking_app() -> None:
+    cfg = _config(
+        {"name": "all-but-chrome", "targets": ["jp"], "exclude_apps": [{"name": "chrome"}],
+         "domains": ["office.example"]},
+        {"name": "chrome", "targets": ["jp"], "on_down": "block", "apps": [{"name": "chrome"}],
+         "domains": ["office.example"]},
+    )  # fmt: skip
+    m = build_matcher(cfg)
+    assert m.scoped(2).match("office.example") == 2  # Chrome's lookup picks Chrome's policy
+    assert m.scoped(1).match("office.example") == 1

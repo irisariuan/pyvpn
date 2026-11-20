@@ -67,7 +67,8 @@ class PolicyRules:
     errors: tuple[LineError, ...] = ()  # index = position in the policy's domains
     # (position, rule) of rules that need RE2 to match in bounded time
     needs_re2: tuple[tuple[int, str], ...] = ()
-    # The policy has no app selectors, so its rules apply to every process.
+    # The policy has neither app selectors nor exclusions, so its rules apply
+    # to every process (a stub of any policy may pick it).
     any_process: bool = True
 
     @classmethod
@@ -154,7 +155,10 @@ class PolicyMatcher:
     def from_config(cls, config: Config, asn_prefixes: AsnResolver | None = None) -> PolicyMatcher:
         return cls(
             [
-                replace(PolicyRules.build(i, p.name, p.domains), any_process=not p.apps)
+                replace(
+                    PolicyRules.build(i, p.name, p.domains),
+                    any_process=not p.apps and not p.exclude_apps,
+                )
                 for i, p in enumerate(config.policies, start=1)
                 if p.domains
             ],
@@ -165,10 +169,13 @@ class PolicyMatcher:
         """The matcher for DNS asked through ``policy_id``'s stub.
 
         Only policies that apply to that stub's apps take part: the policy
-        itself and policies without app selectors. Otherwise an earlier app
-        policy with the same domain (Firefox's) would win a name asked by a
-        later one's apps (Chrome's), and the answer's addresses would never
-        reach the asking policy's set.
+        itself and policies without app selectors or exclusions. Otherwise an
+        earlier app policy with the same domain (Firefox's) would win a name
+        asked by a later one's apps (Chrome's), and the answer's addresses
+        would never reach the asking policy's set. A policy with
+        ``exclude_apps`` only takes part for its own stub: the matcher cannot
+        tell which app is asking, so it must not let a policy win a lookup
+        from an app it excludes.
         """
         return PolicyMatcher(
             [pr for pr in self.policies if pr.policy_id == policy_id or pr.any_process],
