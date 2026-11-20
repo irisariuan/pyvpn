@@ -28,6 +28,7 @@ from pyvpn.state import AppBinding
 log = logging.getLogger(__name__)
 
 ConfigLoader = Callable[[], Config]
+NOT_INSTALLED = "not_installed"  # PolicyStatus.route when no rules are installed
 AuditFn = Callable[[], Awaitable[Any]]
 
 
@@ -270,18 +271,21 @@ class Daemon:
             raise ApiError("forbidden", "only root may do this")
 
     def status(self) -> StatusResult:
+        """Report what is installed, not what is planned.
+
+        Until an apply succeeds (or while disabled) no rules exist, so every
+        policy reports ``not_installed`` rather than the route it would get.
+        """
         r = self.reconciler
         applied = {p.policy_id: p for p in r.applied.policies} if r.applied else {}
-        planned = r.plan()
-        planned_by_id = {p.policy_id: p for p in planned.policies} if planned else {}
         policies = []
         for pid, pol in enumerate(self.config.policies, start=1):
-            p = applied.get(pid) or planned_by_id.get(pid)
+            p = applied.get(pid)
             policies.append(
                 PolicyStatus(
                     id=pid,
                     name=pol.name,
-                    route=p.route if p else "unknown",
+                    route=p.route if p else NOT_INSTALLED,
                     target=p.target if p else None,
                     interface=p.interface if p else None,
                     on_down=pol.on_down,

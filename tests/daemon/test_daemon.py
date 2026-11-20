@@ -334,6 +334,23 @@ async def test_failed_initial_apply_keeps_placement_unavailable(rig: Rig) -> Non
     await rig.daemon.stop()
 
 
+async def test_status_reports_not_installed_until_an_apply_succeeds(rig: Rig) -> None:
+    rig.backend.fail_apply = 1
+    await rig.daemon.start()
+    status = rig.daemon.status()
+    assert status.last_error and "simulated" in status.last_error
+    assert [p.route for p in status.policies] == ["not_installed"] * 3
+    assert all(p.interface is None and p.target is None for p in status.policies)
+
+    await rig.daemon.reconciler.reconcile()  # what the retry timer does
+    routes = {p.name: p.route for p in rig.daemon.status().policies}
+    assert routes == {"Japan": "main", "Torrents": "unreachable", "Office": "main"}
+
+    await rig.daemon.handle("disable", {}, ROOT)
+    assert [p.route for p in rig.daemon.status().policies] == ["not_installed"] * 3
+    await rig.daemon.stop()
+
+
 async def test_reload_apply_failure_keeps_old_config_and_bindings(rig: Rig) -> None:
     await rig.daemon.start()
     installed = rig.backend.installed
