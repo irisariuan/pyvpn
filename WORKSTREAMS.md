@@ -171,18 +171,38 @@ These only depend on the daemon ↔ helper JSON protocol, which H defines.
 
 ## Assigning people
 
-Merge streams when the group is small. Suggested splits:
+### How demanding each stream is
+
+| Load | Streams | Why |
+|---|---|---|
+| **Hardest** | B daemon, C Linux routing & nft | B: concurrent events, fail-closed during flaps, owns integration. C: cgroup marks, ct marks, `ip rule`, masquerade, IPv6, competing VPN rules; leaks only show in root netns tests. |
+| **Hard** | F DNS & leaks, E apps | F: bound DoT/DoH upstreams, fill sets before replying, leaks are privacy bugs. E: cgroup v2, proc connector races (children fork before the move), systemd scopes. |
+| **Medium** | H proxy + other OS, D targets | H: WFP via ctypes, three OSes, needs a Mac/Windows machine. D: netlink events, gateway discovery, 100 ms target. |
+| **Lighter** | G rule engine, A config & CLI, I test bed & CI | G: large but fully specified by snake's vectors. A: pure Python. I: small; the netns fixture is the only tricky part. |
+
+Rules: put the strongest networking people on **B** and **C**, never give
+both to one person, and give nobody more than one hard stream on top of a
+hardest one.
+
+### Suggested splits
+
+Merge streams when the group is small:
 
 | Group size | Person 1 | Person 2 | Person 3 | Person 4 | Person 5 |
 |---|---|---|---|---|---|
-| **3** | B + I | C + D | A + E + F + G | | |
-| **4** | B + I | C + D | E + F | A + G | |
-| **5** | B + I | C | D + E | F + G | A + H |
-| **6+** | one stream each; the extra people take H, then the native helpers | | | | |
+| **3** | B + A + I | C + D | E + F | | |
+| **4** | B + I | C + D | E + F | A + G + H | |
+| **5** | B + I | C + D | E + F | A + G | H |
+| **6+** | one stream each; the extra people take the native helpers | | | | |
 
-Pairings are chosen so that each person's streams touch neighbouring code
-(C + D are both netlink/pyroute2; F + G are both about destinations; A + G
-are both mostly pure Python).
+**G is a floater** in the 3-person split: it depends on nothing, so whoever
+finishes their streams first takes it (or it is shared). H in the 3-person
+split starts after v0.1 Linux work is stable, or goes to whoever owns a Mac
+or Windows machine.
+
+Pairings keep each person's streams in neighbouring code (C + D are both
+netlink/pyroute2; E + F both act per app at runtime; A + G are both mostly
+pure Python; B + A + I all sit around the daemon API and tests).
 
 ---
 
