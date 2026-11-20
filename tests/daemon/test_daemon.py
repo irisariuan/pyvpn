@@ -854,3 +854,30 @@ async def test_close_cancels_a_stuck_request(tmp_path: Path) -> None:
     await asyncio.wait_for(started.wait(), 1)
     await asyncio.wait_for(server.close(), 1)
     writer.close()
+
+
+async def test_api_bounds_clients_and_idle_connections(tmp_path: Path) -> None:
+    from pyvpn.daemon.server import ApiServer
+
+    async def ok(method: str, params: dict[str, Any], peer: PeerCred | None) -> Any:
+        return None
+
+    path = tmp_path / "s.sock"
+    server = ApiServer(path, ok)
+    server.max_clients, server.idle_timeout = 2, 0.2
+    await server.start()
+    held = [await asyncio.open_unix_connection(str(path)) for _ in range(2)]
+    await asyncio.sleep(0.05)
+    reader, writer = await asyncio.open_unix_connection(str(path))
+    assert await asyncio.wait_for(reader.read(), 1) == b""  # third client refused
+    writer.close()
+    await asyncio.sleep(0.3)  # the idle ones are dropped
+    for r, w in held:
+        assert await asyncio.wait_for(r.read(), 1) == b""
+        w.close()
+    reader, writer = await asyncio.open_unix_connection(str(path))
+    writer.write(b'{"id": 1, "method": "status", "params": {}}\n')
+    await writer.drain()
+    assert json.loads(await asyncio.wait_for(reader.readline(), 1))["ok"] is True
+    writer.close()
+    await server.close()

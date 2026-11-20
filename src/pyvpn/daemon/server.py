@@ -99,6 +99,9 @@ class ApiServer:
         self._clients: dict[asyncio.Task[None], asyncio.StreamWriter] = {}
         self._closing = False
         self.drain_timeout = 5.0
+        # The socket is world-accessible: bound what one local user can hold.
+        self.max_clients = 64
+        self.idle_timeout = 30.0  # seconds a connection may wait between requests
 
     async def start(self, *, start_serving: bool = True) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -143,8 +146,8 @@ class ApiServer:
         self._inode = None
 
     def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        if self._closing:
-            writer.close()
+        if self._closing or len(self._clients) >= self.max_clients:
+            writer.close()  # over the limit: refuse rather than exhaust descriptors
             return
         task = asyncio.create_task(self._client(reader, writer))
         self._clients[task] = writer
@@ -164,7 +167,9 @@ class ApiServer:
         try:
             while not self._closing:
                 try:
-                    line = await reader.readline()
+                    line = await asyncio.wait_for(reader.readline(), self.idle_timeout)
+                except TimeoutError:
+                    break  # idle connection: free its descriptor and task
                 except (asyncio.LimitOverrunError, ValueError):
                     writer.write(
                         Response(None, False, error=Error("bad_request", "line too long")).encode()
