@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import pwd
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -22,13 +23,31 @@ class ProcessInfo:
     snap: str | None = None
 
 
+def _read_exe(link: Path) -> str | None:
+    """The process's executable path as the kernel reports it.
+
+    Read with ``readlink``, not resolved: the target lives in the process's
+    mount namespace (a Flatpak's ``/app/bin/...``) and may be gone after an
+    upgrade (``... (deleted)``), and neither must hide the process. Raises
+    ``FileNotFoundError`` for exited processes and kernel threads; returns
+    None when the link is not readable (e.g. permission).
+    """
+    try:
+        target = os.readlink(link)
+    except FileNotFoundError:
+        raise
+    except OSError:
+        return None
+    return target.removesuffix(" (deleted)")
+
+
 def read_process(pid: int, proc_root: str | Path = "/proc") -> ProcessInfo | None:
     """Read process metadata; return None when it exited or is inaccessible."""
     if pid <= 0:
         return None
     base = Path(proc_root) / str(pid)
     try:
-        exe = str((base / "exe").resolve(strict=True))
+        exe = _read_exe(base / "exe")
         name = (base / "comm").read_text(encoding="utf-8").strip()
         status = (base / "status").read_text(encoding="utf-8")
         cgroup = (base / "cgroup").read_text(encoding="utf-8")

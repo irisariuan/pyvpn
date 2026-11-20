@@ -57,3 +57,33 @@ def test_matches_selector_types() -> None:
         AppSelector(snap="foo"),
     ):
         assert matcher.matches(selector, process)
+
+
+def _fake_proc(root: Path, pid: int, exe: str | None) -> Path:
+    proc = root / str(pid)
+    proc.mkdir()
+    if exe is not None:
+        (proc / "exe").symlink_to(exe)  # dangling: target is not on this host
+    (proc / "comm").write_text("app\n")
+    (proc / "status").write_text("Uid:\t1000\t1000\t1000\t1000\n")
+    (proc / "cgroup").write_text("0::/user.slice/app-flatpak-org.example.App-1.scope\n")
+    return proc
+
+
+def test_exe_outside_the_daemons_mount_namespace_still_matches(tmp_path: Path) -> None:
+    _fake_proc(tmp_path, 7, "/app/bin/example-app")
+    info = read_process(7, tmp_path)
+    assert info is not None and info.exe == "/app/bin/example-app"
+    assert SelectorMatcher.matches(AppSelector(flatpak="org.example.App"), info)
+
+
+def test_deleted_exe_keeps_its_path(tmp_path: Path) -> None:
+    _fake_proc(tmp_path, 8, "/usr/bin/foo (deleted)")
+    info = read_process(8, tmp_path)
+    assert info is not None
+    assert SelectorMatcher.matches(AppSelector(exe="/usr/bin/foo"), info)
+
+
+def test_process_without_exe_is_skipped(tmp_path: Path) -> None:
+    _fake_proc(tmp_path, 9, None)  # exited, or a kernel thread
+    assert read_process(9, tmp_path) is None
