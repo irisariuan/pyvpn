@@ -97,7 +97,7 @@ class RoutingPlan:           # the whole desired state, applied atomically
 | `DnsService` | F | B | `async def start(plan)`, `async def stop(policy_id)`, `def on_answer(cb: Callable[[DestSet], Awaitable[None]])` |
 | `Backend` (platform) | C | B | `capabilities`, `async def apply(plan: RoutingPlan)`, `async def add_to_set(DestSet)`, `async def teardown()` |
 | `RuleMatcher` | G | F, B | `def match(domain: str) -> int | None` (policy id), `def static_sets() -> list[DestSet]` |
-| Daemon API | B | A, E (`pyvpn run`) | methods: `status`, `apps`, `reload`, `place_pid`, `disable`, `audit` |
+| Daemon API | B | A, E (`pyvpn run`) | methods: `status`, `apps`, `reload`, `place_pid`, `disable`, `enable`, `audit` |
 
 ---
 

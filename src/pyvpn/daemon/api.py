@@ -13,9 +13,9 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Final, Literal, TypeAlias
 
-Method: TypeAlias = Literal["status", "apps", "reload", "place_pid", "disable", "audit"]
+Method: TypeAlias = Literal["status", "apps", "reload", "place_pid", "disable", "enable", "audit"]
 METHODS: Final[frozenset[str]] = frozenset(
-    {"status", "apps", "reload", "place_pid", "disable", "audit"}
+    {"status", "apps", "reload", "place_pid", "disable", "enable", "audit"}
 )
 
 ErrorCode: TypeAlias = Literal[
