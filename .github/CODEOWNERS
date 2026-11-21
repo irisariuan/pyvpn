@@ -1,0 +1,45 @@
+# Stream A - Config & CLI
+/src/pyvpn/config/ @cpu-catten
+/src/pyvpn/cli/ @cpu-catten
+/src/pyvpn/daemon/client.py @cpu-catten
+
+# Stream B - Daemon core
+/src/pyvpn/daemon/ @irisariuan
+
+# Stream C - Linux routing & netfilter
+/src/pyvpn/netfilter/ @Daydreaming-Mr
+/src/pyvpn/routing/ @Daydreaming-Mr
+/src/pyvpn/platform/linux/backend.py @Daydreaming-Mr
+
+# Stream D - Targets
+/src/pyvpn/targets/ @JackyCheng0006
+/src/pyvpn/platform/linux/netlink.py @JackyCheng0006
+
+# Stream E - Apps
+/src/pyvpn/apps/ @JovoJ-c
+
+# Stream F - DNS & leak protection
+/src/pyvpn/dns/ @Daydreaming-Mr
+/src/pyvpn/audit/ @Daydreaming-Mr
+/src/pyvpn/platform/linux/dns.py @Daydreaming-Mr
+
+# Stream G - Rule engine
+/src/pyvpn/match/ @irisariuan
+/src/pyvpn/rulefile/ @irisariuan
+/tests/vectors/ @irisariuan
+
+# Stream I - Test bed, CI & release
+/tests/integration/ @cpu-catten
+/tests/conftest.py @cpu-catten
+/tests/ci/ @cpu-catten
+/pyproject.toml @cpu-catten
+/.github/ @cpu-catten
+
+# Shared Phase 0 contracts
+/src/pyvpn/constants.py @cpu-catten @irisariuan @Daydreaming-Mr @JackyCheng0006 @JovoJ-c
+/src/pyvpn/config/models.py @cpu-catten @irisariuan @Daydreaming-Mr @JackyCheng0006 @JovoJ-c
+/src/pyvpn/state.py @cpu-catten @irisariuan @Daydreaming-Mr @JackyCheng0006 @JovoJ-c
+/src/pyvpn/platform/base.py @cpu-catten @irisariuan @Daydreaming-Mr @JackyCheng0006 @JovoJ-c
+/src/pyvpn/daemon/api.py @cpu-catten @irisariuan @Daydreaming-Mr @JackyCheng0006 @JovoJ-c
+/src/pyvpn/services.py @cpu-catten @irisariuan @Daydreaming-Mr @JackyCheng0006 @JovoJ-c
+/tests/fakes/ @cpu-catten @irisariuan @Daydreaming-Mr @JackyCheng0006 @JovoJ-c
