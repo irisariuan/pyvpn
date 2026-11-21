@@ -28,9 +28,9 @@ route, or blocks (kill switch).
 * Python ≥ 3.11, `src/` layout, `pyproject.toml` with hatchling, one console
   script `pyvpn`. Pure-Python wheel.
 * Dependencies: `pyroute2` (netlink: routes, rules, link/address events,
-  sock_diag, process-event connector), `dnspython` (per-app DNS stubs,
-  DoT/DoH upstreams), `pydantic` v2 (config). Extra `snakevpn[ui]` →
-  `aiohttp` for a local web UI.
+  sock_diag, process-event connector), `dnspython` (DNS message parsing and
+  serialization), and `pydantic` v2 (config). The `snakevpn[doh]` extra
+  installs `aiohttp` for DNS over HTTPS.
 * Release: on a `v*` tag, GitHub Actions runs the tests, builds sdist and
   wheel, and publishes with **PyPI Trusted Publishing** (no stored token).
 
@@ -270,10 +270,36 @@ reservations before applying a routing plan or moving a process.
 A policy with only apps sends **all** of their traffic through the target. A
 policy with apps **and** destination rules sends only the matched
 destinations (snake's domain rules, `asn:`, `cidr:`) through it. A policy
-with destination rules and no apps applies those destinations to every
-process. Domain matches come from the per-policy DNS stub: the answered
-addresses go into nft sets *before* the reply is released, as snake's DNS
-inspector does.
+with destination rules and no app selectors or exclusions applies those
+destinations to every process. The per-policy DNS stub scopes the active
+rule matcher to its own policy and those global policies before matching the
+query name and its CNAME chain. A and AAAA answers, HTTPS/SVCB address hints,
+and additional addresses for referenced names go into the winning policy's
+nft sets *before* the reply is released. For HTTPS and SVCB, the stub follows
+alias records included in the response to collect the endpoint addresses and
+hints. Before releasing a cacheable alias, the stub records its name path,
+DNS class, listener policy ID, and expiry in the daemon's private
+`dns-aliases.sqlite3` state file. Tracking follows the records in the reply. This includes SRV, MX and NS
+targets (including nameservers in a referral), plus CNAMEs returned for other query types or alongside NXDOMAIN.
+The stub narrows DNAME redirects to the verified, host-specific synthesized
+CNAME before replying, so sibling names must go through policy matching.
+It returns SERVFAIL when the subtree record itself or DNSSEC proof is
+requested, or when the redirect has no verifiable CNAME in the answer chain.
+Bundled endpoint addresses and separate A/AAAA lookups use the same policy.
+Follow-up queries, including those received after a restart, match the
+remembered prefix and the new answer together against the active rules.
+For a shared endpoint, a single matching policy governs the address even
+when other cached paths have no match. A direct match also participates. Each hop bounds the
+path's TTL. Alias deadlines use the system monotonic clock across daemon restarts.
+If uptime resets below the last saved clock reading, the stub preserves the TTL
+remaining at that reading. After the durable write, the stub caps each returned alias link's
+TTL at the whole seconds still covered and withholds an expired link.
+If indistinguishable live paths select
+different policies, or publication or alias storage fails, the stub returns
+SERVFAIL. A shared lock serializes publication and alias storage across stubs,
+so a slow update can consume another query’s five-second timeout.
+The daemon composition root supplies the active rule
+matcher to all stubs, including app-only stubs.
 
 Rule semantics (`match/policy.py`): policies are tried in config order and
 the first whose rules route a name wins; `!rule` exempts a name from that
@@ -299,15 +325,27 @@ snake. snake's Domain VPN Routing importer is not ported (router-only).
 
 * Each policy gets its own stub (`127.0.0.1:53<id>`). nft redirects port 53
   **from that policy's apps** to it, which also catches hard-coded `8.8.8.8`.
-  The stub forwards through the policy's interface (bound socket; plain, DoT
-  or DoH; SERVFAIL rather than falling back to another path).
+  The stub listens on UDP and TCP. The composition root supplies the Linux
+  socket factory, which binds upstream sockets to the target interface and
+  sets the policy's mark before connecting so the policy's route and gateway
+  apply. With no `dns_server`, the stub uses Quad9 at
+  `9.9.9.9` on that interface. Set a numeric address to override it.
+  DoT and DoH accept `hostname@address` to verify the TLS certificate
+  without consulting the system resolver. Encrypted requests to the
+  default upstream verify `dns.quad9.net`. DoH sends POST requests to
+  `/dns-query`, requests uncompressed responses, and reuses HTTPS
+  connections per policy. The stub returns
+  SERVFAIL if the target or DNS upstream is unavailable, including during
+  routing fallback to the host default route. The daemon's bound upstream sockets
+  must be exempt from port-53 redirection so queries cannot loop into a stub.
 * Reload stops the existing policy DNS listeners before applying the new
   routes. The daemon activates the new matcher before reopening listeners,
   so an answer cannot use the previous config's matching rules.
 * Other apps keep the system resolver. **pyvpn does not take over system
   DNS.**
 * Per-policy leak toggles (snake's): block DoT 853, block known DoH
-  addresses, DoH canary NXDOMAIN, block QUIC, IPv6 `route`/`block`/`off`.
+  addresses, block QUIC, IPv6 `route`/`block`/`off`. A stub with
+  `block_doh` answers Firefox's `use-application-dns.net` canary with NXDOMAIN.
 * `pyvpn audit` lists, per policy, what is and is not protected.
 
 ### 3.6 Strict isolation (optional)
@@ -423,6 +461,11 @@ policy as `not_installed`.
   (the fixture creates it, pyvpn does not). Tests launch processes through
   `pyvpn run`, delete and re-create interfaces, and assert by capture which
   interface the traffic and DNS left through.
+* **Standalone DNS integration (root on Linux):**
+  `sudo .venv/bin/python -m pytest -m integration tests/dns/test_namespace.py`
+  exercises the stubs with two DNS peers in disposable namespaces. It checks
+  target-only queries and SERVFAIL after target deletion, using fake rule
+  matching and destination-set updates.
 
 ## 9. Risks
 
