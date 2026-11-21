@@ -157,7 +157,7 @@ class DaemonClient:
     def place_pid(self, pid: int, policy: str | int) -> Any:
         if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
             raise ValueError("pid must be a positive integer")
-        if isinstance(policy, bool):
+        if isinstance(policy, bool) or not isinstance(policy, (str, int)):
             raise ValueError("policy must be a non-empty name or policy id")
         if isinstance(policy, int):
             if not 1 <= policy <= 99:

@@ -177,7 +177,10 @@ def test_place_pid_rejects_invalid_pid(pid: int) -> None:
         DaemonClient().place_pid(pid, "Japan")
 
 
-@pytest.mark.parametrize("policy", ["", "   ", True])
-def test_place_pid_rejects_invalid_policy(policy: str | bool) -> None:
+@pytest.mark.parametrize(
+    "policy",
+    ["", "   ", True, 1.5, [], {}, None],
+)
+def test_place_pid_rejects_invalid_policy(policy: object) -> None:
     with pytest.raises(ValueError, match="policy"):
         DaemonClient().place_pid(123, policy)
