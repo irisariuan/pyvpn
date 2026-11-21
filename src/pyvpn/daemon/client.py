@@ -5,10 +5,55 @@ from __future__ import annotations
 import json
 import socket
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pyvpn.constants import SOCKET_PATH
-from pyvpn.daemon.api import MAX_LINE, Error, Request, Response
+from pyvpn.daemon.api import MAX_LINE, Error, ErrorCode, Request, Response
+
+ERROR_CODES = frozenset(
+    {"bad_request", "unknown_method", "not_found", "forbidden", "unavailable", "internal"}
+)
+
+
+def _decode_response_boundary(line: bytes) -> Response:
+    """validate the daemon response envelope before using shared dataclasses."""
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"invalid JSON constant: {value}")
+
+    decoded = json.loads(line, parse_constant=reject_constant)
+    if not isinstance(decoded, dict):
+        raise ValueError("daemon response must be a JSON object")
+    if set(decoded) - {"id", "ok", "result", "error"}:
+        raise ValueError("daemon response contains unknown fields")
+    if "id" not in decoded or type(decoded["id"]) is not int:
+        raise ValueError("daemon response id must be an integer")
+    if "ok" not in decoded or type(decoded["ok"]) is not bool:
+        raise ValueError("daemon response ok must be a boolean")
+
+    response_id = decoded["id"]
+    ok = decoded["ok"]
+    if ok:
+        if "error" in decoded or "result" not in decoded:
+            raise ValueError("successful daemon response requires result and no error")
+        return Response(id=response_id, ok=True, result=decoded["result"])
+
+    if "result" in decoded or "error" not in decoded:
+        raise ValueError("error daemon response requires error and no result")
+    error = decoded["error"]
+    if not isinstance(error, dict) or set(error) != {"code", "message"}:
+        raise ValueError("daemon error must contain code and message")
+    code = error["code"]
+    message = error["message"]
+    if code not in ERROR_CODES:
+        raise ValueError("daemon error code is invalid")
+    if not isinstance(message, str):
+        raise ValueError("daemon error message must be a string")
+    return Response(
+        id=response_id,
+        ok=False,
+        error=Error(cast(ErrorCode, code), message),
+    )
 
 
 class DaemonClientError(RuntimeError):
@@ -68,7 +113,7 @@ class DaemonClient:
             raise DaemonProtocolError("daemon returned a response without a newline")
 
         try:
-            response = Response.decode(line)
+            response = _decode_response_boundary(line)
         except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise DaemonProtocolError("daemon returned an invalid response") from exc
 
