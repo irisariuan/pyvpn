@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from ipaddress import IPv4Network
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,7 @@ from pyvpn.config.models import Config
 from pyvpn.daemon.core import Daemon
 from pyvpn.daemon.persistence import PersistentState, StateError, StateStore
 from pyvpn.daemon.server import ApiError, PeerCred
-from pyvpn.state import AppBinding, PolicyPlan, RoutingPlan
+from pyvpn.state import AppBinding, DestSet, PolicyPlan, RoutingPlan
 from tests.daemon.conftest import make_config
 from tests.fakes import (
     FakeAppManager,
@@ -934,4 +935,41 @@ async def test_reload_cancelled_before_commit_restores_old_state(rig: Rig) -> No
 
     assert rig.daemon.config is committed and len(rig.backend.installed.policies) == 3
     assert rig.store.load().policy_slots == slots
+    await rig.daemon.stop()
+
+
+async def test_restart_keeps_governing_learned_destinations(tmp_path: Path) -> None:
+    config = make_config()
+    office = config.policies[2].model_copy(update={"on_down": "block"})
+    rig = Rig(tmp_path, config.model_copy(update={"policies": (*config.policies[:2], office)}))
+    net = IPv4Network("203.0.113.7/32")
+    await rig.daemon.start()  # targets down: Office is installed as unreachable
+    await rig.daemon.reconciler.add_dests(DestSet(3, frozenset({net})))
+    assert rig.store.load().learned == (("Office", ("corp.example",), (str(net),)),)
+    await rig.daemon.stop()
+
+    rig.daemon = rig.new_daemon()  # same state store and backend, target still down
+    await rig.daemon.start()
+    office_plan = rig.backend.last.policies[2]
+    assert office_plan.route == "unreachable"
+    assert office_plan.dests is not None and net in office_plan.dests.v4
+    await rig.daemon.stop()
+
+
+async def test_placement_refuses_a_caller_that_exits_while_waiting(rig: Rig) -> None:
+    await rig.daemon.start()
+    r, w = os.pipe()
+    peer = PeerCred(pid=4242, uid=1000, gid=1000, pidfd=r)
+    try:
+        async with rig.daemon._config_lock:  # e.g. a reload in progress
+            task = asyncio.ensure_future(
+                rig.daemon.handle("place_pid", {"pid": 4242, "policy": "Torrents"}, peer)
+            )
+            await asyncio.sleep(0)
+            os.close(w)  # the caller exits while waiting for the lock
+        with pytest.raises(ApiError, match="still exists"):
+            await task
+    finally:
+        os.close(r)
+    assert rig.apps.placed == []
     await rig.daemon.stop()

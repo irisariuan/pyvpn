@@ -24,8 +24,9 @@ import asyncio
 import contextlib
 import itertools
 import logging
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import replace
+from ipaddress import IPv4Network, IPv6Network, ip_network
 
 from pyvpn.config.models import Config
 from pyvpn.daemon.planner import build_plan
@@ -62,6 +63,20 @@ def _carry_learned_dests(
         dests = learned.get(prev[0])
         if dests:
             out[new_id] = replace(dests, policy_id=new_id)
+    return out
+
+
+def _carry_restored(
+    restored: Mapping[str, tuple[tuple[str, ...], DestSet]], new: Config
+) -> dict[int, DestSet]:
+    """``_carry_learned_dests`` for sets saved by a previous daemon."""
+    out: dict[int, DestSet] = {}
+    for new_id, policy in enumerate(new.policies, start=1):
+        prev = restored.get(policy.name)
+        if prev is None or not policy.domains or not _only_adds_rules(prev[0], policy.domains):
+            continue
+        if prev[1]:
+            out[new_id] = replace(prev[1], policy_id=new_id)
     return out
 
 
@@ -112,6 +127,12 @@ class Reconciler:
         # Stubs whose stop failed: they may still be listening, so keep
         # retrying the stop until it succeeds.
         self._dns_stop_pending: set[int] = set()
+        # Called (under the lock) whenever DNS-learned destinations change,
+        # so the daemon can persist them for its successor.
+        self.on_learned: Callable[[], None] | None = None
+        # Learned sets saved by a previous daemon, by policy name; used once,
+        # by the first config swap, before the first apply.
+        self._restored: dict[str, tuple[tuple[str, ...], DestSet]] = {}
         self._apply_error: str | None = None
         self._dns_error: str | None = None
         self._retry_wanted = False
@@ -151,6 +172,7 @@ class Reconciler:
             self._swap_config(config, static_sets, {})
             self.matcher = matcher
             self._committed = self._generation
+            self._notify_learned()
         await self.reconcile()
 
     async def commit_config(
@@ -186,8 +208,50 @@ class Reconciler:
                 raise
             self.matcher = matcher
             self._committed = self._generation
+            self._notify_learned()
             if plan is not None:
                 await self._sync_dns_locked(plan)
+
+    def restore_learned(
+        self, entries: Iterable[tuple[str, tuple[str, ...], tuple[str, ...]]]
+    ) -> None:
+        """Seed destinations a previous daemon learned (``learned_entries``).
+
+        Must run before the first config: that swap carries them over (same
+        rules as a reload), so the first apply does not empty sets that
+        surviving apps still rely on.
+        """
+        restored: dict[str, tuple[tuple[str, ...], DestSet]] = {}
+        for name, domains, nets in entries:
+            v4: set[IPv4Network] = set()
+            v6: set[IPv6Network] = set()
+            for n in nets:
+                net = ip_network(n, strict=False)
+                if isinstance(net, IPv4Network):
+                    v4.add(net)
+                else:
+                    v6.add(net)
+            restored[name] = (domains, DestSet(0, frozenset(v4), frozenset(v6)))
+        self._restored = restored
+
+    def learned_entries(self) -> tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...]:
+        """The committed config's learned destinations, by policy name."""
+        if self.config is None:
+            return ()
+        out = []
+        for pid, policy in enumerate(self.config.policies, start=1):
+            d = self.dynamic_dests.get(pid)
+            if d:
+                nets = tuple(sorted(str(n) for n in (*d.v4, *d.v6)))
+                out.append((policy.name, policy.domains, nets))
+        return tuple(out)
+
+    def _notify_learned(self) -> None:
+        if self.on_learned is not None:
+            try:
+                self.on_learned()
+            except Exception:
+                log.exception("could not save learned destinations")
 
     def _swap_config(
         self,
@@ -195,7 +259,11 @@ class Reconciler:
         static_sets: Iterable[DestSet],
         bindings: Mapping[int, AppBinding],
     ) -> None:
-        self.dynamic_dests = _carry_learned_dests(self.config, config, self.dynamic_dests)
+        if self.config is None and self._restored:
+            self.dynamic_dests = _carry_restored(self._restored, config)
+        else:
+            self.dynamic_dests = _carry_learned_dests(self.config, config, self.dynamic_dests)
+        self._restored = {}
         self.config = config
         self.bindings = dict(bindings)
         self.static_dests = {}
@@ -267,6 +335,8 @@ class Reconciler:
                 self.dynamic_dests[dests.policy_id] = dests if prev is None else prev | dests
                 plans[i] = replace(p, dests=p.dests | dests)
                 self.applied = RoutingPlan(tuple(plans))
+                if self.dynamic_dests[dests.policy_id] != prev:
+                    self._notify_learned()
                 return
             raise DnsNotGoverned(f"policy {dests.policy_id} is not installed")
 

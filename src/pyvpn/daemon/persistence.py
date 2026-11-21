@@ -16,6 +16,9 @@ class PersistentState:
     # apps. Rules and cgroups outlive the daemon, so a restarted daemon must
     # not let a reordered config give those apps a different policy.
     policy_slots: tuple[tuple[int, str], ...] = ()
+    # (policy name, its domains, learned networks): DNS-learned destinations,
+    # so a restarted daemon keeps governing addresses apps have cached.
+    learned: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = ()
 
 
 class StateError(RuntimeError):
@@ -43,6 +46,25 @@ def _slots(raw: object) -> tuple[tuple[int, str], ...]:
     return tuple(out)
 
 
+def _strings(raw: object, what: str) -> tuple[str, ...]:
+    if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+        raise StateError(f"bad {what} {raw!r}")
+    return tuple(raw)
+
+
+def _learned(raw: object) -> tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise StateError("learned is not a list")
+    out = []
+    for item in raw:
+        if not (isinstance(item, list) and len(item) == 3 and isinstance(item[0], str)):
+            raise StateError(f"bad learned entry {item!r}")
+        out.append((item[0], _strings(item[1], "domains"), _strings(item[2], "networks")))
+    return tuple(out)
+
+
 class StateStore:
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self.path = Path(path)
@@ -64,9 +86,12 @@ class StateStore:
             raise StateError(f"daemon state {self.path} is malformed")
         try:
             slots = _slots(data.get("policy_slots"))
+            learned = _learned(data.get("learned"))
         except StateError as e:
             raise StateError(f"daemon state {self.path}: {e}") from None
-        return PersistentState(enabled=data.get("enabled", True), policy_slots=slots)
+        return PersistentState(
+            enabled=data.get("enabled", True), policy_slots=slots, learned=learned
+        )
 
     def save(self, state: PersistentState) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -245,6 +245,9 @@ that has used an app cgroup at the same position in the config (the
 reserved positions are saved in the daemon's state file, since rules and
 cgroups outlive the daemon). A state file that exists but cannot be read
 stops the daemon from starting rather than losing those reservations.
+DNS-learned destinations are saved there too and restored before the
+first apply, so a restart keeps governing addresses that apps have cached
+(for policies whose name and domain rules are unchanged or only extended).
 The daemon also refuses configs it cannot enforce: destination rules
 without a rule matcher, `dns_via_target` without a DNS service, hostname
 rules without `dns_via_target` (only the policy's DNS stub can learn their

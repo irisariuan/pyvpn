@@ -65,6 +65,7 @@ class Daemon:
         self._store = store
         self._teardown_on_stop = teardown_on_stop
         self.reconciler = Reconciler(backend, dns)
+        self.reconciler.on_learned = self._save_learned
         self.server = ApiServer(socket_path, self.handle)
         self._tasks: list[asyncio.Task[None]] = []
         self._stopped = asyncio.Event()
@@ -113,6 +114,9 @@ class Daemon:
                     self.reconciler.enabled = state.enabled
                     # Apps placed by a previous daemon are still in their cgroups.
                     self._cgroup_policy_names.update(state.policy_slots)
+                    # Addresses apps may still have cached: govern them from
+                    # the first apply on instead of emptying their sets.
+                    self.reconciler.restore_learned(state.learned)
                 self._validate_policy_slots(config)
                 if self._dns is not None:
                     self._dns.on_answer(self.reconciler.add_dests)
@@ -396,6 +400,9 @@ class Daemon:
             if not peer.same_process_alive():
                 raise ApiError("forbidden", "cannot verify that the calling process still exists")
         async with self._config_lock:
+            if peer.uid != 0 and not peer.same_process_alive():
+                # The caller may have exited while waiting for the lock.
+                raise ApiError("forbidden", "cannot verify that the calling process still exists")
             r = self.reconciler
             if not r.enabled:
                 raise ApiError("unavailable", "routing is disabled")
@@ -464,9 +471,14 @@ class Daemon:
                 PersistentState(
                     enabled=enabled,
                     policy_slots=tuple(sorted(slots.items())),
+                    learned=self.reconciler.learned_entries(),
                 )
             )
         self._cgroup_policy_names = slots
+
+    def _save_learned(self) -> None:
+        if self._store is not None and self.reconciler.config is not None:
+            self._save_state(enabled=self.reconciler.enabled, slots=self._cgroup_policy_names)
 
 
 def _is_address_rule(rule: str) -> bool:
