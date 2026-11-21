@@ -99,7 +99,9 @@ class LeakSettings(_Model):
     def _dns_server(self) -> LeakSettings:
         if self.dns_server is None:
             return self
-        value = self.dns_server.strip()
+        value = self.dns_server
+        if value != value.strip():
+            raise ValueError("dns_server must not contain surrounding whitespace")
         if not value:
             raise ValueError("dns_server must not be empty")
         name = None

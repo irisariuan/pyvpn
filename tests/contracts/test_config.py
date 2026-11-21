@@ -237,6 +237,23 @@ def test_dns_server_accepts_remote_unicast_or_tls_address(dns_server: str) -> No
     assert config.policies[0].leak.dns_server == dns_server
 
 
+def test_dns_server_rejects_surrounding_whitespace() -> None:
+    with pytest.raises(ValidationError, match="surrounding whitespace"):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [
+                    {
+                        "name": "p",
+                        "targets": ["vpn"],
+                        "apps": [{"name": "ssh"}],
+                        "leak": {"dns_server": " 9.9.9.9 "},
+                    }
+                ],
+            }
+        )
+
+
 @pytest.mark.parametrize("uid", [True, False])
 def test_uid_rejects_boolean(uid: bool) -> None:
     with pytest.raises(ValidationError):
