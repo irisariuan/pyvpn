@@ -5,8 +5,18 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from pyvpn import __version__
+from pyvpn.cli.install import (
+    InstallError,
+    InstallFile,
+    desktop_file_path,
+    render_desktop_file,
+    render_systemd_unit,
+    systemd_unit_path,
+    write_install_file,
+)
 from pyvpn.cli.output import (
     format_apps,
     format_audit,
@@ -50,6 +60,20 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("reload", help="reload the daemon configuration")
     commands.add_parser("disable", help="remove pyvpn routing and rules")
     commands.add_parser("audit", help="describe routing and leak protection")
+
+    install = commands.add_parser("install", help="render or write systemd installation files")
+    install.add_argument("--scope", choices=("system", "user"), default="system")
+    install.add_argument("--exec-start", default="/usr/bin/pyvpn-daemon")
+    install.add_argument("--root", default=None, help="redirect absolute destinations for testing")
+    install.add_argument("--write", action="store_true", help="write the generated unit file")
+
+    desktop = commands.add_parser("desktop", help="render or write a desktop policy launcher")
+    desktop.add_argument("--policy", required=True, help="policy name")
+    desktop.add_argument("--scope", choices=("system", "user"), default="system")
+    desktop.add_argument("--executable", default="/usr/bin/pyvpn")
+    desktop.add_argument("--root", default=None, help="redirect absolute destinations for testing")
+    desktop.add_argument("--write", action="store_true", help="write the generated desktop file")
+    desktop.add_argument("--output", default=None, help="write to an explicit path")
     return parser
 
 
@@ -144,6 +168,61 @@ def _run_audit(client: DaemonClient, as_json: bool) -> int:
     return 0
 
 
+def _redirect_path(path: Path, root: str | None) -> Path:
+    """redirect an absolute install path below a test root."""
+    if root is None:
+        return path
+    return Path(root) / str(path).lstrip("/")
+
+
+def _run_install(args: argparse.Namespace, as_json: bool) -> int:
+    unit = render_systemd_unit(args.exec_start)
+    path = _redirect_path(systemd_unit_path(args.scope), args.root)
+    if args.write:
+        write_install_file(InstallFile(path, unit))
+
+    result = {
+        "written": bool(args.write),
+        "path": str(path),
+        "content": unit,
+    }
+    if as_json:
+        print_json(result)
+    else:
+        print(f"systemd unit: {path}")
+        if args.write:
+            print("written")
+        else:
+            sys.stdout.write(unit)
+    return 0
+
+
+def _run_desktop(args: argparse.Namespace, as_json: bool) -> int:
+    content = render_desktop_file(args.policy, args.executable)
+    path = (
+        Path(args.output)
+        if args.output is not None
+        else _redirect_path(desktop_file_path(args.policy, args.scope), args.root)
+    )
+    if args.write:
+        write_install_file(InstallFile(path, content))
+
+    result = {
+        "written": bool(args.write),
+        "path": str(path),
+        "content": content,
+    }
+    if as_json:
+        print_json(result)
+    else:
+        print(f"desktop entry: {path}")
+        if args.write:
+            print("written")
+        else:
+            sys.stdout.write(content)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -167,7 +246,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             socket_path = args.socket if args.socket is not None else None
             client = DaemonClient(socket_path) if socket_path is not None else DaemonClient()
             return _run_audit(client, args.json)
-    except (ConfigError, DaemonClientError) as exc:
+        if args.command == "install":
+            return _run_install(args, args.json)
+        if args.command == "desktop":
+            return _run_desktop(args, args.json)
+    except (ConfigError, DaemonClientError, InstallError) as exc:
         print(f"pyvpn: {exc}", file=sys.stderr)
         return 1
     raise AssertionError("unhandled CLI command")
