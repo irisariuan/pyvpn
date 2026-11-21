@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import stat
+import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -111,6 +114,29 @@ def write_install_file(file: InstallFile) -> None:
     """create a parent directory and write one install file."""
     try:
         file.path.parent.mkdir(parents=True, exist_ok=True)
-        file.path.write_text(file.content, encoding="utf-8")
+        if file.path.is_symlink():
+            raise InstallError(f"install destination is a symlink: {file.path}")
+        try:
+            mode = file.path.stat(follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            mode = None
+        if mode is not None and not stat.S_ISREG(mode):
+            raise InstallError(f"install destination is not a regular file: {file.path}")
+
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{file.path.name}.",
+            dir=file.path.parent,
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(file.content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temporary, 0o644)
+            os.replace(temporary, file.path)
+        except BaseException:
+            with suppress(FileNotFoundError):
+                os.unlink(temporary)
+            raise
     except OSError as exc:
         raise InstallError(f"cannot write install file {file.path}: {exc}") from exc

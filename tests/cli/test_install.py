@@ -78,6 +78,17 @@ def test_write_install_file(tmp_path: Path) -> None:
     assert path.read_text(encoding="utf-8") == "[Unit]\n"
 
 
+def test_write_install_file_rejects_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "pyvpn.service"
+    other = tmp_path / "other"
+    other.write_text("keep", encoding="utf-8")
+    target.symlink_to(other)
+
+    with pytest.raises(InstallError, match="symlink"):
+        write_install_file(InstallFile(target, "[Unit]\n"))
+    assert other.read_text(encoding="utf-8") == "keep"
+
+
 def test_install_dry_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["install", "--scope", "system", "--root", str(tmp_path)]) == 0
     output = capsys.readouterr().out
