@@ -17,11 +17,17 @@ def migrate_config(document: object) -> dict[str, Any]:
         raise ConfigValidationError("configuration must be a JSON object")
 
     migrated = deepcopy(document)
-    version = migrated.get("version")
-
-    # legacy documents omitted version; version 1 is their only supported meaning.
-    if version is None:
+    if "version" not in migrated:
         migrated["version"] = CURRENT_CONFIG_VERSION
+        version = CURRENT_CONFIG_VERSION
+    else:
+        version = migrated["version"]
+
+    if version is None:
+        raise ConfigValidationError(
+            "invalid configuration version: null is not allowed",
+            ("version must be the integer 1, not null",),
+        )
 
     if isinstance(migrated["version"], bool) or not isinstance(migrated["version"], int):
         raise ConfigValidationError(

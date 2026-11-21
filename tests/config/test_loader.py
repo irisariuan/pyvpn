@@ -63,6 +63,11 @@ def test_load_config_rejects_nonfinite_json_constant(constant: str) -> None:
         load_config_text(f'{{"settings":{{"probe_interval":{constant}}}}}')
 
 
+def test_load_config_rejects_explicit_null_version() -> None:
+    with pytest.raises(ConfigValidationError, match="null is not allowed"):
+        load_config_text('{"version":null,"targets":[]}')
+
+
 @pytest.mark.parametrize(
     "text",
     [
