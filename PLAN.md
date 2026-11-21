@@ -186,8 +186,9 @@ process ── in cgroup pyvpn.slice/p-<id>, or matched by uid / unit cgroup
                     leak rejects for P: DoT, DoH IPs, QUIC, IPv6 (per policy)
               ──► ip rule pref 5200+id  fwmark P → table 1000+id
                     table 1000+id: default dev <iface> [via <gw>]   (active interface)
-                                 | unreachable                       (kill switch)
-                                 | (empty → main table)              (fall back to default route)
+                                   + higher-metric unreachable default (link-loss guard)
+                                 | unreachable default               (kill switch)
+                                 | no policy lookup for that mark    (fall back to host routing)
               ──► nft postrouting: masquerade marked traffic to the interface's address
                     (the source address was chosen for the default route before re-routing)
 ```
@@ -202,6 +203,10 @@ A *target* is just an interface name, plus an optional gateway:
   learns it from that interface's own default route or DHCP lease (main
   table, or the route NetworkManager installs with a metric), or uses the
   configured `gateway`.
+* `gateway: "auto"` requires a discovered next hop for the target to be usable;
+  when absent, pyvpn can fall back to another target. A target reports one next
+  hop (IPv4 preferred); separate IPv4 and IPv6 gateways need a contract change.
+  With no configured gateway, point-to-point targets use device-only routes.
 * **Patterns** (`tun*`, `wg-jp*`): for VPN apps whose interface name changes
   on every reconnect.
 
@@ -269,6 +274,26 @@ with destination rules and no apps applies those destinations to every
 process. Domain matches come from the per-policy DNS stub: the answered
 addresses go into nft sets *before* the reply is released, as snake's DNS
 inspector does.
+
+Rule semantics (`match/policy.py`): policies are tried in config order and
+the first whose rules route a name wins; `!rule` exempts a name from that
+policy only. `drop:` rules parse but are not enforced yet (that needs a
+drop set in the backend contract), so the daemon refuses to load a config
+that has them. It also refuses snake's per-device rules (they would hide
+plain rules in the same policy), rules that do not parse and `asn:` entries
+with no cached prefixes; `pyvpn rules check` reports all of these as
+errors, and `pyvpn rules test` names a policy whose per-device rule hid a
+name. Rule regexes and wildcards use RE2 syntax (constructs RE2 lacks or
+reads differently, such as `\Z`, `(?x)` or `a{,3}`, are rejected with either
+engine) and are matched in linear time by the optional `google-re2` package
+(`snakevpn[re2]`). It stays optional, but without it the daemon refuses to
+activate regex rules and wildcards with more than one `**` or more than one
+`*` in a label, since Python's backtracking `re` could stall the DNS path on
+a crafted name; simple wildcards (`*.example.com`, `**.cdn-*.example.net`)
+still work. `pyvpn rules check` parses such rules and warns. snake's
+per-device rules (`session:`, `route:`, `drop[...]:`, `if:` branches) parse
+but route nothing; only the names in an `if:` condition are routed, as in
+snake. snake's Domain VPN Routing importer is not ported (router-only).
 
 ### 3.5 Per-app DNS and leaks
 
@@ -410,9 +435,11 @@ policy as `not_installed`.
   `ip rule` that sends everything into the tunnel) can override us. Use our
   own table, rule priorities below theirs where possible, and document the
   ranges. `pyvpn audit` detects competing rules.
-* **Interface flaps**: a short window between the interface vanishing and the
-  table update. With `on_down: block` the table holds `unreachable` while
-  no target is usable, so the gap fails closed.
+* **Interface flaps**: the device route can disappear before the daemon sees
+  the link event. Keep a higher-metric, device-independent `unreachable`
+  default in each active policy table so the kernel stops there even if the
+  device route vanishes. A policy with `on_down: default` returns to the host's
+  normal routing only after reconciliation explicitly selects that fallback.
 * **Root daemon**: keep it small; everything else runs unprivileged.
 
 ## 10. Open questions

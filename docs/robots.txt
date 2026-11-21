@@ -1,0 +1,5 @@
+# All crawlers and AI agents may read every page.
+User-agent: *
+Allow: /
+
+Sitemap: https://irisariuan.github.io/pyvpn/sitemap.xml
