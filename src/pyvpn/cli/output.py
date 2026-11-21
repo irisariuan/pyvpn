@@ -54,8 +54,19 @@ def format_apps(value: Any) -> str:
         if not isinstance(entry, dict):
             continue
         name = entry.get("policy", "<unnamed>")
-        cgroups = ", ".join(entry.get("cgroup_paths", [])) or "-"
-        uids = ", ".join(str(uid) for uid in entry.get("uids", [])) or "-"
+        cgroups_value = entry.get("cgroup_paths", [])
+        if not isinstance(cgroups_value, list) or not all(
+            isinstance(cgroup, str) for cgroup in cgroups_value
+        ):
+            cgroups = "malformed"
+        else:
+            cgroups = ", ".join(cgroups_value) or "-"
+
+        uids_value = entry.get("uids", [])
+        if not isinstance(uids_value, list) or not all(type(uid) is int for uid in uids_value):
+            uids = "malformed"
+        else:
+            uids = ", ".join(str(uid) for uid in uids_value) or "-"
         lines.append(f"{name}: cgroups={cgroups}; uids={uids}")
     return "\n".join(lines)
 

@@ -126,6 +126,21 @@ def test_apps_human_output_empty(tmp_path: Path, capsys: pytest.CaptureFixture[s
     assert "no active app bindings" in capsys.readouterr().out
 
 
+def test_apps_human_output_marks_malformed_fields() -> None:
+    from pyvpn.cli.output import format_apps
+
+    output = format_apps(
+        [
+            {
+                "policy": "Japan",
+                "cgroup_paths": ["pyvpn.slice/p-1", None],
+                "uids": [1000, "2000"],
+            }
+        ]
+    )
+    assert "Japan: cgroups=malformed; uids=malformed" in output
+
+
 def test_policy_json_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     path = tmp_path / "config.json"
     path.write_text(VALID_CONFIG, encoding="utf-8")
