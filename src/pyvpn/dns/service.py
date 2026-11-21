@@ -6,6 +6,7 @@ import asyncio
 import logging
 import secrets
 import struct
+import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -13,7 +14,6 @@ from copy import copy
 from dataclasses import dataclass, field
 from ipaddress import IPv4Network, IPv6Network
 from pathlib import Path
-from time import time
 from typing import Protocol, cast, runtime_checkable
 
 import dns.exception
@@ -76,7 +76,9 @@ class PolicyDnsService:
         self._lock = asyncio.Lock()
         self._callback: DestCallback | None = None
         self._matcher_factory = matcher_factory
-        self._aliases = AliasStore(alias_path if alias_path is not None else _ALIAS_PATH)
+        self._aliases = AliasStore(
+            alias_path if alias_path is not None else _ALIAS_PATH, time.monotonic
+        )
         self._publication_lock = asyncio.Lock()
 
     def on_answer(self, cb: DestCallback) -> None:
@@ -189,7 +191,7 @@ class PolicyDnsService:
         if not paths.aliases:
             return
         rows: AliasRows = {}
-        now = time()
+        now = time.monotonic()
         for path, ttl in paths.aliases.items():
             if inherited and _match_chain(matcher, path) is not None:
                 # A standalone protected lookup can itself return another alias.
@@ -201,10 +203,12 @@ class PolicyDnsService:
                 rows[path[-1], combined[:-1]] = min(now + ttl, parent_expires)
                 if len(rows) > _MAX_ALIAS_ORIGINS:
                     raise RuntimeError("DNS alias tracking capacity exceeded")
-        await asyncio.to_thread(self._aliases.remember, key, rows, time(), _MAX_ALIAS_ORIGINS)
+        await asyncio.to_thread(
+            self._aliases.remember, key, rows, time.monotonic(), _MAX_ALIAS_ORIGINS
+        )
         # Cap the actual records that supplied the references, wherever they
         # appeared in the reply. Clients start their TTL clocks after this write.
-        released = time()
+        released = time.monotonic()
         inherited_until = min(prefixes.values())
         for path, rrset in paths.records:
             expires = min(now + paths.aliases[path], inherited_until)
@@ -300,11 +304,15 @@ class _Stub(asyncio.DatagramProtocol):
         key: AliasKey = (plan.policy_id, question.rdclass, _domain(question.name))
         try:
             async with asyncio.timeout(_RESOLVE_TIMEOUT):
-                inherited = await asyncio.to_thread(self.service._aliases.origins, key, time())
+                inherited = await asyncio.to_thread(
+                    self.service._aliases.origins, key, time.monotonic()
+                )
                 response = await self._resolve(plan, query)
                 async with self.service._publication_lock:
                     inherited.update(
-                        await asyncio.to_thread(self.service._aliases.origins, key, time())
+                        await asyncio.to_thread(
+                            self.service._aliases.origins, key, time.monotonic()
+                        )
                     )
                     if self._generation == generation:
                         await self.service._publish(plan, response, inherited, key)

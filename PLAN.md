@@ -266,7 +266,9 @@ Follow-up queries, including those received after a restart, match the
 remembered prefix and the new answer together against the active rules.
 For a shared endpoint, a single matching policy governs the address even
 when other cached paths have no match. A direct match also participates. Each hop bounds the
-path's TTL. After the durable write, the stub caps each returned alias link's
+path's TTL. Alias deadlines use the system monotonic clock across daemon restarts.
+If uptime resets below the last saved clock reading, the stub preserves the TTL
+remaining at that reading. After the durable write, the stub caps each returned alias link's
 TTL at the whole seconds still covered and withholds an expired link.
 If indistinguishable live paths select
 different policies, or publication or alias storage fails, the stub returns

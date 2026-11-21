@@ -1,4 +1,7 @@
 import asyncio
+import os
+import sqlite3
+from contextlib import closing
 from dataclasses import replace
 from ipaddress import ip_network
 from pathlib import Path
@@ -12,6 +15,7 @@ import pytest
 
 from pyvpn.audit import audit_dns
 from pyvpn.dns import service as dns_service
+from pyvpn.dns.aliases import AliasStore
 from pyvpn.dns.service import PolicyDnsService, _Stub
 from pyvpn.state import DestSet, PolicyPlan
 from tests.dns._helpers import plan_for_dns as _plan
@@ -235,11 +239,13 @@ def test_service_binding_endpoint_addresses_are_published(
 
 @pytest.mark.parametrize(("kind", "address"), [("A", "192.0.2.10"), ("AAAA", "2001:db8::2")])
 @pytest.mark.parametrize("with_address", [False, True], ids=["split-answer", "cached-cname"])
+@pytest.mark.parametrize("uptime_reset", [False, True], ids=["daemon-restart", "host-reboot"])
 def test_address_followup_uses_cname_origin_until_expiry(
-    monkeypatch: pytest.MonkeyPatch, kind: str, address: str, with_address: bool
+    monkeypatch: pytest.MonkeyPatch, kind: str, address: str, with_address: bool, uptime_reset: bool
 ) -> None:
     clock = Mock(return_value=100.0)
-    monkeypatch.setattr(dns_service, "time", clock)
+    wall_clock = Mock(return_value=1_700_000_000.0)
+    monkeypatch.setattr(dns_service, "time", Mock(monotonic=clock, time=wall_clock))
 
     async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
         owner = query.question[0].name
@@ -262,13 +268,19 @@ def test_address_followup_uses_cname_origin_until_expiry(
             return dns.message.from_wire(await stub.answer(query.to_wire(), tcp=False))
 
         assert (await lookup("selected.example.")).rcode() == dns.rcode.NOERROR
-        clock.return_value = 102.0
+        wall_clock.return_value += 3600
+        clock.return_value = 101.0
         backend.sets.clear()
         backend.fail_add = True
         failed = await lookup("edge.example.")
         assert failed.rcode() == dns.rcode.SERVFAIL
         assert not failed.answer
 
+        if uptime_reset:
+            clock.return_value = 1.0
+        service = PolicyDnsService(upstream, matcher_factory=lambda: matcher)
+        service.on_answer(backend.add_to_set)
+        stub = _Stub(service, replace(_plan(), dests=DestSet(1)))
         backend.fail_add = False
         reply = await lookup("edge.example.")
         assert reply.answer[0][0].address == address
@@ -276,7 +288,8 @@ def test_address_followup_uses_cname_origin_until_expiry(
         assert published.policy_id == 1
         assert published.v4 | published.v6 == {ip_network(address)}
 
-        clock.return_value = 104.0
+        wall_clock.return_value -= 7200
+        clock.return_value = 5.0 if uptime_reset else 104.0
         backend.sets.clear()
         assert (await lookup("edge.example.")).rcode() == dns.rcode.NOERROR
         assert not backend.sets
@@ -284,12 +297,33 @@ def test_address_followup_uses_cname_origin_until_expiry(
     asyncio.run(run())
 
 
+def test_upgrade_preserves_legacy_alias_ttl(tmp_path: Path) -> None:
+    path = tmp_path / "aliases.db"
+    old_time = 1_700_000_000
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute(
+            "CREATE TABLE aliases (policy INTEGER, rdclass INTEGER, target TEXT, prefix TEXT, "
+            "expires REAL, PRIMARY KEY (policy, rdclass, target, prefix)) WITHOUT ROWID"
+        )
+        db.execute(
+            "INSERT INTO aliases VALUES (1, 1, 'edge.example', ?, ?)",
+            ('["selected.example"]', old_time + 60),
+        )
+    os.utime(path, (old_time, old_time))
+    key = (1, 1, "edge.example")
+    store = AliasStore(path, lambda: 100.0)
+    assert store.origins(key, 101.0) == {("selected.example",): 160.0}
+    reopened = AliasStore(path, lambda: 150.0)
+    assert reopened.origins(key, 159.0) == store.origins(key, 101.0)
+    assert not reopened.origins(key, 160.0)
+
+
 @pytest.mark.parametrize("kind", ["HTTPS", "SVCB"])
 def test_service_alias_followups_keep_the_original_policy(
     kind: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clock = Mock(return_value=100.0)
-    monkeypatch.setattr(dns_service, "time", clock)
+    monkeypatch.setattr(dns_service, "time", Mock(monotonic=clock))
     monkeypatch.setattr(dns_service, "_MAX_ALIAS_ORIGINS", 3)
 
     async def run() -> None:
@@ -747,7 +781,7 @@ def test_reply_ttl_accounts_for_durable_write(
     delay: float, kind: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clock = Mock(return_value=100.0)
-    monkeypatch.setattr(dns_service, "time", clock)
+    monkeypatch.setattr(dns_service, "time", Mock(monotonic=clock))
 
     async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
         name = query.question[0].name
@@ -793,7 +827,7 @@ def test_reply_ttl_accounts_for_durable_write(
 
 def test_alias_ttl_limits_each_link_after_a_split_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = Mock(return_value=100.0)
-    monkeypatch.setattr(dns_service, "time", clock)
+    monkeypatch.setattr(dns_service, "time", Mock(monotonic=clock))
 
     async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
         name = query.question[0].name
@@ -910,7 +944,7 @@ def test_referral_after_cname_uses_origin_policy(
     tmp_path: Path, bundled: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clock = Mock(return_value=100.0)
-    monkeypatch.setattr(dns_service, "time", clock)
+    monkeypatch.setattr(dns_service, "time", Mock(monotonic=clock))
     backend = FakeBackend()
     matcher = FakeRuleMatcher({"origin.example": 1})
     addr = dns.rrset.from_text("ns.zone.example.", 80, "IN", "A", "192.0.2.5")
