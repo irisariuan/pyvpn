@@ -143,3 +143,72 @@ def test_test_config_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
 def test_daemon_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["--socket", str(tmp_path / "missing.sock"), "status"]) == 1
     assert "cannot contact" in capsys.readouterr().err
+
+
+def test_reload_human_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "daemon.sock"
+    thread = fake_daemon(
+        path,
+        {"id": 1, "ok": True, "result": {"message": "configuration reloaded"}},
+    )
+
+    assert main(["--socket", str(path), "reload"]) == 0
+    join(thread)
+    assert "configuration reloaded" in capsys.readouterr().out
+
+
+def test_reload_json_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "daemon.sock"
+    thread = fake_daemon(path, {"id": 1, "ok": True, "result": {"reloaded": True}})
+
+    assert main(["--json", "--socket", str(path), "reload"]) == 0
+    join(thread)
+    assert json.loads(capsys.readouterr().out) == {"reloaded": True}
+
+
+def test_disable_human_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "daemon.sock"
+    thread = fake_daemon(path, {"id": 1, "ok": True, "result": None})
+
+    assert main(["--socket", str(path), "disable"]) == 0
+    join(thread)
+    assert "disable: ok" in capsys.readouterr().out
+
+
+def test_disable_json_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "daemon.sock"
+    thread = fake_daemon(path, {"id": 1, "ok": True, "result": {"disabled": True}})
+
+    assert main(["--json", "--socket", str(path), "disable"]) == 0
+    join(thread)
+    assert json.loads(capsys.readouterr().out) == {"disabled": True}
+
+
+def test_audit_human_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "daemon.sock"
+    thread = fake_daemon(
+        path,
+        {
+            "id": 1,
+            "ok": True,
+            "result": {"enabled": True, "policies": [{"name": "Japan"}]},
+        },
+    )
+
+    assert main(["--socket", str(path), "audit"]) == 0
+    join(thread)
+    output = capsys.readouterr().out
+    assert "enabled: yes" in output
+    assert "policies: 1" in output
+
+
+def test_audit_json_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "daemon.sock"
+    thread = fake_daemon(
+        path,
+        {"id": 1, "ok": True, "result": {"enabled": False, "issues": ["IPv6 leak"]}},
+    )
+
+    assert main(["--json", "--socket", str(path), "audit"]) == 0
+    join(thread)
+    assert json.loads(capsys.readouterr().out)["enabled"] is False

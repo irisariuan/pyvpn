@@ -48,3 +48,30 @@ def format_apps(value: Any) -> str:
         uids = ", ".join(str(uid) for uid in entry.get("uids", [])) or "-"
         lines.append(f"{name}: cgroups={cgroups}; uids={uids}")
     return "\n".join(lines)
+
+
+def format_mutation(value: Any, action: str) -> str:
+    """format a reload or disable daemon result."""
+    if isinstance(value, dict):
+        message = value.get("message")
+        if isinstance(message, str) and message:
+            return message
+    return f"{action}: ok"
+
+
+def format_audit(value: Any) -> str:
+    """format a daemon audit response."""
+    if not isinstance(value, dict):
+        return str(value)
+
+    lines = []
+    if "enabled" in value:
+        lines.append(f"enabled: {'yes' if value['enabled'] else 'no'}")
+    if "policies" in value:
+        lines.append(f"policies: {len(value['policies'])}")
+    for key, result in value.items():
+        if key not in {"enabled", "policies"}:
+            if isinstance(result, (dict, list)):
+                continue
+            lines.append(f"{key}: {result}")
+    return "\n".join(lines) if lines else "audit: ok"

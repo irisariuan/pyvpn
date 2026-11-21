@@ -7,7 +7,13 @@ import sys
 from collections.abc import Sequence
 
 from pyvpn import __version__
-from pyvpn.cli.output import format_apps, format_status, print_json
+from pyvpn.cli.output import (
+    format_apps,
+    format_audit,
+    format_mutation,
+    format_status,
+    print_json,
+)
 from pyvpn.config import (
     ConfigError,
     load_config,
@@ -40,6 +46,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     test = commands.add_parser("test", help="validate configuration and policy rules")
     test.add_argument("config", nargs="?", default=None, help="configuration JSON path")
+
+    commands.add_parser("reload", help="reload the daemon configuration")
+    commands.add_parser("disable", help="remove pyvpn routing and rules")
+    commands.add_parser("audit", help="describe routing and leak protection")
     return parser
 
 
@@ -116,6 +126,24 @@ def _run_test(args: argparse.Namespace, as_json: bool) -> int:
     return result.code
 
 
+def _run_mutation(client: DaemonClient, as_json: bool, action: str) -> int:
+    result = client.reload() if action == "reload" else client.disable()
+    if as_json:
+        print_json(result)
+    else:
+        print(format_mutation(result, action))
+    return 0
+
+
+def _run_audit(client: DaemonClient, as_json: bool) -> int:
+    result = client.audit()
+    if as_json:
+        print_json(result)
+    else:
+        print(format_audit(result))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -131,6 +159,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_policy(args, args.json)
         if args.command == "test":
             return _run_test(args, args.json)
+        if args.command in {"reload", "disable"}:
+            socket_path = args.socket if args.socket is not None else None
+            client = DaemonClient(socket_path) if socket_path is not None else DaemonClient()
+            return _run_mutation(client, args.json, args.command)
+        if args.command == "audit":
+            socket_path = args.socket if args.socket is not None else None
+            client = DaemonClient(socket_path) if socket_path is not None else DaemonClient()
+            return _run_audit(client, args.json)
     except (ConfigError, DaemonClientError) as exc:
         print(f"pyvpn: {exc}", file=sys.stderr)
         return 1
