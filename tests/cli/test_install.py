@@ -49,6 +49,12 @@ def test_render_desktop_file_escapes_shell_characters() -> None:
     assert 'Exec="/opt/\\$Bin\\`/pyvpn" run -p "\\$Japan\\`test" -- %F' in entry
 
 
+def test_render_desktop_file_escapes_percent_field_codes() -> None:
+    entry = render_desktop_file("Japan%F", "/opt/MyApp/pyvpn%U")
+    assert 'run -p "Japan%%F"' in entry
+    assert 'Exec="/opt/MyApp/pyvpn%%U"' in entry
+
+
 def test_render_systemd_unit_quotes_executable_with_spaces() -> None:
     unit = render_systemd_unit("/opt/My App/bin/pyvpn-daemon")
     assert 'ExecStart="/opt/My App/bin/pyvpn-daemon"' in unit

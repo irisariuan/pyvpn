@@ -59,7 +59,13 @@ def _desktop_escape(value: str) -> str:
     """escape a value for a Desktop Entry Exec field."""
     if any(ord(character) < 32 or ord(character) == 127 for character in value):
         raise InstallError("desktop entry values must not contain control characters")
-    return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+    return (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("$", "\\$")
+        .replace("`", "\\`")
+        .replace("%", "%%")
+    )
 
 
 def render_desktop_file(
