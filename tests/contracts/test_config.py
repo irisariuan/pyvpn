@@ -66,3 +66,255 @@ def test_policy_needs_scope() -> None:
                 "policies": [{"name": "p", "targets": ["a"]}],
             }
         )
+
+
+def test_duplicate_target_names_rejected() -> None:
+    with pytest.raises(ValidationError, match="target names must be unique"):
+        Config.model_validate(
+            {
+                "targets": [
+                    {"name": "vpn", "interface": "tun0"},
+                    {"name": "vpn", "interface": "tun1"},
+                ],
+                "policies": [{"name": "p", "targets": ["vpn"], "apps": [{"name": "ssh"}]}],
+            }
+        )
+
+
+def test_duplicate_policy_names_rejected() -> None:
+    with pytest.raises(ValidationError, match="policy names must be unique"):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [
+                    {"name": "p", "targets": ["vpn"], "apps": [{"name": "ssh"}]},
+                    {"name": "p", "targets": ["vpn"], "apps": [{"name": "git"}]},
+                ],
+            }
+        )
+
+
+def test_unknown_app_group_rejected() -> None:
+    with pytest.raises(ValidationError, match="unknown app group"):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [{"name": "p", "targets": ["vpn"], "apps": ["group:missing"]}],
+            }
+        )
+
+
+def test_policy_needs_target() -> None:
+    with pytest.raises(ValidationError, match="needs at least one target"):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [{"name": "p", "targets": [], "apps": [{"name": "ssh"}]}],
+            }
+        )
+
+
+def test_probe_interval_must_be_positive() -> None:
+    with pytest.raises(ValidationError, match="greater than zero"):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [{"name": "p", "targets": ["vpn"], "apps": [{"name": "ssh"}]}],
+                "settings": {"probe_interval": 0},
+            }
+        )
+
+
+def test_probe_interval_must_be_finite() -> None:
+    with pytest.raises(ValidationError, match="finite"):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [{"name": "p", "targets": ["vpn"], "apps": [{"name": "ssh"}]}],
+                "settings": {"probe_interval": float("inf")},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "example.com:443",
+        "1.1.1.1",
+        "1.1.1.1:0",
+        "1.1.1.1:65536",
+        "[2001:db8::1",
+        "::1:443",
+    ],
+)
+def test_probe_targets_must_use_ip_and_port(target: str) -> None:
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [{"name": "p", "targets": ["vpn"], "apps": [{"name": "ssh"}]}],
+                "settings": {"probe_targets": [target]},
+            }
+        )
+
+
+@pytest.mark.parametrize("target", ["1.1.1.1:443", "[2001:db8::1]:443"])
+def test_probe_targets_accept_ips(target: str) -> None:
+    config = Config.model_validate(
+        {
+            "targets": [{"name": "vpn", "interface": "tun0"}],
+            "policies": [{"name": "p", "targets": ["vpn"], "apps": [{"name": "ssh"}]}],
+            "settings": {"probe_targets": [target]},
+        }
+    )
+    assert target in config.settings.probe_targets
+
+
+@pytest.mark.parametrize("value", ["", " ", "\t"])
+def test_app_string_selectors_must_not_be_empty(value: str) -> None:
+    with pytest.raises(ValidationError, match="must not be empty"):
+        AppSelector(name=value)
+
+
+@pytest.mark.parametrize("uid", [-1, 4294967295])
+def test_uid_must_be_in_range(uid: int) -> None:
+    with pytest.raises(ValidationError, match="uid must be between"):
+        AppSelector(uid=uid)
+
+
+@pytest.mark.parametrize(
+    "dns_server",
+    [
+        "",
+        " ",
+        "example.com",
+        "dns.example@",
+        "@192.0.2.53",
+        "127.0.0.1",
+        "0.0.0.0",
+        "224.0.0.1",
+        "fe80::1%eth0",
+    ],
+)
+def test_dns_server_must_be_remote_unicast_or_tls_address(dns_server: str) -> None:
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [
+                    {
+                        "name": "p",
+                        "targets": ["vpn"],
+                        "apps": [{"name": "ssh"}],
+                        "leak": {"dns_server": dns_server},
+                    }
+                ],
+                "settings": {"probe_interval": 15},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "dns_server",
+    ["9.9.9.9", "2001:4860:4860::8888", "dns.quad9.net@9.9.9.9"],
+)
+def test_dns_server_accepts_remote_unicast_or_tls_address(dns_server: str) -> None:
+    config = Config.model_validate(
+        {
+            "targets": [{"name": "vpn", "interface": "tun0"}],
+            "policies": [
+                {
+                    "name": "p",
+                    "targets": ["vpn"],
+                    "apps": [{"name": "ssh"}],
+                    "leak": {
+                        "dns_server": dns_server,
+                        "dns_protocol": "dot" if "@" in dns_server else "plain",
+                    },
+                }
+            ],
+        }
+    )
+    assert config.policies[0].leak.dns_server == dns_server
+
+
+def test_dns_server_rejects_surrounding_whitespace() -> None:
+    with pytest.raises(ValidationError, match="surrounding whitespace"):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [
+                    {
+                        "name": "p",
+                        "targets": ["vpn"],
+                        "apps": [{"name": "ssh"}],
+                        "leak": {"dns_server": " 9.9.9.9 "},
+                    }
+                ],
+            }
+        )
+
+
+@pytest.mark.parametrize("uid", [True, False])
+def test_uid_rejects_boolean(uid: bool) -> None:
+    with pytest.raises(ValidationError):
+        AppSelector(uid=uid)
+
+
+@pytest.mark.parametrize("uid", ["1000", 1000.0])
+def test_uid_rejects_string_or_float(uid: object) -> None:
+    with pytest.raises(ValidationError):
+        AppSelector(uid=uid)
+
+
+@pytest.mark.parametrize("interval", [True, False])
+def test_probe_interval_rejects_boolean(interval: bool) -> None:
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [{"name": "p", "targets": ["vpn"], "apps": [{"name": "ssh"}]}],
+                "settings": {"probe_interval": interval},
+            }
+        )
+
+
+@pytest.mark.parametrize("interval", ["15", "15.5"])
+def test_probe_interval_rejects_string(interval: str) -> None:
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [{"name": "p", "targets": ["vpn"], "apps": [{"name": "ssh"}]}],
+                "settings": {"probe_interval": interval},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["probe", "dns_via_target", "block_doh", "block_dot", "block_quic"],
+)
+def test_boolean_fields_reject_strings(field: str) -> None:
+    with pytest.raises(ValidationError):
+        if field == "probe":
+            Config.model_validate(
+                {
+                    "targets": [{"name": "vpn", "interface": "tun0", "probe": "true"}],
+                    "policies": [{"name": "p", "targets": ["vpn"], "apps": [{"name": "ssh"}]}],
+                }
+            )
+        else:
+            Config.model_validate(
+                {
+                    "targets": [{"name": "vpn", "interface": "tun0"}],
+                    "policies": [
+                        {
+                            "name": "p",
+                            "targets": ["vpn"],
+                            "apps": [{"name": "ssh"}],
+                            "leak": {field: "true"},
+                        }
+                    ],
+                }
+            )
