@@ -71,7 +71,16 @@ def format_audit(value: Any) -> str:
         lines.append(f"policies: {len(value['policies'])}")
     for key, result in value.items():
         if key not in {"enabled", "policies"}:
-            if isinstance(result, (dict, list)):
-                continue
-            lines.append(f"{key}: {result}")
+            if isinstance(result, list):
+                if not result:
+                    continue
+                lines.append(f"{key}:")
+                lines.extend(f"  - {item}" for item in result)
+            elif isinstance(result, dict):
+                if not result:
+                    continue
+                lines.append(f"{key}:")
+                lines.extend(f"  {item}: {detail}" for item, detail in result.items())
+            else:
+                lines.append(f"{key}: {result}")
     return "\n".join(lines) if lines else "audit: ok"

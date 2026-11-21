@@ -202,6 +202,35 @@ def test_audit_human_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
     assert "policies: 1" in output
 
 
+def test_audit_human_output_includes_list_and_dict_findings(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "daemon.sock"
+    thread = fake_daemon(
+        path,
+        {
+            "id": 1,
+            "ok": True,
+            "result": {
+                "enabled": True,
+                "policies": [{"name": "Japan"}],
+                "issues": ["IPv6 leak", "competing rule"],
+                "dns": {"stub": "ok", "interface": "wg-jp"},
+            },
+        },
+    )
+
+    assert main(["--socket", str(path), "audit"]) == 0
+    join(thread)
+    output = capsys.readouterr().out
+    assert "issues:" in output
+    assert "  - IPv6 leak" in output
+    assert "  - competing rule" in output
+    assert "dns:" in output
+    assert "  stub: ok" in output
+
+
 def test_audit_json_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     path = tmp_path / "daemon.sock"
     thread = fake_daemon(
