@@ -27,8 +27,8 @@ def render_systemd_unit(exec_start: str = "/usr/bin/pyvpn-daemon") -> str:
     """render the root systemd unit."""
     if not exec_start.strip():
         raise InstallError("daemon executable must not be empty")
-    if "\n" in exec_start or "\r" in exec_start:
-        raise InstallError("daemon executable must be one line")
+    if any(ord(character) < 32 or ord(character) == 127 for character in exec_start):
+        raise InstallError("daemon executable must not contain control characters")
     escaped = exec_start.replace("\\", "\\\\").replace('"', '\\"')
     escaped = escaped.replace("$", "$$").replace("%", "%%")
     needs_quotes = any(
@@ -54,8 +54,8 @@ def render_systemd_unit(exec_start: str = "/usr/bin/pyvpn-daemon") -> str:
 
 def _desktop_escape(value: str) -> str:
     """escape a value for a Desktop Entry Exec field."""
-    if "\n" in value or "\r" in value:
-        raise InstallError("desktop entry values must be one line")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise InstallError("desktop entry values must not contain control characters")
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
 
 

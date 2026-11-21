@@ -22,8 +22,14 @@ def test_render_systemd_unit() -> None:
 
 
 def test_render_systemd_unit_rejects_multiline_executable() -> None:
-    with pytest.raises(InstallError, match="one line"):
+    with pytest.raises(InstallError, match="control characters"):
         render_systemd_unit("/usr/bin/pyvpn\nrm")
+
+
+@pytest.mark.parametrize("control", ["\x00", "\t", "\x1f", "\x7f"])
+def test_render_systemd_unit_rejects_control_characters(control: str) -> None:
+    with pytest.raises(InstallError, match="control characters"):
+        render_systemd_unit(f"/usr/bin/pyvpn{control}")
 
 
 def test_render_desktop_file() -> None:
@@ -51,6 +57,12 @@ def test_render_systemd_unit_quotes_executable_with_spaces() -> None:
 def test_render_desktop_file_rejects_empty_policy() -> None:
     with pytest.raises(InstallError, match="policy name"):
         render_desktop_file(" ")
+
+
+@pytest.mark.parametrize("control", ["\x00", "\t", "\x1f", "\x7f"])
+def test_render_desktop_file_rejects_control_characters(control: str) -> None:
+    with pytest.raises(InstallError, match="control characters"):
+        render_desktop_file(f"Japan{control}")
 
 
 def test_default_install_paths() -> None:
