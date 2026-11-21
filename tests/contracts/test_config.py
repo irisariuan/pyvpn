@@ -131,7 +131,7 @@ def test_probe_interval_must_be_finite() -> None:
             {
                 "targets": [{"name": "vpn", "interface": "tun0"}],
                 "policies": [{"name": "p", "targets": ["vpn"], "apps": [{"name": "ssh"}]}],
-                "settings": {"probe_interval": "Infinity"},
+                "settings": {"probe_interval": float("inf")},
             }
         )
 
@@ -243,8 +243,26 @@ def test_uid_rejects_boolean(uid: bool) -> None:
         AppSelector(uid=uid)
 
 
+@pytest.mark.parametrize("uid", ["1000", 1000.0])
+def test_uid_rejects_string_or_float(uid: object) -> None:
+    with pytest.raises(ValidationError):
+        AppSelector(uid=uid)
+
+
 @pytest.mark.parametrize("interval", [True, False])
 def test_probe_interval_rejects_boolean(interval: bool) -> None:
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [{"name": "p", "targets": ["vpn"], "apps": [{"name": "ssh"}]}],
+                "settings": {"probe_interval": interval},
+            }
+        )
+
+
+@pytest.mark.parametrize("interval", ["15", "15.5"])
+def test_probe_interval_rejects_string(interval: str) -> None:
     with pytest.raises(ValidationError):
         Config.model_validate(
             {

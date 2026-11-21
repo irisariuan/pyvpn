@@ -49,8 +49,8 @@ class AppSelector(_Model):
     @field_validator("uid", mode="before")
     @classmethod
     def _uid_type(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("uid must be an integer")
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("uid must be a JSON integer")
         return value
 
     @model_validator(mode="after")
@@ -158,15 +158,8 @@ class Settings(_Model):
     @field_validator("probe_interval", mode="before")
     @classmethod
     def _probe_interval_type(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("probe_interval must be a number")
-        if isinstance(value, str):
-            try:
-                return float(value)
-            except ValueError as exc:
-                raise ValueError("probe_interval must be a number") from exc
-        if not isinstance(value, (int, float)):
-            raise ValueError("probe_interval must be a number")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("probe_interval must be a JSON number")
         return value
 
     @model_validator(mode="after")
