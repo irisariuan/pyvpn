@@ -17,7 +17,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "mypy>=1.10", "ruff==0.17.6"]
+# Linear-time matching for rule regexes and wildcards (match/pattern.py);
+# without it the daemon refuses to activate regex rules.
+re2 = ["google-re2>=1.1"]
+dev = ["pytest>=8", "mypy>=1.10", "ruff==0.17.6", "google-re2>=1.1"]
 
 [project.scripts]
 pyvpn = "pyvpn.cli:main"
@@ -40,7 +43,7 @@ strict = true
 mypy_path = "src"
 
 [[tool.mypy.overrides]]
-module = ["pyroute2.*", "dns.*"]
+module = ["pyroute2.*", "dns.*", "re2"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
