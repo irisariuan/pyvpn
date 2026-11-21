@@ -8,7 +8,7 @@ import socket
 from pathlib import Path
 from typing import Any, cast
 
-from pyvpn.constants import SOCKET_PATH
+from pyvpn.constants import MAX_POLICIES, SOCKET_PATH
 from pyvpn.daemon.api import MAX_LINE, Error, ErrorCode, Request, Response
 
 ERROR_CODES = frozenset(
@@ -160,8 +160,8 @@ class DaemonClient:
         if isinstance(policy, bool) or not isinstance(policy, (str, int)):
             raise ValueError("policy must be a non-empty name or policy id")
         if isinstance(policy, int):
-            if not 1 <= policy <= 99:
-                raise ValueError("policy id must be between 1 and 99")
+            if not 1 <= policy <= MAX_POLICIES:
+                raise ValueError(f"policy id must be between 1 and {MAX_POLICIES}")
         elif not policy.strip():
             raise ValueError("policy name must not be empty")
         return self.request("place_pid", {"pid": pid, "policy": policy})
