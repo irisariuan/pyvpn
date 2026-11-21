@@ -66,3 +66,60 @@ def test_policy_needs_scope() -> None:
                 "policies": [{"name": "p", "targets": ["a"]}],
             }
         )
+
+
+def test_duplicate_target_names_rejected() -> None:
+    with pytest.raises(ValidationError, match="target names must be unique"):
+        Config.model_validate(
+            {
+                "targets": [
+                    {"name": "vpn", "interface": "tun0"},
+                    {"name": "vpn", "interface": "tun1"},
+                ],
+                "policies": [{"name": "p", "targets": ["vpn"], "apps": [{"name": "ssh"}]}],
+            }
+        )
+
+
+def test_duplicate_policy_names_rejected() -> None:
+    with pytest.raises(ValidationError, match="policy names must be unique"):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [
+                    {"name": "p", "targets": ["vpn"], "apps": [{"name": "ssh"}]},
+                    {"name": "p", "targets": ["vpn"], "apps": [{"name": "git"}]},
+                ],
+            }
+        )
+
+
+def test_unknown_app_group_rejected() -> None:
+    with pytest.raises(ValidationError, match="unknown app group"):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [{"name": "p", "targets": ["vpn"], "apps": ["group:missing"]}],
+            }
+        )
+
+
+def test_policy_needs_target() -> None:
+    with pytest.raises(ValidationError, match="needs at least one target"):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [{"name": "p", "targets": [], "apps": [{"name": "ssh"}]}],
+            }
+        )
+
+
+def test_probe_interval_must_be_positive() -> None:
+    with pytest.raises(ValidationError, match="greater than zero"):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [{"name": "p", "targets": ["vpn"], "apps": [{"name": "ssh"}]}],
+                "settings": {"probe_interval": 0},
+            }
+        )
