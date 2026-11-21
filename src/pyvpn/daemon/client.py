@@ -55,8 +55,8 @@ class DaemonClient:
                 daemon.settimeout(self.timeout)
                 daemon.connect(self.socket_path)
                 daemon.sendall(request.encode())
-                stream = daemon.makefile("rb")
-                line = stream.readline(MAX_LINE + 1)
+                with daemon.makefile("rb") as stream:
+                    line = stream.readline(MAX_LINE + 1)
         except (TimeoutError, OSError) as exc:
             raise DaemonUnavailable(f"cannot contact pyvpn daemon: {exc}") from exc
 

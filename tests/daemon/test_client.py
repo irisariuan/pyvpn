@@ -91,6 +91,12 @@ def test_request_rejects_wrong_response_id(tmp_path: Path) -> None:
         b"not-json\n",
         b'{"id":1,"ok":true,"result":null}',
         b'{"ok":true,"result":null}\n',
+        b'{"id":1,"ok":"false","error":{"code":"not_found","message":"missing"}}\n',
+        b'{"id":1,"ok":false,"error":{"code":"bad","message":"missing"}}\n',
+        b'{"id":1,"ok":true,"error":{"code":"bad_request","message":"bad"}}\n',
+        b'{"id":1,"ok":false,"result":null,"error":{"code":"not_found","message":"missing"}}\n',
+        b'{"id":1,"ok":false,"error":{"code":"not_found","message":"missing","extra":true}}\n',
+        b'{"id":1,"ok":true,"result":NaN}\n',
     ],
 )
 def test_request_rejects_invalid_response(tmp_path: Path, response: bytes) -> None:
