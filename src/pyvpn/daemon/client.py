@@ -21,7 +21,19 @@ def _decode_response_boundary(line: bytes) -> Response:
     def reject_constant(value: str) -> None:
         raise ValueError(f"invalid JSON constant: {value}")
 
-    decoded = json.loads(line, parse_constant=reject_constant)
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    decoded = json.loads(
+        line,
+        parse_constant=reject_constant,
+        object_pairs_hook=reject_duplicate_keys,
+    )
     if not isinstance(decoded, dict):
         raise ValueError("daemon response must be a JSON object")
     if set(decoded) - {"id", "ok", "result", "error"}:

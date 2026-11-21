@@ -97,6 +97,8 @@ def test_request_rejects_wrong_response_id(tmp_path: Path) -> None:
         b'{"id":1,"ok":false,"result":null,"error":{"code":"not_found","message":"missing"}}\n',
         b'{"id":1,"ok":false,"error":{"code":"not_found","message":"missing","extra":true}}\n',
         b'{"id":1,"ok":true,"result":NaN}\n',
+        b'{"id":1,"id":99,"ok":true,"result":null}\n',
+        b'{"id":1,"ok":false,"error":{"code":"not_found","code":"bad_request","message":"missing"}}\n',
     ],
 )
 def test_request_rejects_invalid_response(tmp_path: Path, response: bytes) -> None:
