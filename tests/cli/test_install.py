@@ -38,6 +38,16 @@ def test_render_desktop_file_quotes_executable_with_spaces() -> None:
     assert 'Exec="/opt/My App/bin/pyvpn" run -p "Japan" -- %F' in entry
 
 
+def test_render_desktop_file_escapes_shell_characters() -> None:
+    entry = render_desktop_file("$Japan`test", "/opt/$Bin`/pyvpn")
+    assert 'Exec="/opt/\\$Bin\\`/pyvpn" run -p "\\$Japan\\`test" -- %F' in entry
+
+
+def test_render_systemd_unit_quotes_executable_with_spaces() -> None:
+    unit = render_systemd_unit("/opt/My App/bin/pyvpn-daemon")
+    assert 'ExecStart="/opt/My App/bin/pyvpn-daemon"' in unit
+
+
 def test_render_desktop_file_rejects_empty_policy() -> None:
     with pytest.raises(InstallError, match="policy name"):
         render_desktop_file(" ")

@@ -8,6 +8,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from pyvpn import __version__
+from pyvpn.apps.launcher import DaemonUnavailable as LauncherUnavailable
+from pyvpn.apps.launcher import run as run_app
 from pyvpn.cli.install import (
     InstallError,
     InstallFile,
@@ -28,6 +30,7 @@ from pyvpn.config import (
     ConfigError,
     load_config,
 )
+from pyvpn.constants import SOCKET_PATH
 from pyvpn.daemon.client import (
     DaemonClient,
     DaemonClientError,
@@ -60,6 +63,12 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("reload", help="reload the daemon configuration")
     commands.add_parser("disable", help="remove pyvpn routing and rules")
     commands.add_parser("audit", help="describe routing and leak protection")
+
+    run = commands.add_parser("run", help="place a launched process in a policy")
+    run.add_argument("-p", "--policy", required=True, help="policy name or id")
+    run.add_argument("--socket", default=None, help="daemon socket path")
+    run.add_argument("--isolation", choices=("none", "netns"), default="none")
+    run.add_argument("command_args", nargs=argparse.REMAINDER, help="command and arguments")
 
     install = commands.add_parser("install", help="render or write systemd installation files")
     install.add_argument("--scope", choices=("system", "user"), default="system")
@@ -168,6 +177,29 @@ def _run_audit(client: DaemonClient, as_json: bool) -> int:
     return 0
 
 
+def _run_app(args: argparse.Namespace) -> int:
+    command = list(args.command_args)
+    if command and command[0] == "--":
+        command.pop(0)
+    if not command:
+        print("pyvpn: a command is required", file=sys.stderr)
+        return 1
+    policy: str | int = args.policy
+    if args.policy.isdigit():
+        policy = int(args.policy)
+    try:
+        run_app(
+            policy,
+            command,
+            socket_path=args.socket if args.socket is not None else SOCKET_PATH,
+            isolation=args.isolation,
+        )
+    except (DaemonClientError, LauncherUnavailable, ValueError) as exc:
+        print(f"pyvpn: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _redirect_path(path: Path, root: str | None) -> Path:
     """redirect an absolute install path below a test root."""
     if root is None:
@@ -228,6 +260,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "run":
+            return _run_app(args)
         if args.command in {"status", "apps"}:
             socket_path = args.socket if args.socket is not None else None
             client = DaemonClient(socket_path) if socket_path is not None else DaemonClient()

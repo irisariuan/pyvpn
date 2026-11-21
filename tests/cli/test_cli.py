@@ -145,6 +145,56 @@ def test_daemon_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Non
     assert "cannot contact" in capsys.readouterr().err
 
 
+def test_run_wires_stream_e_launcher(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[object, list[str], object, object]] = []
+
+    def fake_run(
+        policy: str | int,
+        command: list[str],
+        *,
+        socket_path: object,
+        isolation: str,
+    ) -> None:
+        calls.append((policy, command, socket_path, isolation))
+
+    monkeypatch.setattr("pyvpn.cli.run_app", fake_run)
+
+    assert (
+        main(
+            [
+                "run",
+                "-p",
+                "Japan",
+                "--socket",
+                "/tmp/test.sock",
+                "--",
+                "firefox",
+                "--private",
+            ]
+        )
+        == 0
+    )
+    assert calls == [("Japan", ["firefox", "--private"], "/tmp/test.sock", "none")]
+
+
+def test_run_numeric_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[object] = []
+
+    def fake_run(
+        policy: str | int,
+        command: list[str],
+        *,
+        socket_path: object,
+        isolation: str,
+    ) -> None:
+        seen.append(policy)
+
+    monkeypatch.setattr("pyvpn.cli.run_app", fake_run)
+
+    assert main(["run", "-p", "2", "--", "true"]) == 0
+    assert seen == [2]
+
+
 def test_reload_human_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     path = tmp_path / "daemon.sock"
     thread = fake_daemon(

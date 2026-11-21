@@ -29,6 +29,12 @@ def render_systemd_unit(exec_start: str = "/usr/bin/pyvpn-daemon") -> str:
         raise InstallError("daemon executable must not be empty")
     if "\n" in exec_start or "\r" in exec_start:
         raise InstallError("daemon executable must be one line")
+    escaped = exec_start.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = escaped.replace("$", "$$").replace("%", "%%")
+    needs_quotes = any(
+        character.isspace() or character in '"\\$%;&|<>*?[](){}' for character in exec_start
+    )
+    rendered_exec = f'"{escaped}"' if needs_quotes else escaped
 
     return (
         "[Unit]\n"
@@ -38,7 +44,7 @@ def render_systemd_unit(exec_start: str = "/usr/bin/pyvpn-daemon") -> str:
         "\n"
         "[Service]\n"
         "Type=simple\n"
-        f"ExecStart={exec_start}\n"
+        f"ExecStart={rendered_exec}\n"
         "Restart=on-failure\n"
         "\n"
         "[Install]\n"
@@ -50,7 +56,7 @@ def _desktop_escape(value: str) -> str:
     """escape a value for a Desktop Entry Exec field."""
     if "\n" in value or "\r" in value:
         raise InstallError("desktop entry values must be one line")
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
 
 
 def render_desktop_file(
@@ -66,7 +72,7 @@ def render_desktop_file(
     return (
         "[Desktop Entry]\n"
         "Type=Application\n"
-        f"Name=pyvpn {_desktop_escape(policy)}\n"
+        f"Name=pyvpn {policy}\n"
         f'Exec="{_desktop_escape(executable)}" run -p "{_desktop_escape(policy)}" -- %F\n'
         "Terminal=true\n"
         "Categories=Network;\n"
