@@ -10,6 +10,7 @@ from pathlib import Path
 from pyvpn import __version__
 from pyvpn.apps.launcher import DaemonUnavailable as LauncherUnavailable
 from pyvpn.apps.launcher import run as run_app
+from pyvpn.apps.netns import NetworkNamespaceUnavailable
 from pyvpn.cli.install import (
     InstallError,
     InstallFile,
@@ -194,7 +195,12 @@ def _run_app(args: argparse.Namespace) -> int:
             socket_path=args.socket if args.socket is not None else SOCKET_PATH,
             isolation=args.isolation,
         )
-    except (DaemonClientError, LauncherUnavailable, ValueError) as exc:
+    except (
+        DaemonClientError,
+        LauncherUnavailable,
+        NetworkNamespaceUnavailable,
+        ValueError,
+    ) as exc:
         print(f"pyvpn: {exc}", file=sys.stderr)
         return 1
     return 0

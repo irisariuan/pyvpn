@@ -195,6 +195,21 @@ def test_run_numeric_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen == [2]
 
 
+def test_run_normalizes_network_namespace_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fake_run(*args: object, **kwargs: object) -> None:
+        from pyvpn.apps.netns import NetworkNamespaceUnavailable
+
+        raise NetworkNamespaceUnavailable("cannot create network namespace")
+
+    monkeypatch.setattr("pyvpn.cli.run_app", fake_run)
+
+    assert main(["run", "-p", "Japan", "--isolation", "netns", "--", "true"]) == 1
+    assert "cannot create network namespace" in capsys.readouterr().err
+
+
 def test_reload_human_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     path = tmp_path / "daemon.sock"
     thread = fake_daemon(
