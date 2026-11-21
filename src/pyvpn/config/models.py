@@ -11,7 +11,7 @@ import math
 from ipaddress import IPv4Address, IPv6Address
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 from pyvpn.constants import MAX_POLICIES
 
@@ -24,7 +24,7 @@ class Target(_Model):
     name: str
     interface: str  # exact name or glob pattern ("tun*")
     gateway: Literal["auto"] | IPv4Address | IPv6Address | None = None
-    probe: bool = False
+    probe: StrictBool = False
 
     @model_validator(mode="after")
     def _names(self) -> Target:
@@ -45,6 +45,13 @@ class AppSelector(_Model):
     user: str | None = None
     flatpak: str | None = None
     snap: str | None = None
+
+    @field_validator("uid", mode="before")
+    @classmethod
+    def _uid_type(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("uid must be an integer")
+        return value
 
     @model_validator(mode="after")
     def _valid_selector(self) -> AppSelector:
@@ -80,12 +87,12 @@ class AppGroup(_Model):
 
 
 class LeakSettings(_Model):
-    dns_via_target: bool = True
+    dns_via_target: StrictBool = True
     dns_server: str | None = None
     dns_protocol: Literal["plain", "dot", "doh"] = "plain"
-    block_doh: bool = False
-    block_dot: bool = False
-    block_quic: bool = False
+    block_doh: StrictBool = False
+    block_dot: StrictBool = False
+    block_quic: StrictBool = False
     ipv6: Literal["route", "block", "off"] = "route"
 
     @model_validator(mode="after")
@@ -107,11 +114,18 @@ class LeakSettings(_Model):
                 raise ValueError("dns_server TLS name must be a valid DNS hostname")
         if "%" in address_text:
             raise ValueError("dns_server must use an unscoped IP address")
+        if "@" in value and self.dns_protocol == "plain":
+            raise ValueError("plain dns_server must not include a TLS name")
         try:
             address = ipaddress.ip_address(address_text)
         except ValueError as exc:
             raise ValueError("dns_server must be an IP address or tls-name@IP") from exc
-        if address.is_loopback or address.is_unspecified or address.is_multicast:
+        if (
+            address.is_loopback
+            or address.is_unspecified
+            or address.is_multicast
+            or str(address) == "255.255.255.255"
+        ):
             raise ValueError("dns_server must be a remote unicast IP address")
         return self
 
@@ -140,6 +154,20 @@ class Policy(_Model):
 class Settings(_Model):
     probe_targets: tuple[str, ...] = ("1.1.1.1:443",)
     probe_interval: float = 15.0
+
+    @field_validator("probe_interval", mode="before")
+    @classmethod
+    def _probe_interval_type(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("probe_interval must be a number")
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError as exc:
+                raise ValueError("probe_interval must be a number") from exc
+        if not isinstance(value, (int, float)):
+            raise ValueError("probe_interval must be a number")
+        return value
 
     @model_validator(mode="after")
     def _interval(self) -> Settings:

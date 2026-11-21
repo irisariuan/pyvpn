@@ -28,8 +28,20 @@ def load_config_text(text: str, source: str = "<string>") -> Config:
     def reject_constant(value: str) -> None:
         raise ConfigFileError(f"{source}: invalid JSON constant: {value}")
 
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ConfigFileError(f"{source}: duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
     try:
-        document = json.loads(text, parse_constant=reject_constant)
+        document = json.loads(
+            text,
+            parse_constant=reject_constant,
+            object_pairs_hook=reject_duplicate_keys,
+        )
     except json.JSONDecodeError as exc:
         raise ConfigFileError(
             f"{source}: invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}"

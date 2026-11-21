@@ -61,3 +61,15 @@ def test_load_config_rejects_unsupported_version() -> None:
 def test_load_config_rejects_nonfinite_json_constant(constant: str) -> None:
     with pytest.raises(ConfigFileError, match="invalid JSON constant"):
         load_config_text(f'{{"settings":{{"probe_interval":{constant}}}}}')
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"version":1,"version":1,"targets":[]}',
+        '{"targets":[{"name":"vpn","name":"duplicate","interface":"tun0"}]}',
+    ],
+)
+def test_load_config_rejects_duplicate_keys(text: str) -> None:
+    with pytest.raises(ConfigFileError, match="duplicate JSON key"):
+        load_config_text(text)

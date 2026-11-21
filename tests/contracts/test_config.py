@@ -226,9 +226,59 @@ def test_dns_server_accepts_remote_unicast_or_tls_address(dns_server: str) -> No
                     "name": "p",
                     "targets": ["vpn"],
                     "apps": [{"name": "ssh"}],
-                    "leak": {"dns_server": dns_server},
+                    "leak": {
+                        "dns_server": dns_server,
+                        "dns_protocol": "dot" if "@" in dns_server else "plain",
+                    },
                 }
             ],
         }
     )
     assert config.policies[0].leak.dns_server == dns_server
+
+
+@pytest.mark.parametrize("uid", [True, False])
+def test_uid_rejects_boolean(uid: bool) -> None:
+    with pytest.raises(ValidationError):
+        AppSelector(uid=uid)
+
+
+@pytest.mark.parametrize("interval", [True, False])
+def test_probe_interval_rejects_boolean(interval: bool) -> None:
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [{"name": "p", "targets": ["vpn"], "apps": [{"name": "ssh"}]}],
+                "settings": {"probe_interval": interval},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["probe", "dns_via_target", "block_doh", "block_dot", "block_quic"],
+)
+def test_boolean_fields_reject_strings(field: str) -> None:
+    with pytest.raises(ValidationError):
+        if field == "probe":
+            Config.model_validate(
+                {
+                    "targets": [{"name": "vpn", "interface": "tun0", "probe": "true"}],
+                    "policies": [{"name": "p", "targets": ["vpn"], "apps": [{"name": "ssh"}]}],
+                }
+            )
+        else:
+            Config.model_validate(
+                {
+                    "targets": [{"name": "vpn", "interface": "tun0"}],
+                    "policies": [
+                        {
+                            "name": "p",
+                            "targets": ["vpn"],
+                            "apps": [{"name": "ssh"}],
+                            "leak": {field: "true"},
+                        }
+                    ],
+                }
+            )
