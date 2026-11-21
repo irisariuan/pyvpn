@@ -67,7 +67,7 @@ def render_desktop_file(
         "[Desktop Entry]\n"
         "Type=Application\n"
         f"Name=pyvpn {_desktop_escape(policy)}\n"
-        f'Exec={_desktop_escape(executable)} run -p "{_desktop_escape(policy)}" -- %F\n'
+        f'Exec="{_desktop_escape(executable)}" run -p "{_desktop_escape(policy)}" -- %F\n'
         "Terminal=true\n"
         "Categories=Network;\n"
     )

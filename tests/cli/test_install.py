@@ -29,8 +29,13 @@ def test_render_systemd_unit_rejects_multiline_executable() -> None:
 def test_render_desktop_file() -> None:
     entry = render_desktop_file("Japan browsing")
     assert "Name=pyvpn Japan browsing" in entry
-    assert 'Exec=/usr/bin/pyvpn run -p "Japan browsing" -- %F' in entry
+    assert 'Exec="/usr/bin/pyvpn" run -p "Japan browsing" -- %F' in entry
     assert "Terminal=true" in entry
+
+
+def test_render_desktop_file_quotes_executable_with_spaces() -> None:
+    entry = render_desktop_file("Japan", "/opt/My App/bin/pyvpn")
+    assert 'Exec="/opt/My App/bin/pyvpn" run -p "Japan" -- %F' in entry
 
 
 def test_render_desktop_file_rejects_empty_policy() -> None:
