@@ -245,6 +245,26 @@ Fail-back hold and the latency-based selection are ported from snake's
 Already-open sockets keep their route; new connections follow the new
 cgroup (as in snake: "connections keep their route").
 
+Policy names are unique. Reload, and a daemon restart, keep each policy
+that has used an app cgroup at the same position in the config (the
+reserved positions are saved in the daemon's state file, since rules and
+cgroups outlive the daemon). A state file that exists but cannot be read
+stops the daemon from starting rather than losing those reservations.
+DNS-learned destinations are saved there too and restored before the
+first apply, so a restart keeps governing addresses that apps have cached
+(for policies whose name and domain rules are unchanged or only extended).
+The daemon also refuses configs it cannot enforce: destination rules
+without a rule matcher, `dns_via_target` without a DNS service, hostname
+rules without `dns_via_target` (only the policy's DNS stub can learn their
+addresses), and, on reload, changed target definitions (the target
+watcher is set up at start).
+Existing cgroups can still contain running apps after an app selector is
+changed or removed, so reload rejects changes that would remove or reuse
+those positions. Reload can still update policy settings, append policies,
+and edit domain-only policies that have never used an app cgroup when
+those changes preserve the reserved positions. The daemon saves new
+reservations before applying a routing plan or moving a process.
+
 ### 3.4 Destination filters (optional, from snake)
 
 A policy with only apps sends **all** of their traffic through the target. A
@@ -318,6 +338,9 @@ snake. snake's Domain VPN Routing importer is not ported (router-only).
   SERVFAIL if the target or DNS upstream is unavailable, including during
   routing fallback to the host default route. The daemon's bound upstream sockets
   must be exempt from port-53 redirection so queries cannot loop into a stub.
+* Reload stops the existing policy DNS listeners before applying the new
+  routes. The daemon activates the new matcher before reopening listeners,
+  so an answer cannot use the previous config's matching rules.
 * Other apps keep the system resolver. **pyvpn does not take over system
   DNS.**
 * Per-policy leak toggles (snake's): block DoT 853, block known DoH
@@ -399,6 +422,17 @@ The root daemon owns nft, routes and cgroups. The CLI and `pyvpn run` are
 unprivileged: `run` asks the daemon over the unix socket to place its own
 PID in the policy's cgroup, then `exec`s the command, so the user's
 environment and desktop session are kept.
+
+The daemon locks its socket's companion lock file before changing routing
+and holds the lock through shutdown. It binds the API socket during startup
+and begins serving requests after the initial install attempt.
+
+`pyvpn disable` removes every rule and stub and stays in effect, across
+daemon restarts (the enabled flag is in the daemon's state file), until the
+API's `enable` call. `reload` while disabled loads and binds the new config
+but installs nothing; it never re-enables routing on its own. While
+disabled, `place_pid` returns `unavailable` and `status` reports each
+policy as `not_installed`.
 
 ## 7. Milestones
 
