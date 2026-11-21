@@ -119,7 +119,7 @@ def _run_status(client: DaemonClient, as_json: bool) -> int:
     if as_json:
         print_json(result)
     else:
-        print(format_status(result if isinstance(result, dict) else {}))
+        print(format_status(result))
     return 0
 
 

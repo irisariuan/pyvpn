@@ -47,6 +47,18 @@ def test_status_formatter_rejects_malformed_policies() -> None:
     assert "policies must be a list" in output
 
 
+def test_status_human_output_preserves_malformed_result(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "daemon.sock"
+    thread = fake_daemon(path, {"id": 1, "ok": True, "result": "bad-status"})
+
+    assert main(["--socket", str(path), "status"]) == 0
+    join(thread)
+    assert "malformed daemon status" in capsys.readouterr().out
+
+
 def test_audit_formatter_rejects_malformed_policies() -> None:
     output = format_audit({"enabled": True, "policies": "Japan"})
     assert "policies: malformed" in output
