@@ -36,7 +36,15 @@ from pyvpn.daemon.client import (
     DaemonClient,
     DaemonClientError,
 )
-from pyvpn.rulefile.commands import check_config
+from pyvpn.rulefile.commands import (
+    check,
+    check_config,
+    explain_config,
+    explain_rules,
+    export_policy,
+    import_notes,
+    import_rules,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -84,6 +92,25 @@ def build_parser() -> argparse.ArgumentParser:
     desktop.add_argument("--root", default=None, help="redirect absolute destinations for testing")
     desktop.add_argument("--write", action="store_true", help="write the generated desktop file")
     desktop.add_argument("--output", default=None, help="write to an explicit path")
+
+    rules = commands.add_parser("rules", help="check or convert snake rule files")
+    rules_commands = rules.add_subparsers(dest="rules_command", required=True)
+
+    rules_check = rules_commands.add_parser("check", help="check a rule file")
+    rules_check.add_argument("file", help="rule file")
+    rules_check.add_argument("--convert", action="store_true", help="accept foreign list formats")
+
+    rules_test = rules_commands.add_parser("test", help="test rule matching")
+    rules_test.add_argument("source", help="rule file or config policy/name")
+    rules_test.add_argument("names", nargs="*", help="DNS name chain")
+    rules_test.add_argument("--config", default=None, help="configuration JSON path")
+
+    rules_import = rules_commands.add_parser("import", help="convert a rule list")
+    rules_import.add_argument("file", help="source rule file")
+
+    rules_export = rules_commands.add_parser("export", help="export a config policy")
+    rules_export.add_argument("policy", help="policy name")
+    rules_export.add_argument("--config", default=None, help="configuration JSON path")
     return parser
 
 
@@ -186,7 +213,18 @@ def _run_app(args: argparse.Namespace) -> int:
         print("pyvpn: a command is required", file=sys.stderr)
         return 1
     policy: str | int = args.policy
-    if args.policy.isdigit():
+    if args.policy.startswith("id:"):
+        policy_text = args.policy[3:]
+        if not policy_text.isdigit():
+            print("pyvpn: policy id must be a positive integer", file=sys.stderr)
+            return 1
+        policy = int(policy_text)
+    elif args.policy.startswith("name:"):
+        policy = args.policy[5:]
+        if not policy:
+            print("pyvpn: policy name must not be empty", file=sys.stderr)
+            return 1
+    elif args.policy.isdigit():
         policy = int(args.policy)
     try:
         run_app(
@@ -262,6 +300,69 @@ def _run_desktop(args: argparse.Namespace, as_json: bool) -> int:
     return 0
 
 
+def _read_text_file(path: str) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
+
+
+def _run_rules(args: argparse.Namespace, as_json: bool) -> int:
+    if args.rules_command == "check":
+        text = _read_text_file(args.file)
+        result = check(text, args.file, convert=args.convert)
+        if as_json:
+            print_json({"ok": result.code == 0, "output": result.output})
+        else:
+            sys.stdout.write(result.output)
+        return result.code
+
+    if args.rules_command == "test":
+        if args.config:
+            config = load_config(args.config)
+            result = explain_config(config, [args.source, *args.names])
+        else:
+            text = _read_text_file(args.source)
+            result = explain_rules(text.splitlines(), args.names)
+        if as_json:
+            print_json({"ok": result.code == 0, "output": result.output})
+        else:
+            sys.stdout.write(result.output)
+        return result.code
+
+    if args.rules_command == "import":
+        text = _read_text_file(args.file)
+        result, rule_file = import_rules(text, args.file)
+        if as_json:
+            print_json(
+                {
+                    "ok": result.code == 0,
+                    "output": result.output,
+                    "domains": list(rule_file.domains),
+                    "asns": list(rule_file.asns),
+                    "cidrs": list(rule_file.cidrs),
+                }
+            )
+        else:
+            sys.stdout.write(import_notes(text, args.file))
+            sys.stdout.write(result.output)
+        return result.code
+
+    if args.rules_command == "export":
+        config = load_config(args.config)
+        policy = next((item for item in config.policies if item.name == args.policy), None)
+        if policy is None:
+            raise ConfigError(f"policy not found: {args.policy}")
+        result = export_policy(policy)
+        if as_json:
+            print_json({"ok": result.code == 0, "output": result.output})
+        else:
+            sys.stdout.write(result.output)
+        return result.code
+
+    raise AssertionError("unhandled rules command")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -291,6 +392,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_install(args, args.json)
         if args.command == "desktop":
             return _run_desktop(args, args.json)
+        if args.command == "rules":
+            return _run_rules(args, args.json)
     except (ConfigError, DaemonClientError, InstallError) as exc:
         print(f"pyvpn: {exc}", file=sys.stderr)
         return 1

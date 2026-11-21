@@ -214,6 +214,56 @@ def test_run_numeric_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen == [2]
 
 
+def test_run_explicit_policy_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[object] = []
+
+    def fake_run(
+        policy: str | int,
+        command: list[str],
+        *,
+        socket_path: object,
+        isolation: str,
+    ) -> None:
+        seen.append(policy)
+
+    monkeypatch.setattr("pyvpn.cli.run_app", fake_run)
+
+    assert main(["run", "-p", "name:2", "--", "true"]) == 0
+    assert seen == ["2"]
+
+
+def test_rules_check(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "example.rules"
+    path.write_text("example.com\n", encoding="utf-8")
+
+    assert main(["rules", "check", str(path)]) == 0
+    assert "domain rules" in capsys.readouterr().out
+
+
+def test_rules_test_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        '{"targets":[{"name":"jp","interface":"tun0"}],'
+        '"policies":[{"name":"Japan","targets":["jp"],"domains":["example.com"]}]}',
+        encoding="utf-8",
+    )
+
+    assert main(["rules", "test", "example.com", "--config", str(path)]) == 0
+    assert "policy 'Japan'" in capsys.readouterr().out
+
+
+def test_rules_export(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        '{"targets":[{"name":"jp","interface":"tun0"}],'
+        '"policies":[{"name":"Japan","targets":["jp"],"domains":["example.com"]}]}',
+        encoding="utf-8",
+    )
+
+    assert main(["rules", "export", "Japan", "--config", str(path)]) == 0
+    assert "example.com" in capsys.readouterr().out
+
+
 def test_run_normalizes_network_namespace_error(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
