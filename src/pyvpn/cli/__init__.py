@@ -75,7 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = commands.add_parser("run", help="place a launched process in a policy")
     run.add_argument("-p", "--policy", required=True, help="policy name or id")
-    run.add_argument("--socket", default=None, help="daemon socket path")
+    run.add_argument("--socket", default=argparse.SUPPRESS, help="daemon socket path")
     run.add_argument("--isolation", choices=("none", "netns"), default="none")
     run.add_argument("command_args", nargs=argparse.REMAINDER, help="command and arguments")
 
