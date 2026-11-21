@@ -6,6 +6,8 @@ is checked here.
 
 from __future__ import annotations
 
+import ipaddress
+import math
 from ipaddress import IPv4Address, IPv6Address
 from typing import Literal
 
@@ -45,6 +47,16 @@ class AppSelector(_Model):
     snap: str | None = None
 
     @model_validator(mode="after")
+    def _valid_selector(self) -> AppSelector:
+        for field in ("exe", "name", "unit", "user", "flatpak", "snap"):
+            value = getattr(self, field)
+            if value is not None and not value.strip():
+                raise ValueError(f"{field} selector must not be empty")
+        if self.uid is not None and not 0 <= self.uid <= 4294967294:
+            raise ValueError("uid must be between 0 and 4294967294")
+        return self
+
+    @model_validator(mode="after")
     def _exactly_one(self) -> AppSelector:
         if sum(v is not None for v in self.model_dump().values()) != 1:
             raise ValueError("an app selector needs exactly one field")
@@ -76,6 +88,33 @@ class LeakSettings(_Model):
     block_quic: bool = False
     ipv6: Literal["route", "block", "off"] = "route"
 
+    @model_validator(mode="after")
+    def _dns_server(self) -> LeakSettings:
+        if self.dns_server is None:
+            return self
+        value = self.dns_server.strip()
+        if not value:
+            raise ValueError("dns_server must not be empty")
+        name = None
+        address_text = value
+        if "@" in value:
+            name, address_text = value.split("@", 1)
+            if not name or "@" in address_text:
+                raise ValueError("dns_server must use tls-name@address")
+            if not name.isascii() or any(
+                not (character.isalnum() or character in ".-") for character in name
+            ):
+                raise ValueError("dns_server TLS name must be a valid DNS hostname")
+        if "%" in address_text:
+            raise ValueError("dns_server must use an unscoped IP address")
+        try:
+            address = ipaddress.ip_address(address_text)
+        except ValueError as exc:
+            raise ValueError("dns_server must be an IP address or tls-name@IP") from exc
+        if address.is_loopback or address.is_unspecified or address.is_multicast:
+            raise ValueError("dns_server must be a remote unicast IP address")
+        return self
+
 
 class Policy(_Model):
     name: str
@@ -104,8 +143,23 @@ class Settings(_Model):
 
     @model_validator(mode="after")
     def _interval(self) -> Settings:
-        if self.probe_interval <= 0:
-            raise ValueError("probe_interval must be greater than zero")
+        if not math.isfinite(self.probe_interval) or self.probe_interval <= 0:
+            raise ValueError("probe_interval must be a finite value greater than zero")
+        for target in self.probe_targets:
+            host, separator, port_text = target.rpartition(":")
+            if not separator or not host or not port_text:
+                raise ValueError(f"invalid probe target: {target!r}")
+            if host.startswith("[") and host.endswith("]"):
+                host = host[1:-1]
+            try:
+                ipaddress.ip_address(host)
+            except ValueError as exc:
+                raise ValueError("probe targets must use IP literals") from exc
+            if not port_text.isascii() or not port_text.isdigit():
+                raise ValueError(f"invalid probe port: {port_text}")
+            port = int(port_text)
+            if not 1 <= port <= 65535:
+                raise ValueError(f"invalid probe port: {port}")
         return self
 
 

@@ -24,8 +24,12 @@ def default_config_path() -> Path:
 
 def load_config_text(text: str, source: str = "<string>") -> Config:
     """parse, migrate, and validate a JSON configuration string."""
+
+    def reject_constant(value: str) -> None:
+        raise ConfigFileError(f"{source}: invalid JSON constant: {value}")
+
     try:
-        document = json.loads(text)
+        document = json.loads(text, parse_constant=reject_constant)
     except json.JSONDecodeError as exc:
         raise ConfigFileError(
             f"{source}: invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}"

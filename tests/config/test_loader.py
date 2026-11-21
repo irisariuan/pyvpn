@@ -55,3 +55,9 @@ def test_load_config_reads_json_file(tmp_path: Path) -> None:
 def test_load_config_rejects_unsupported_version() -> None:
     with pytest.raises(ConfigValidationError, match="unsupported configuration version 2"):
         load_config_text('{"version":2}')
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_load_config_rejects_nonfinite_json_constant(constant: str) -> None:
+    with pytest.raises(ConfigFileError, match="invalid JSON constant"):
+        load_config_text(f'{{"settings":{{"probe_interval":{constant}}}}}')
