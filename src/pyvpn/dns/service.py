@@ -149,22 +149,24 @@ class PolicyDnsService:
         if isinstance(matcher, _ScopedMatcher):
             matcher = matcher.scoped(plan.policy_id)
         prefixes = inherited or {(): float("inf")}
-        owners: dict[IPv4Network | IPv6Network, int | None] = {}
+        owners: dict[IPv4Network | IPv6Network, int] = {}
         for path, addresses in paths.addresses.items():
             winners = {_match_chain(matcher, prefix + path) for prefix in prefixes}
             # The same question might be a direct lookup. A cached exclusion
             # must never remove a policy that protects the endpoint on its own.
             if inherited and (direct := _match_chain(matcher, path)) is not None:
                 winners.add(direct)
-            if len(winners) != 1:
+            winners.discard(None)
+            if len(winners) > 1:
                 raise RuntimeError("shared DNS alias has conflicting routing policies")
+            if not winners:
+                continue
             winner = winners.pop()
+            assert winner is not None
             for address in addresses:
                 if owners.setdefault(address, winner) != winner:
                     raise RuntimeError("shared DNS address has conflicting routing policies")
         for policy_id in set(owners.values()):
-            if policy_id is None:
-                continue
             if self._callback is None:
                 raise RuntimeError("DNS destination publication is unavailable")
             await self._callback(

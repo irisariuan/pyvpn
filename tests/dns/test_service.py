@@ -735,9 +735,8 @@ def test_excluded_alias_cannot_suppress_direct_policy(kind: str) -> None:
         backend.sets.clear()
         assert (await lookup("excluded.example.")).rcode() == dns.rcode.NOERROR
         reply = await lookup("edge.example.")
-        assert reply.rcode() == dns.rcode.SERVFAIL
-        assert not reply.answer
-        assert not backend.sets
+        assert reply.rcode() == dns.rcode.NOERROR
+        assert [ds.policy_id for ds in backend.sets] == [1]
 
     asyncio.run(run())
 
@@ -987,5 +986,52 @@ def test_negative_authority_is_not_a_nameserver_referral(tmp_path: Path) -> None
             wire = await stub.answer(dns.message.make_query(name, "A").to_wire(), tcp=False)
             assert dns.message.from_wire(wire).rcode() == dns.rcode.NOERROR
         assert not backend.sets
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind", ["CNAME", "HTTPS", "SVCB"])
+@pytest.mark.parametrize("second_policy", [None, 2], ids=["unclaimed", "conflicting"])
+def test_shared_endpoint_uses_only_positive_claims(kind: str, second_policy: int | None) -> None:
+    claims = {"protected.example": 1}
+    if second_policy is not None:
+        claims["other.example"] = second_policy
+    matcher = FakeRuleMatcher(claims)
+    backend = FakeBackend()
+
+    async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
+        question = query.question[0]
+        response = dns.message.make_response(query)
+        if question.rdtype == dns.rdatatype.A:
+            record = dns.rrset.from_text(question.name, 60, "IN", "A", "192.0.2.8")
+        else:
+            target = "edge.example." if kind == "CNAME" else "0 edge.example."
+            record = dns.rrset.from_text(question.name, 60, "IN", kind, target)
+        response.answer.append(record)
+        return dns.message.from_wire(response.to_wire())
+
+    async def run() -> None:
+        service = PolicyDnsService(upstream, matcher_factory=lambda: matcher)
+        service.on_answer(backend.add_to_set)
+        stub = _Stub(service, _plan())
+
+        async def query(name: str, rdtype: str) -> dns.message.Message:
+            wire = await stub.answer(dns.message.make_query(name, rdtype).to_wire(), tcp=True)
+            return dns.message.from_wire(wire)
+
+        for origin in ("protected.example.", "other.example."):
+            assert (await query(origin, kind)).rcode() == dns.rcode.NOERROR
+        backend.fail_add = True
+        failed = await query("edge.example.", "A")
+        assert failed.rcode() == dns.rcode.SERVFAIL and not failed.answer
+        backend.fail_add = False
+        reply = await query("edge.example.", "A")
+        if second_policy is None:
+            assert reply.rcode() == dns.rcode.NOERROR
+            assert reply.answer[0][0].address == "192.0.2.8"
+            assert backend.sets == [DestSet(1, v4=frozenset({ip_network("192.0.2.8")}))]
+        else:
+            assert reply.rcode() == dns.rcode.SERVFAIL and not reply.answer
+            assert not backend.sets
 
     asyncio.run(run())

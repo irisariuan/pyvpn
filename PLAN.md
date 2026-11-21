@@ -260,13 +260,15 @@ targets (including nameservers in a referral), plus CNAMEs returned for other qu
 Bundled endpoint addresses and separate A/AAAA lookups use the same policy.
 Follow-up queries, including those received after a restart, match the
 remembered prefix and the new answer together against the active rules.
-A policy that independently matches the direct lookup must agree with the
-remembered paths before the stub releases an address. Each hop bounds the
+For a shared endpoint, a single matching policy governs the address even
+when other cached paths have no match. A direct match also participates. Each hop bounds the
 path's TTL. After the durable write, the stub caps each returned alias link's
 TTL at the whole seconds still covered and withholds an expired link.
 If indistinguishable live paths select
 different policies, or publication or alias storage fails, the stub returns
-SERVFAIL. The daemon composition root supplies the active rule
+SERVFAIL. A shared lock serializes publication and alias storage across stubs,
+so a slow update can consume another query’s five-second timeout.
+The daemon composition root supplies the active rule
 matcher to all stubs, including app-only stubs.
 
 ### 3.5 Per-app DNS and leaks
