@@ -215,7 +215,7 @@ def _run_app(args: argparse.Namespace) -> int:
     policy: str | int = args.policy
     if args.policy.startswith("id:"):
         policy_text = args.policy[3:]
-        if not policy_text.isdigit():
+        if not policy_text.isascii() or not policy_text.isdigit():
             print("pyvpn: policy id must be a positive integer", file=sys.stderr)
             return 1
         policy = int(policy_text)
@@ -224,7 +224,7 @@ def _run_app(args: argparse.Namespace) -> int:
         if not policy:
             print("pyvpn: policy name must not be empty", file=sys.stderr)
             return 1
-    elif args.policy.isdigit():
+    elif args.policy.isascii() and args.policy.isdigit():
         policy = int(args.policy)
     try:
         run_app(

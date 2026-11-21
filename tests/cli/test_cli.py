@@ -241,6 +241,15 @@ def test_run_numeric_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen == [2]
 
 
+@pytest.mark.parametrize("policy", ["²", "٣"])
+def test_run_rejects_non_ascii_numeric_policy(
+    policy: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["run", "-p", f"id:{policy}", "--", "true"]) == 1
+    assert "policy id must be a positive integer" in capsys.readouterr().err
+
+
 def test_run_explicit_policy_name(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[object] = []
 
