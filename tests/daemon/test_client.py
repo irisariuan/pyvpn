@@ -163,3 +163,21 @@ def test_place_pid_params(tmp_path: Path) -> None:
 
     join(thread)
     assert seen[0]["params"] == {"pid": 123, "policy": "Japan"}
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan"), True])
+def test_daemon_client_rejects_invalid_timeout(tmp_path: Path, timeout: float) -> None:
+    with pytest.raises(ValueError, match="timeout"):
+        DaemonClient(tmp_path / "daemon.sock", timeout=timeout)
+
+
+@pytest.mark.parametrize("pid", [0, -1, True])
+def test_place_pid_rejects_invalid_pid(pid: int) -> None:
+    with pytest.raises(ValueError, match="pid"):
+        DaemonClient().place_pid(pid, "Japan")
+
+
+@pytest.mark.parametrize("policy", ["", "   ", True])
+def test_place_pid_rejects_invalid_policy(policy: str | bool) -> None:
+    with pytest.raises(ValueError, match="policy"):
+        DaemonClient().place_pid(123, policy)

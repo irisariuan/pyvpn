@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import socket
 from pathlib import Path
 from typing import Any, cast
@@ -97,8 +98,12 @@ class DaemonClient:
         *,
         timeout: float = 2.0,
     ) -> None:
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            raise ValueError("daemon timeout must be a finite positive number")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("daemon timeout must be a finite positive number")
         self.socket_path = str(socket_path)
-        self.timeout = timeout
+        self.timeout = float(timeout)
         self._next_id = 1
 
     def request(self, method: str, params: dict[str, Any] | None = None) -> Any:
@@ -150,6 +155,15 @@ class DaemonClient:
         return self.request("reload")
 
     def place_pid(self, pid: int, policy: str | int) -> Any:
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            raise ValueError("pid must be a positive integer")
+        if isinstance(policy, bool):
+            raise ValueError("policy must be a non-empty name or policy id")
+        if isinstance(policy, int):
+            if not 1 <= policy <= 99:
+                raise ValueError("policy id must be between 1 and 99")
+        elif not policy.strip():
+            raise ValueError("policy name must not be empty")
         return self.request("place_pid", {"pid": pid, "policy": policy})
 
     def disable(self) -> Any:
