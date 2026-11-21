@@ -1035,3 +1035,71 @@ def test_shared_endpoint_uses_only_positive_claims(kind: str, second_policy: int
             assert not backend.sets
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("tcp", [False, True])
+def test_dname_only_releases_the_tracked_host_redirect(tcp: bool) -> None:
+    backend = FakeBackend()
+
+    async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
+        response = dns.message.make_response(query)
+        name = query.question[0].name
+        if name.is_subdomain(dns.name.from_text("old.example.")):
+            target = name.labels[0].decode() + ".new.example."
+            response.answer.extend(
+                [
+                    dns.rrset.from_text("old.example.", 120, "IN", "DNAME", "new.example."),
+                    dns.rrset.from_text(name, 60, "IN", "CNAME", target),
+                ]
+            )
+        else:
+            response.answer.append(dns.rrset.from_text(name, 60, "IN", "A", "192.0.2.8"))
+        return dns.message.from_wire(response.to_wire())
+
+    async def run() -> None:
+        matcher = FakeRuleMatcher({"protected.old.example": 1})
+        service = PolicyDnsService(upstream, matcher_factory=lambda: matcher)
+        service.on_answer(backend.add_to_set)
+        stub = _Stub(service, _plan())
+        for label in ("public", "protected"):
+            name = label + ".old.example."
+            query = dns.message.make_query(name, "A")
+            reply = dns.message.from_wire(await stub.answer(query.to_wire(), tcp=tcp))
+            assert reply.rcode() == dns.rcode.NOERROR
+            [alias] = reply.answer
+            assert alias.rdtype == dns.rdatatype.CNAME
+            follow = dns.message.make_query(alias[0].target, "A")
+            reply = dns.message.from_wire(await stub.answer(follow.to_wire(), tcp=tcp))
+            assert reply.answer[0][0].address == "192.0.2.8"
+        assert backend.sets == [DestSet(1, v4=frozenset({ip_network("192.0.2.8")}))]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("kind", "dnssec", "target"),
+    [
+        ("DNAME", False, None),
+        ("A", True, "www.new.example."),
+        ("A", False, None),
+        ("A", False, "wrong.example."),
+    ],
+)
+def test_dname_fails_closed_without_a_usable_host_only_reply(
+    kind: str, dnssec: bool, target: str | None
+) -> None:
+    async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
+        reply = dns.message.make_response(query)
+        reply.answer.append(dns.rrset.from_text("old.example.", 60, "IN", "DNAME", "new.example."))
+        if target:
+            reply.answer.append(
+                dns.rrset.from_text(query.question[0].name, 60, "IN", "CNAME", target)
+            )
+        return dns.message.from_wire(reply.to_wire())
+
+    name = "old.example." if kind == "DNAME" else "www.old.example."
+    query = dns.message.make_query(name, kind, want_dnssec=dnssec)
+    stub = _Stub(PolicyDnsService(upstream, matcher_factory=lambda: FakeRuleMatcher({})), _plan())
+    reply = dns.message.from_wire(asyncio.run(stub.answer(query.to_wire(), tcp=True)))
+    assert reply.rcode() == dns.rcode.SERVFAIL
+    assert not reply.answer and not reply.authority and not reply.additional

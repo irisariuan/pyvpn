@@ -257,6 +257,10 @@ hints. Before releasing a cacheable alias, the stub records its name path,
 DNS class, listener policy ID, and expiry in the daemon's private
 `dns-aliases.sqlite3` state file. Tracking follows the records in the reply. This includes SRV, MX and NS
 targets (including nameservers in a referral), plus CNAMEs returned for other query types or alongside NXDOMAIN.
+The stub narrows DNAME redirects to the verified, host-specific synthesized
+CNAME before replying, so sibling names must go through policy matching.
+It returns SERVFAIL when the subtree record itself or DNSSEC proof is
+requested, or when the redirect has no verifiable CNAME in the answer chain.
 Bundled endpoint addresses and separate A/AAAA lookups use the same policy.
 Follow-up queries, including those received after a restart, match the
 remembered prefix and the new answer together against the active rules.

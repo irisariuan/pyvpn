@@ -330,6 +330,8 @@ class _Stub(asyncio.DatagramProtocol):
         response = await self.service._upstream(plan, outgoing)
         if not outgoing.is_response(response) or response.flags & dns.flags.TC:
             return _error(query, dns.rcode.SERVFAIL)
+        if not _narrow_dname(query, response):
+            return _error(query, dns.rcode.SERVFAIL)
         return response
 
     @staticmethod
@@ -342,6 +344,52 @@ def _error(query: dns.message.Message, code: dns.rcode.Rcode) -> dns.message.Mes
     response = dns.message.make_response(query, recursion_available=True)
     response.set_rcode(code)
     return response
+
+
+def _narrow_dname(query: dns.message.Message, response: dns.message.Message) -> bool:
+    """Expose only the synthesized CNAME that the policy matcher can track."""
+    redirects = [rr for rr in response.answer if rr.rdtype == dns.rdatatype.DNAME]
+    if any(rr.rdtype == dns.rdatatype.DNAME for rr in (*response.authority, *response.additional)):
+        return False
+    if not redirects:
+        return True
+    if (
+        not isinstance(response, dns.message.QueryMessage)
+        or response.rcode() not in (dns.rcode.NOERROR, dns.rcode.NXDOMAIN)
+        or query.question[0].rdtype in (dns.rdatatype.DNAME, dns.rdatatype.ANY)
+        or query.ednsflags & dns.flags.DO
+        or query.flags & dns.flags.AD
+    ):
+        return False
+
+    chain = response.resolve_chaining()
+    cnames = list(chain.cnames)
+    if chain.answer is not None and chain.answer.rdtype == dns.rdatatype.CNAME:
+        cnames.append(chain.answer)
+    for redirect in redirects:
+        if len(redirect) != 1 or not any(
+            alias.rdclass == redirect.rdclass
+            and alias.name != redirect.name
+            and alias.name.is_subdomain(redirect.name)
+            and alias[0].target
+            == alias.name.relativize(redirect.name).concatenate(redirect[0].target)
+            for alias in cnames
+        ):
+            return False
+
+    response.answer[:] = [
+        rr
+        for rr in response.answer
+        if rr.rdtype != dns.rdatatype.DNAME and rr.covers != dns.rdatatype.DNAME
+    ]
+    if response.index is not None:
+        for key, rr in list(response.index.items()):
+            if key[0] == dns.message.MessageSection.ANSWER and (
+                rr.rdtype == dns.rdatatype.DNAME or rr.covers == dns.rdatatype.DNAME
+            ):
+                del response.index[key]
+    response.flags &= ~dns.flags.AD
+    return True
 
 
 def _domain(name: dns.name.Name) -> str:
