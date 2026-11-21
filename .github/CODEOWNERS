@@ -1,10 +1,10 @@
 # Stream A - Config & CLI
 /src/pyvpn/config/ @cpu-catten
 /src/pyvpn/cli/ @cpu-catten
-/src/pyvpn/daemon/client.py @cpu-catten
 
 # Stream B - Daemon core
 /src/pyvpn/daemon/ @irisariuan
+/src/pyvpn/daemon/client.py @cpu-catten
 
 # Stream C - Linux routing & netfilter
 /src/pyvpn/netfilter/ @Daydreaming-Mr
