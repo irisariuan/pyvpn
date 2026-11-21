@@ -199,6 +199,7 @@ def _run_app(args: argparse.Namespace) -> int:
         DaemonClientError,
         LauncherUnavailable,
         NetworkNamespaceUnavailable,
+        OSError,
         ValueError,
     ) as exc:
         print(f"pyvpn: {exc}", file=sys.stderr)

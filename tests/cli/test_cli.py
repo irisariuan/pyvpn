@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from pyvpn.cli import main
+from pyvpn.cli.output import format_audit, format_status, print_json
 
 VALID_CONFIG = """
 {
@@ -39,6 +40,24 @@ def fake_daemon(
 def join(thread: threading.Thread) -> None:
     thread.join(timeout=2)
     assert not thread.is_alive()
+
+
+def test_status_formatter_rejects_malformed_policies() -> None:
+    output = format_status({"enabled": True, "policies": "Japan"})
+    assert "policies must be a list" in output
+
+
+def test_audit_formatter_rejects_malformed_policies() -> None:
+    output = format_audit({"enabled": True, "policies": "Japan"})
+    assert "policies: malformed" in output
+
+
+def test_print_json_rejects_nan() -> None:
+    import io
+
+    stream = io.StringIO()
+    with pytest.raises(ValueError, match="Out of range"):
+        print_json({"value": float("nan")}, stream)
 
 
 def test_status_human_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -208,6 +227,19 @@ def test_run_normalizes_network_namespace_error(
 
     assert main(["run", "-p", "Japan", "--isolation", "netns", "--", "true"]) == 1
     assert "cannot create network namespace" in capsys.readouterr().err
+
+
+def test_run_normalizes_missing_executable(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fake_run(*args: object, **kwargs: object) -> None:
+        raise FileNotFoundError("definitely-missing")
+
+    monkeypatch.setattr("pyvpn.cli.run_app", fake_run)
+
+    assert main(["run", "-p", "Japan", "--", "definitely-missing"]) == 1
+    assert "definitely-missing" in capsys.readouterr().err
 
 
 def test_reload_human_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -11,15 +11,25 @@ def print_json(value: Any, stream: TextIO | None = None) -> None:
     """write one compact JSON document."""
     if stream is None:
         stream = sys.stdout
-    json.dump(value, stream, sort_keys=True)
+    json.dump(value, stream, allow_nan=False, sort_keys=True)
     stream.write("\n")
 
 
 def format_status(value: dict[str, Any]) -> str:
     """format a daemon status response."""
-    enabled = "enabled" if value.get("enabled") else "disabled"
+    if not isinstance(value, dict):
+        return f"malformed daemon status: expected object, got {type(value).__name__}"
+    enabled_value = value.get("enabled")
+    if not isinstance(enabled_value, bool):
+        enabled = "unknown"
+    else:
+        enabled = "enabled" if enabled_value else "disabled"
     lines = [f"daemon: {enabled}"]
-    for policy in value.get("policies", []):
+    policies = value.get("policies", [])
+    if not isinstance(policies, list):
+        lines.append("malformed daemon status: policies must be a list")
+        return "\n".join(lines)
+    for policy in policies:
         if not isinstance(policy, dict):
             continue
         name = policy.get("name", "<unnamed>")
@@ -66,9 +76,18 @@ def format_audit(value: Any) -> str:
 
     lines = []
     if "enabled" in value:
-        lines.append(f"enabled: {'yes' if value['enabled'] else 'no'}")
+        enabled = value["enabled"]
+        lines.append(
+            f"enabled: {'yes' if enabled else 'no'}"
+            if isinstance(enabled, bool)
+            else "enabled: unknown"
+        )
     if "policies" in value:
-        lines.append(f"policies: {len(value['policies'])}")
+        policies = value["policies"]
+        if isinstance(policies, list):
+            lines.append(f"policies: {len(policies)}")
+        else:
+            lines.append("policies: malformed")
     for key, result in value.items():
         if key not in {"enabled", "policies"}:
             if isinstance(result, list):
