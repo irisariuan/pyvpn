@@ -133,6 +133,9 @@ class Reconciler:
         # Learned sets saved by a previous daemon, by policy name; used once,
         # by the first config swap, before the first apply.
         self._restored: dict[str, tuple[tuple[str, ...], DestSet]] = {}
+        # Learned destinations the last save did not persist; any DNS answer
+        # retries the save before it is acknowledged.
+        self._learned_unsaved = False
         self._apply_error: str | None = None
         self._dns_error: str | None = None
         self._retry_wanted = False
@@ -172,7 +175,8 @@ class Reconciler:
             self._swap_config(config, static_sets, {})
             self.matcher = matcher
             self._committed = self._generation
-            self._notify_learned()
+            with contextlib.suppress(Exception):  # retried on the next DNS answer
+                self._notify_learned()
         await self.reconcile()
 
     async def commit_config(
@@ -208,7 +212,8 @@ class Reconciler:
                 raise
             self.matcher = matcher
             self._committed = self._generation
-            self._notify_learned()
+            with contextlib.suppress(Exception):  # retried on the next DNS answer
+                self._notify_learned()
             if plan is not None:
                 await self._sync_dns_locked(plan)
 
@@ -247,11 +252,16 @@ class Reconciler:
         return tuple(out)
 
     def _notify_learned(self) -> None:
-        if self.on_learned is not None:
-            try:
-                self.on_learned()
-            except Exception:
-                log.exception("could not save learned destinations")
+        """Persist learned destinations; a failure is remembered for retry."""
+        if self.on_learned is None:
+            return
+        try:
+            self.on_learned()
+        except Exception:
+            self._learned_unsaved = True
+            log.exception("could not save learned destinations")
+            raise
+        self._learned_unsaved = False
 
     def _swap_config(
         self,
@@ -335,8 +345,14 @@ class Reconciler:
                 self.dynamic_dests[dests.policy_id] = dests if prev is None else prev | dests
                 plans[i] = replace(p, dests=p.dests | dests)
                 self.applied = RoutingPlan(tuple(plans))
-                if self.dynamic_dests[dests.policy_id] != prev:
-                    self._notify_learned()
+                if self.dynamic_dests[dests.policy_id] != prev or self._learned_unsaved:
+                    # Only acknowledge the answer once a successor daemon will
+                    # also govern it: a failed save means SERVFAIL, and the
+                    # next answer (even for the same address) retries it.
+                    try:
+                        self._notify_learned()
+                    except Exception as e:
+                        raise DnsNotGoverned(f"could not save learned destination: {e}") from e
                 return
             raise DnsNotGoverned(f"policy {dests.policy_id} is not installed")
 

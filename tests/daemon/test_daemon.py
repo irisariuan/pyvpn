@@ -973,3 +973,34 @@ async def test_placement_refuses_a_caller_that_exits_while_waiting(rig: Rig) -> 
         os.close(r)
     assert rig.apps.placed == []
     await rig.daemon.stop()
+
+
+async def test_learned_destination_is_acknowledged_only_once_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pyvpn.daemon.reconciler import DnsNotGoverned
+
+    config = make_config()
+    office = config.policies[2].model_copy(update={"on_down": "block"})
+    rig = Rig(tmp_path, config.model_copy(update={"policies": (*config.policies[:2], office)}))
+    net = IPv4Network("203.0.113.7/32")
+    await rig.daemon.start()
+    save = rig.store.save
+
+    def fail_once(state: PersistentState) -> None:
+        monkeypatch.setattr(rig.store, "save", save)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(rig.store, "save", fail_once)
+    with pytest.raises(DnsNotGoverned, match="could not save"):
+        await rig.daemon.reconciler.add_dests(DestSet(3, frozenset({net})))
+    await rig.daemon.reconciler.add_dests(DestSet(3, frozenset({net})))  # same IP: retries
+    assert rig.store.load().learned == (("Office", ("corp.example",), (str(net),)),)
+    await rig.daemon.stop()
+
+    rig.daemon = rig.new_daemon()
+    await rig.daemon.start()
+    office_plan = rig.backend.last.policies[2]
+    assert office_plan.route == "unreachable" and office_plan.dests is not None
+    assert net in office_plan.dests.v4
+    await rig.daemon.stop()
