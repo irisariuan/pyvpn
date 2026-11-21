@@ -144,6 +144,7 @@ def test_probe_interval_must_be_finite() -> None:
         "1.1.1.1:0",
         "1.1.1.1:65536",
         "[2001:db8::1",
+        "::1:443",
     ],
 )
 def test_probe_targets_must_use_ip_and_port(target: str) -> None:

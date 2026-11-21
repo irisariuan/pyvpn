@@ -172,7 +172,9 @@ class Settings(_Model):
             host, separator, port_text = target.rpartition(":")
             if not separator or not host or not port_text:
                 raise ValueError(f"invalid probe target: {target!r}")
-            if host.startswith("[") and host.endswith("]"):
+            if ":" in host:
+                if not host.startswith("[") or not host.endswith("]"):
+                    raise ValueError("IPv6 probe targets must use brackets")
                 host = host[1:-1]
             try:
                 ipaddress.ip_address(host)
