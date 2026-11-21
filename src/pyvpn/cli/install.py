@@ -78,12 +78,14 @@ def render_desktop_file(
     if not executable.strip():
         raise InstallError("launcher executable must not be empty")
     policy_argument = f"name:{policy}"
+    fallback_command = "/bin/sh"
 
     return (
         "[Desktop Entry]\n"
         "Type=Application\n"
         f"Name=pyvpn {policy}\n"
-        f'Exec="{_desktop_escape(executable)}" run -p "{_desktop_escape(policy_argument)}" -- %F\n'
+        f'Exec="{_desktop_escape(executable)}" run -p '
+        f'"{_desktop_escape(policy_argument)}" -- {fallback_command}\n'
         "Terminal=true\n"
         "Categories=Network;\n"
     )

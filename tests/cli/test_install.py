@@ -35,28 +35,28 @@ def test_render_systemd_unit_rejects_control_characters(control: str) -> None:
 def test_render_desktop_file() -> None:
     entry = render_desktop_file("Japan browsing")
     assert "Name=pyvpn Japan browsing" in entry
-    assert 'Exec="/usr/bin/pyvpn" run -p "name:Japan browsing" -- %F' in entry
+    assert 'Exec="/usr/bin/pyvpn" run -p "name:Japan browsing" -- /bin/sh' in entry
     assert "Terminal=true" in entry
 
 
 def test_render_desktop_file_preserves_numeric_policy_name() -> None:
     entry = render_desktop_file("2")
-    assert 'run -p "name:2"' in entry
+    assert 'run -p "name:2" -- /bin/sh' in entry
 
 
 def test_render_desktop_file_quotes_executable_with_spaces() -> None:
     entry = render_desktop_file("Japan", "/opt/My App/bin/pyvpn")
-    assert 'Exec="/opt/My App/bin/pyvpn" run -p "name:Japan" -- %F' in entry
+    assert 'Exec="/opt/My App/bin/pyvpn" run -p "name:Japan" -- /bin/sh' in entry
 
 
 def test_render_desktop_file_escapes_shell_characters() -> None:
     entry = render_desktop_file("$Japan`test", "/opt/$Bin`/pyvpn")
-    assert 'Exec="/opt/\\$Bin\\`/pyvpn" run -p "name:\\$Japan\\`test" -- %F' in entry
+    assert 'Exec="/opt/\\$Bin\\`/pyvpn" run -p "name:\\$Japan\\`test" -- /bin/sh' in entry
 
 
 def test_render_desktop_file_escapes_percent_field_codes() -> None:
     entry = render_desktop_file("Japan%F", "/opt/MyApp/pyvpn%U")
-    assert 'run -p "name:Japan%%F"' in entry
+    assert 'run -p "name:Japan%%F" -- /bin/sh' in entry
     assert 'Exec="/opt/MyApp/pyvpn%%U"' in entry
 
 
