@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import pwd
 from collections.abc import AsyncIterator, Sequence
 
 from pyvpn.apps.cgroups import CgroupManager
+from pyvpn.apps.exclusions import expand, unsupported_exclusions
 from pyvpn.config.models import AppGroup, Policy
 from pyvpn.constants import policy_cgroup
 from pyvpn.state import AppBinding
@@ -18,14 +20,28 @@ class AppManager:
         self._bindings: dict[int, AppBinding] = {}
 
     async def bind(self, policy_id: int, policy: Policy, groups: Sequence[AppGroup]) -> AppBinding:
+        problems = unsupported_exclusions(policy, groups)
+        if problems:
+            # The daemon refuses such configs first; never bind one silently.
+            raise ValueError(problems[0])
         if not policy.apps:
             paths: tuple[str, ...] = ()
             if policy.domains:
                 self.cgroups.create(policy_id)
                 paths = (policy_cgroup(policy_id),)
-            binding = AppBinding(policy_id, cgroup_paths=paths, any_process=bool(policy.domains))
+            binding = AppBinding(
+                policy_id,
+                cgroup_paths=paths,
+                any_process=bool(policy.domains),
+                exclude_uids=_exclude_uids(policy, groups) if policy.domains else (),
+            )
         else:
             self.cgroups.create(policy_id)
+            if policy.exclude_apps:
+                # Pre-create the cgroup the watcher moves excluded processes
+                # to, so the ruleset applied with this binding already knows
+                # it (an unknown child of pyvpn.slice is rejected).
+                self.cgroups.create_excluded((policy_id,))
             group_map = {group.name: group.apps for group in groups}
             uids: set[int] = set()
             for ref in policy.apps:
@@ -50,6 +66,7 @@ class AppManager:
 
     async def unbind(self, policy_id: int) -> None:
         self._bindings.pop(policy_id, None)
+        self.cgroups.remove_excluded(policy_id)
         self.cgroups.remove(policy_id)
 
     async def place_pid(self, pid: int, policy_id: int) -> None:
@@ -61,3 +78,19 @@ class AppManager:
                 yield binding
 
         return generate()
+
+
+def _exclude_uids(policy: Policy, groups: Sequence[AppGroup]) -> tuple[int, ...]:
+    """``exclude_uids`` for a destination-only policy (``uid`` / ``user``)."""
+    uids: set[int] = set()
+    for selector in expand(policy.exclude_apps, groups):
+        if selector.uid is not None:
+            uids.add(selector.uid)
+        elif selector.user is not None:
+            try:
+                uids.add(pwd.getpwnam(selector.user).pw_uid)
+            except KeyError:
+                raise ValueError(
+                    f"policy {policy.name!r}: exclude_apps user {selector.user!r} does not exist"
+                ) from None
+    return tuple(sorted(uids))

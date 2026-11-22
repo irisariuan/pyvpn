@@ -33,7 +33,7 @@ from typing import Any
 from pyvpn import __version__
 from pyvpn.apps.cgroups import CgroupManager
 from pyvpn.apps.manager import AppManager
-from pyvpn.apps.watcher import Place, ProcessWatcher
+from pyvpn.apps.watcher import Exclude, Place, ProcessWatcher
 from pyvpn.audit import audit_dns
 from pyvpn.config import ConfigError, default_config_path, load_config
 from pyvpn.config.models import Config
@@ -127,8 +127,15 @@ class ProcessWatcherRunner:
     startup apply are placed once rules exist.
     """
 
-    def __init__(self, place: Place, on_failure: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self,
+        place: Place,
+        on_failure: Callable[[str], None] | None = None,
+        *,
+        exclude: Exclude | None = None,
+    ) -> None:
         self._place_pid = place
+        self._exclude = exclude
         self._on_failure = on_failure
         self._watcher: ProcessWatcher | None = None
         self._task: asyncio.Task[None] | None = None
@@ -138,7 +145,9 @@ class ProcessWatcherRunner:
     def update(self, config: Config) -> None:
         self._stop_current()
         self._deferred = False
-        watcher = ProcessWatcher(config.policies, self._place, groups=config.app_groups)
+        watcher = ProcessWatcher(
+            config.policies, self._place, exclude_pid=self._exclude, groups=config.app_groups
+        )
         self._watcher = watcher
         self._task = asyncio.ensure_future(self._run(watcher, self._on_failure))
         self._task.set_name("pyvpn-process-watcher")
@@ -277,9 +286,15 @@ def build_daemon(
     if options.watch_processes():
         # Through the daemon, never ``apps.place_pid`` directly: placement
         # must wait until the policy's rules are installed.
+        async def exclude(pid: int, policy_ids: frozenset[int]) -> None:
+            # Straight to the cgroup: until the ruleset knows a new x-<hex>
+            # cgroup, its sockets are rejected, never routed around a policy.
+            apps.cgroups.place_excluded(pid, policy_ids)
+
         runner = ProcessWatcherRunner(
             daemon.place_trusted,
             on_failure=lambda reason: daemon.report_watcher_error("processes", reason),
+            exclude=exclude,
         )
         daemon.on_config = runner.update
         daemon.reconciler.on_applied = runner.on_applied

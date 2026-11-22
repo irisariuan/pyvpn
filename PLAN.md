@@ -246,10 +246,10 @@ Linux backend details (stream C, `netfilter/`, `routing/`,
   also polls for cgroups recreated outside placement. A dedicated chain
   rejects unknown children of the installed `pyvpn.slice` before the LAN
   exemption. Domain-only policies register their placement cgroups while
-  continuing to match all user processes. Exclusions by `exe`/`name` are
-  deferred (§3.3); if they return, the app watcher will move processes into
-  top-level exclusion cgroups, and the backend must recognize those
-  installed cgroups in this check and track their IDs.
+  continuing to match all user processes. The app watcher moves processes
+  excluded from a policy with apps into top-level `x-<hex>` exclusion
+  cgroups (§3.3); the backend recognizes those cgroups in this check and
+  tracks their IDs.
 * Policies for every process (`any_process`) also require `meta skuid`, so
   kernel sockets are never marked: a WireGuard endpoint inside a
   destination set cannot loop the tunnel's own packets into it. A
@@ -307,12 +307,47 @@ Fail-back hold and the latency-based selection are ported from snake's
 | systemd unit / slice | `unit: transmission-daemon.service` | match its existing cgroup path; nothing is moved |
 | user | `uid: 1001`, `user: torrent` | nft `meta skuid` |
 | Flatpak / Snap | `flatpak: org.mozilla.firefox` | its `app-flatpak-…scope` cgroup |
-| exclusions | `exclude_apps: [...]` | the same selectors; an excluded app never matches. `exe`/`name` are deferred for now (see below for policies without apps) |
+| exclusions | `exclude_apps: [...]` | the same selectors; an excluded app never matches the policy. On a policy without apps only `uid`/`user` are supported for now (see below) |
 
 Already-open sockets keep their route; new connections follow the new
 cgroup (as in snake: "connections keep their route").
 
-Exclusions on a policy with destination rules and no apps (an
+**Exclusions on a policy with apps** are enforced by the process watcher
+(`SelectorMatcher.target`), for every selector kind:
+
+1. The first policy, in config order, whose `apps` match a process and
+   whose `exclude_apps` do not, takes it.
+2. Otherwise a process that inherited `pyvpn.slice/p-<id>` (a descendant of
+   a placed app) stays there, unless that policy's `exclude_apps` match it.
+3. A process excluded from a policy it would otherwise join, by `apps` or
+   by inheritance, is moved to the top-level `pyvpn.slice/x-<hex>` that
+   names every such policy (`constants.excluded_cgroup`). Its descendants
+   inherit the exemption from those policies only: another policy whose
+   `apps` match them still takes them, and `uid` and destination policies
+   keep governing them, because `x-<hex>` is outside every `p-<id>` and no
+   binding lists it. An exemption is never revoked by an `exec`, so no new
+   program runs exempt while waiting for the watcher. The window that does
+   exist runs the other way: an excluded program that inherited `p-<id>` is
+   routed by that policy until the watcher moves it out. That direction
+   never weakens protection.
+
+The app manager pre-creates `x-<id>` when it binds a policy with apps and
+exclusions, so the plan applied with that binding already knows it. The
+watcher creates other combinations on demand and writes the pid straight
+into `cgroup.procs`. Until the backend's cgroup poll (0.5 s) re-applies the
+plan, the new cgroup is an unknown child of `pyvpn.slice` and its sockets
+are rejected, never routed around a policy. A policy with exclusions does
+not put its `uid`/`user` selectors in nft `meta skuid` (that would also catch
+excluded apps). The watcher places those processes instead.
+
+On every scan (startup, reload, rescan) parents are handled before their
+children, and a child still in the cgroup its parent was moved out of
+follows the parent. `x-<hex>` ids are config positions. An id only keeps
+exempting while the policy at that position still has apps and
+`exclude_apps`; a member whose exemptions all lapsed is placed again. Removing
+a policy removes its empty `x-*` cgroups.
+
+**Exclusions on a policy with destination rules and no apps** (an
 `any_process` binding) exempt processes from that policy's marking. This
 is how a userspace VPN client (OpenVPN, a provider app) whose server
 address is in the policy's destination set keeps its encrypted packets on
@@ -321,27 +356,25 @@ the normal route instead of looping them into the target. Kernel tunnels
 socket owner (`meta skuid`), which kernel sockets lack. Exclusions travel
 in `AppBinding.exclude_cgroup_paths` and `exclude_uids`, and the backend
 skips a socket in one of those cgroups (or below it) or owned by one of
-those uids:
+those uids. The daemon (`apps.exclusions.unsupported_exclusions`, from
+`Daemon._check_supported`) and `pyvpn test` refuse what the app manager
+cannot enforce. They never accept it and leave it unenforced:
 
-- `unit`, `flatpak`, `snap`: their existing cgroup path; nothing is moved.
-- `uid`, `user`: `exclude_uids`.
-- `exe`, `name`: **deferred.** A destination-only binding grants no
-  exemption for these selectors (the test fake records them in
-  `unresolved`), because Linux keeps a process's cgroup across `exec`: a new
-  program can open a socket before the watcher revokes the exemption, and
-  that socket would then skip the policy. With `on_down: block` it would
-  leave through the default route instead of being dropped, and rechecking
-  on reload or restart does not close that window. Exemptions by
-  `exe`/`name` can return once they can be revoked before a new executable
-  opens a socket. The `pyvpn.slice/x-<hex>` names
-  (`constants.excluded_cgroup` / `parse_excluded_cgroup`) and the backend's
-  handling of them are reserved for that change; nothing creates such a
-  cgroup today.
-
-Only the test fake fills these fields today: the real app manager grants no
-exemption on a destination-only binding for any selector kind. That is
-fail-closed, but silent; reporting it in `pyvpn test` and `pyvpn audit` is a
-follow-up.
+- `uid`, `user`: `exclude_uids` (a `user` that does not exist is refused).
+- `exe`, `name`: **deferred and refused.** Linux keeps a process's cgroup
+  across `exec`, so a new program can open a socket before the watcher
+  revokes an exemption granted by executable, and that socket would skip
+  the policy. With `on_down: block` it would leave through the default
+  route instead of being dropped, and rechecking on reload or restart does
+  not close that window. Exemptions by `exe`/`name` can return once they can
+  be revoked before a new executable opens a socket.
+- `unit`, `flatpak`, `snap`: **deferred and refused.** Their cgroups come
+  and go with the app, and the backend refuses to apply (or re-apply) a
+  plan that lists a missing cgroup, so a stopped VPN unit could keep a
+  later apply (a target going down) from taking effect. They can return
+  once the backend skips missing exclusion cgroups and re-applies when one
+  appears. The test fake still maps them to cgroup paths, so the backend
+  contract for `exclude_cgroup_paths` stays covered.
 
 An `any_process` binding may also list the policy's own cgroup
 (`pyvpn.slice/p-<id>`) in `cgroup_paths`, so `pyvpn run` works for
@@ -356,17 +389,17 @@ Two rules keep exclusions fail-closed:
   redirect. A negated `socket cgroupv2 level N != …` is not used, because it
   does not match a socket with no ancestor at depth N (for example one in a
   shallower cgroup), which would leave that socket ungoverned.
-- **Revalidate on reload and restart.** When `x-<hex>` exclusions return,
-  an `x-<hex>` name will be keyed by policy positions, not selectors, so it
-  must survive a reload that changes the selectors. The app manager will
-  then withhold every existing `x-*` path from `exclude_cgroup_paths` until
-  it has checked each live member against the committed exclusions; members
-  that no longer match return to their policy cgroup before the path is
-  published again. Nothing creates `x-*` paths today. If one exists, the
-  backend treats it as a known child of `pyvpn.slice` (or of `p-Q` when
-  nested) for the stale-cgroup check and cgroup-id reapplication, so its
-  members are governed rather than rejected. Listed exclusion cgroups
-  (`unit`/`flatpak`/`snap` paths) must exist when a plan is applied.
+- **Revalidate on reload and restart.** If destination-only `exe`/`name`
+  exclusions return, they will list `x-<hex>` paths in
+  `exclude_cgroup_paths`. The app manager must then withhold every existing
+  `x-*` path from `exclude_cgroup_paths` until it has checked each live
+  member against the committed exclusions; members that no longer match
+  return to their policy cgroup before the path is published again. Today
+  no binding lists an `x-*` path. The backend treats an existing one as a
+  known child of `pyvpn.slice` (or of `p-Q` when nested) for the
+  stale-cgroup check and cgroup-id reapplication, so its members are
+  governed rather than rejected. Listed exclusion cgroups must exist when a
+  plan is applied.
 
 Policy names are unique. Reload, and a daemon restart, keep each policy
 that has used an app cgroup at the same position in the config (the
