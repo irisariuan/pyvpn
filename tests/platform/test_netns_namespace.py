@@ -138,6 +138,15 @@ def test_pyvpn_run_isolated_end_to_end(netbed: Netbed) -> None:
         text=True,
     )
     nobody = ["setpriv", "--reuid=65534", "--regid=65534", "--clear-groups"]
+    # uid 65534 may not be able to read the checkout (on CI it lives under
+    # /home/runner, mode 0750): the client and its commands get a copy.
+    client = work / "client"
+    shutil.copytree(ROOT / "src" / "pyvpn", client / "pyvpn")
+    shutil.copytree(ROOT / "tests" / "integration", client / "tests" / "integration")
+    (client / "tests" / "__init__.py").write_text("")
+    for path in [client, *client.rglob("*")]:
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    user_env = {**env, "PYTHONPATH": str(client)}
     cli = [sys.executable, "-m", "pyvpn", "run", "--socket", str(sock), "-p", "Torrents"]
     try:
         with netbed.services():
@@ -166,8 +175,8 @@ def test_pyvpn_run_isolated_end_to_end(netbed: Netbed) -> None:
                     [*nobody, *cli, *probe],
                     capture_output=True,
                     text=True,
-                    env=env,
-                    cwd=ROOT,
+                    env=user_env,
+                    cwd=client,
                     timeout=30,
                 )
                 out = result.stdout + result.stderr
@@ -182,7 +191,7 @@ def test_pyvpn_run_isolated_end_to_end(netbed: Netbed) -> None:
                 [*nobody, *cli, "--", "sh", "-c", "id -u; readlink /proc/self/ns/net; exit 7"],
                 capture_output=True,
                 text=True,
-                env=env,
+                env=user_env,
                 cwd="/tmp",
                 timeout=30,
             )
@@ -192,7 +201,9 @@ def test_pyvpn_run_isolated_end_to_end(netbed: Netbed) -> None:
             assert ns == f"net:[{os.stat(f'/run/netns/{prefix}1').st_ino}]"
 
             # Signals reach the command: SIGTERM to ``pyvpn run`` ends it.
-            sleeper = subprocess.Popen([*nobody, *cli, "--", "sleep", "30"], env=env, cwd="/tmp")
+            sleeper = subprocess.Popen(
+                [*nobody, *cli, "--", "sleep", "30"], env=user_env, cwd="/tmp"
+            )
             time.sleep(1.5)
             sleeper.terminate()
             assert sleeper.wait(timeout=10) == 128 + 15
@@ -202,7 +213,7 @@ def test_pyvpn_run_isolated_end_to_end(netbed: Netbed) -> None:
                 [*nobody, *cli, "--isolation", "none", "--", "true"],
                 capture_output=True,
                 text=True,
-                env=env,
+                env=user_env,
                 cwd="/tmp",
                 timeout=30,
             )
@@ -395,6 +406,9 @@ async def _worker(prefix: str) -> None:
     cgroups.create(1)
     netns = f"{prefix}1"
     fail_commit = False
+    # New namespaces copy IPv4 forwarding from the init namespace on some
+    # hosts (GitHub runners have it on): pyvpn must restore what it found.
+    vpn_forwarding = _forwarding(VPN_IFACE)
 
     async def nft(script: str) -> None:
         if fail_commit and script.startswith("add table inet pyvpn\n"):
@@ -526,7 +540,7 @@ async def _worker(prefix: str) -> None:
     await third.teardown()
     assert "pyvpn-h1" not in {name for _, name in socket.if_nameindex()}
     assert "iif pyvpn-h1" not in _run("ip", "-4", "rule")
-    assert _forwarding(VPN_IFACE) == "0"
+    assert _forwarding(VPN_IFACE) == vpn_forwarding
     assert "table inet pyvpn\n" not in _run("nft", "list", "tables") + "\n"
     assert Path(f"/run/netns/{netns}").exists()
     assert _probe(netns) is None
