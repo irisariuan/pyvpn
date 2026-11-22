@@ -305,6 +305,24 @@ async def _worker(cgroup: str) -> None:
     _send(None)
     assert _delta(before) == {"target_data": 1, "wan_data": 1}, _delta(before)
 
+    # A higher-priority policy lookup chooses the WAN for the managed mark.
+    # Marked traffic must stop before WAN egress, even with the target up.
+    early_rule = ("pref", "100", "fwmark", f"{active.mark:#x}", "lookup", "main")
+    _run("ip", "rule", "add", *early_rule)
+    try:
+        before = _counters()
+        _send(cgroup)
+        _send(None)
+        assert _delta(before) == {"wan_data": 1}, _delta(before)
+
+        await backend.apply(RoutingPlan((replace(active, route="main", interface=None),)))
+        before = _counters()
+        _send(cgroup)
+        assert _delta(before) == {"wan_data": 1}, _delta(before)
+    finally:
+        _run("ip", "rule", "del", *early_rule)
+    await backend.apply(RoutingPlan((active,)))
+
     fail_commit = True
     with pytest.raises(NftError, match="simulated commit failure"):
         await backend.apply(RoutingPlan())

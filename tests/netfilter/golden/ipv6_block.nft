@@ -5,6 +5,7 @@ add set inet pyvpn lan_v4 { type ipv4_addr; flags interval; auto-merge; elements
 add set inet pyvpn lan_v6 { type ipv6_addr; flags interval; auto-merge; elements = { ::1, fc00::/7, fe80::/10, ff00::/8 }; }
 add chain inet pyvpn dns { type nat hook output priority -100; policy accept; }
 add chain inet pyvpn output { type route hook output priority -90; policy accept; }
+add chain inet pyvpn egress { type filter hook postrouting priority 0; policy accept; }
 add chain inet pyvpn masq { type nat hook postrouting priority 100; policy accept; }
 add chain inet pyvpn restore { type filter hook prerouting priority -150; policy accept; }
 add chain inet pyvpn check_cgroup
@@ -23,5 +24,7 @@ add rule inet pyvpn output socket cgroupv2 level 2 "pyvpn.slice/p-1" jump p1
 add rule inet pyvpn p1 goto p1_route
 add rule inet pyvpn p1_route meta nfproto ipv6 reject with icmpx type admin-prohibited
 add rule inet pyvpn p1_route meta mark set meta mark & 0xff80 | 0x50590001 ct mark set ct mark & 0xff80 | 0x50590001 accept
+add rule inet pyvpn egress meta mark & 0xffff007f 0x50590001 meta nfproto ipv4 meta oifname != "wg-jp" drop
+add rule inet pyvpn egress meta mark & 0xffff007f 0x50590001 meta nfproto ipv6 drop
 add rule inet pyvpn masq meta mark & 0xffff007f 0x50590001 meta oifname "wg-jp" masquerade
 add rule inet pyvpn restore ct mark & 0xffff007f 0x50590001 meta mark set meta mark & 0xff80 | 0x50590001

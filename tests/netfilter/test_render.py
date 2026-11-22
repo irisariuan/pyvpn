@@ -18,6 +18,11 @@ def test_unsafe_interface_names_are_refused(name: str) -> None:
         render(build_ruleset(RoutingPlan((policy(interface=name),))))
 
 
+def test_egress_comparison_escapes_literal_interface_asterisk() -> None:
+    script = render(build_ruleset(RoutingPlan((policy(interface="tun*"),))))
+    assert r'meta oifname != "tun\*" drop' in script
+
+
 def test_unsafe_cgroup_paths_are_refused() -> None:
     apps = AppBinding(1, cgroup_paths=('x" accept; #',))
     with pytest.raises(ValueError, match="unsafe"):

@@ -25,6 +25,9 @@ Packet path (PLAN.md §3)::
                       route unreachable -> reject (kill switch)
                       otherwise mark P, save it in conntrack, accept
 
+    hook postrouting, prio 0 (filter) chain egress
+        managed mark P -> drop unless this family can use the actual interface
+
     hook postrouting, prio 100 (nat)  chain masq
         mark P out of P's interface -> masquerade
 
@@ -55,7 +58,7 @@ from pyvpn.constants import (
     parse_excluded_cgroup,
 )
 from pyvpn.netfilter.doh import DOH_V4, DOH_V6
-from pyvpn.routing.plan import POLICY_MARK_MASK, validate_policy
+from pyvpn.routing.plan import POLICY_MARK_MASK, RoutePlan, build_route_plan
 from pyvpn.state import DestSet, PolicyPlan, RoutingPlan
 
 Json = dict[str, Any]
@@ -66,6 +69,7 @@ ROUTE_GUARD_TABLE = f"{NFT_TABLE}_guard"
 DNS_PRIORITY = -100  # NF_IP_PRI_NAT_DST
 ROUTE_PRIORITY = -90  # after dns, so app marks never exempt a query
 GUARD_PRIORITY = -80  # after the route chain has classified outgoing packets
+EGRESS_PRIORITY = 0  # inspect the selected interface before source NAT
 MASQ_PRIORITY = 100  # NF_IP_PRI_NAT_SRC
 RESTORE_PRIORITY = -150  # NF_IP_PRI_MANGLE
 
@@ -90,6 +94,7 @@ LAN_V6: tuple[IPv6Network, ...] = tuple(
 
 _REJECT: Json = {"reject": {"type": "icmpx", "expr": "admin-prohibited"}}
 _ACCEPT: Json = {"accept": None}
+_DROP: Json = {"drop": None}
 
 
 def set_name(policy_id: int, version: int) -> str:
@@ -110,13 +115,7 @@ def build_ruleset(plan: RoutingPlan, *, idle_exclusions: Iterable[str] = ()) -> 
     that works whether or not the table exists, and either installs the
     whole new table or leaves the old one untouched.
     """
-    seen: set[int] = set()
-    for policy in plan.policies:
-        validate_policy(policy)
-        if policy.policy_id in seen:
-            raise ValueError(f"duplicate policy {policy.policy_id}")
-        seen.add(policy.policy_id)
-
+    routes = build_route_plan(plan)
     cmds: list[Json] = [*_table_reset(), {"add": {"table": _table()}}]
     cmds += _sets(plan)
     stale_checks = _stale_cgroup_rules(plan, idle_exclusions)
@@ -132,6 +131,7 @@ def build_ruleset(plan: RoutingPlan, *, idle_exclusions: Iterable[str] = ()) -> 
     rules += _output_rules(plan)
     for policy in plan.policies:
         rules += _policy_rules(policy)
+    rules += _egress_rules(routes)
     rules += _masq_rules(plan)
     rules += _restore_rules(plan)
     cmds += [{"add": {"rule": {**_ref(), "chain": chain, "expr": expr}}} for chain, expr in rules]
@@ -236,6 +236,7 @@ def _chains() -> list[Json]:
     return [
         base("dns", "nat", "output", DNS_PRIORITY),
         base("output", "route", "output", ROUTE_PRIORITY),
+        base("egress", "filter", "postrouting", EGRESS_PRIORITY),
         base("masq", "nat", "postrouting", MASQ_PRIORITY),
         base("restore", "filter", "prerouting", RESTORE_PRIORITY),
     ]
@@ -430,6 +431,23 @@ def _policy_rules(policy: PolicyPlan) -> list[tuple[str, Expr]]:
             (route, [_set_mark(_meta("mark"), policy.mark), _set_mark(ct, policy.mark), _ACCEPT])
         )
     return rules
+
+
+def _egress_rules(routes: RoutePlan) -> list[tuple[str, Expr]]:
+    """Enforce the policy table's egress even if another routing rule wins."""
+    interfaces = {
+        (route.version, route.table): route.interface
+        for route in routes.routes
+        if route.kind == "unicast"
+    }
+    out: list[tuple[str, Expr]] = []
+    for rule in routes.rules:
+        exprs = [_mark_is(rule.mark), _match(_meta("nfproto"), f"ipv{rule.version}")]
+        interface = interfaces.get((rule.version, rule.table))
+        if interface is not None:
+            exprs.append(_match(_meta("oifname"), interface, "!="))
+        out.append(("egress", [*exprs, _DROP]))
+    return out
 
 
 def _masq_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:

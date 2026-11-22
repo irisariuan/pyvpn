@@ -194,7 +194,7 @@ process ── in cgroup pyvpn.slice/p-<id>, or matched by uid / unit cgroup
                                    + higher-metric unreachable default (link-loss guard)
                                  | unreachable default               (kill switch)
                                  | no policy lookup for that mark    (fall back to host routing)
-              ──► nft postrouting: masquerade marked traffic to the interface's address
+              ──► nft postrouting: verify egress, then masquerade to the interface's address
                     (the source address was chosen for the default route before re-routing)
 ```
 
@@ -208,7 +208,10 @@ Linux backend details (stream C, `netfilter/`, `routing/`,
   socket-marked packets alone, enforces the current leak and routing rules
   of the policy recorded in conntrack, then classifies unmarked connections
   by their app and destination.
-  `masq` (postrouting) masquerades mark P out of P's interface; `restore`
+  `egress` (postrouting) checks marked packets against the actual outgoing
+  interface for their policy and address family. It drops packets on a
+  different interface and drops all marked packets for an unreachable
+  family. `masq` masquerades mark P out of P's interface; `restore`
   (prerouting) copies the conntrack mark back onto replies.
 * Marks are written as `mark & ~POLICY_MARK_MASK | P`, so bits other
   software uses survive. A kill-switch policy's traffic is rejected in nft
@@ -621,10 +624,11 @@ policy as `not_installed`.
 * **Moving running processes** between cgroups can fight systemd scopes.
   Prefer `pyvpn run` / transient scopes; use the exe watcher only where
   configured.
-* **VPN apps with their own kill switches** (their own nft tables, or
-  `ip rule` that sends everything into the tunnel) can override us. Use our
-  own table, rule priorities below theirs where possible, and document the
-  ranges. `pyvpn audit` detects competing rules.
+* **Competing VPN rules** can win before a pyvpn policy lookup. The
+  postrouting filter drops traffic that still carries a managed mark and
+  would leave through another interface. An explicit fallback to the host
+  route or an unmanaged address family is exempt from this check. Other
+  VPN kill switches can still block traffic.
 * **Interface flaps**: the device route can disappear before the daemon sees
   the link event. Keep a higher-metric, device-independent `unreachable`
   default in each active policy table so the kernel stops there even if the

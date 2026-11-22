@@ -149,6 +149,19 @@
         "chain": {
           "family": "inet",
           "hook": "postrouting",
+          "name": "egress",
+          "policy": "accept",
+          "prio": 0,
+          "table": "pyvpn",
+          "type": "filter"
+        }
+      }
+    },
+    {
+      "add": {
+        "chain": {
+          "family": "inet",
+          "hook": "postrouting",
           "name": "masq",
           "policy": "accept",
           "prio": 100,

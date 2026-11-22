@@ -303,6 +303,36 @@ def test_masquerade_only_for_device_routes() -> None:
     assert [r[1]["match"]["right"] for r in masq] == ["wg-jp", "tun0"]
 
 
+@pytest.mark.parametrize(
+    ("name", "allowed_interfaces"),
+    [
+        ("dev_cgroup", {"ipv4": "wg-jp", "ipv6": "wg-jp"}),
+        ("dev_gateway", {"ipv4": "wlan1", "ipv6": None}),
+        ("ipv6_block", {"ipv4": "wg-jp", "ipv6": None}),
+        ("ipv6_off", {"ipv4": "wg-jp"}),
+        ("unreachable", {"ipv4": None, "ipv6": None}),
+        ("main", {}),
+    ],
+)
+def test_egress_drops_only_outside_each_managed_family(
+    name: str, allowed_interfaces: dict[str, str | None]
+) -> None:
+    doc = build_ruleset(VARIANTS[name])
+    actual = {}
+    for mark, family, *verdict in _rules(doc, "egress"):
+        assert mark["match"]["left"] == {"&": [{"meta": {"key": "mark"}}, POLICY_MARK_MASK]}
+        assert mark["match"]["right"] == policy_mark(1)
+        assert family["match"]["left"] == {"meta": {"key": "nfproto"}}
+        assert verdict[-1] == {"drop": None}
+        allowed = None
+        if len(verdict) == 2:
+            match = verdict[0]["match"]
+            assert match["op"] == "!=" and match["left"] == {"meta": {"key": "oifname"}}
+            allowed = match["right"]
+        actual[family["match"]["right"]] = allowed
+    assert actual == allowed_interfaces
+
+
 def test_rejects_inconsistent_plans() -> None:
     with pytest.raises(ValueError, match="reserved slot"):
         build_ruleset(RoutingPlan((replace(policy(), mark=1),)))

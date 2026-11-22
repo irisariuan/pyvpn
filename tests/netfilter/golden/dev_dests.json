@@ -195,6 +195,19 @@
         "chain": {
           "family": "inet",
           "hook": "postrouting",
+          "name": "egress",
+          "policy": "accept",
+          "prio": 0,
+          "table": "pyvpn",
+          "type": "filter"
+        }
+      }
+    },
+    {
+      "add": {
+        "chain": {
+          "family": "inet",
+          "hook": "postrouting",
           "name": "masq",
           "policy": "accept",
           "prio": 100,
@@ -685,6 +698,110 @@
             },
             {
               "accept": null
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "egress",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "&": [
+                    {
+                      "meta": {
+                        "key": "mark"
+                      }
+                    },
+                    4294901887
+                  ]
+                },
+                "op": "==",
+                "right": 1348009985
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "nfproto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv4"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "oifname"
+                  }
+                },
+                "op": "!=",
+                "right": "wg-jp"
+              }
+            },
+            {
+              "drop": null
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "egress",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "&": [
+                    {
+                      "meta": {
+                        "key": "mark"
+                      }
+                    },
+                    4294901887
+                  ]
+                },
+                "op": "==",
+                "right": 1348009985
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "nfproto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "oifname"
+                  }
+                },
+                "op": "!=",
+                "right": "wg-jp"
+              }
+            },
+            {
+              "drop": null
             }
           ],
           "family": "inet",

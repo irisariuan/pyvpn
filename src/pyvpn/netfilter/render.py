@@ -69,10 +69,15 @@ def _statement(e: Json) -> str:
     if kind == "match":
         left, quoted = _expr(v["left"])
         op = "" if v["op"] == "==" else f"{v['op']} "
-        return f"{left} {op}{_value(v['right'], quoted)}"
+        right = _value(v["right"], quoted)
+        if left in ("meta oifname", "meta iifname"):
+            # Target discovery supplies an actual name. nft interprets an
+            # unescaped trailing asterisk as a prefix match.
+            right = right.replace("*", r"\*")
+        return f"{left} {op}{right}"
     if kind == "mangle":
         return f"{_expr(v['key'])[0]} set {_expr(v['value'])[0]}"
-    if kind in ("accept", "return"):
+    if kind in ("accept", "drop", "return"):
         return kind
     if kind in ("jump", "goto"):
         return f"{kind} {v['target']}"
