@@ -17,16 +17,17 @@ which picks a tunnel per *device* on a router.
 
 ## Status
 
-**Alpha (0.0.x): pyvpn does not route traffic yet.** The CLI, configuration
-validation and rule tools work, and the `pyvpn-daemon` daemon ships. The
-Linux backend that applies the nft rules and routes is not in this release
-yet, so the daemon refuses to start unless you pass `--backend dry-run`.
-That mode exercises the daemon, CLI and DNS stubs, but it **applies no
-routing and no leak protection** (see
+**Alpha (0.0.x): early, not yet audited.** `pyvpn-daemon` routes traffic with
+the Linux backend: it installs nft rules (`table inet pyvpn`), per-policy
+routing tables and `ip rule`s, and enforces kill switches (`on_down: block`).
+The routing and kill switch are tested end to end in network namespaces, but
+pyvpn has seen little real-world use. Check what it does with `pyvpn audit`,
+and don't rely on it alone for privacy yet (see
 [PLAN.md §7](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md#7-milestones)
-for milestones). Do not rely on it for privacy yet.
+for milestones).
 
-**Linux only**, and it needs cgroup v2. macOS and Windows are not supported.
+**Linux only.** The daemon runs as root and needs cgroup v2 and the `nft`
+command (nftables). macOS and Windows are not supported.
 
 ## Install
 
@@ -122,9 +123,29 @@ pyvpn disable                              # remove all pyvpn rules and routes
 Add `--json` before the command (`pyvpn --json status`) for machine-readable
 output.
 
-To try the daemon without root while the Linux backend is pending, run it in
-dry-run mode. It logs each routing plan instead of installing it, and routes
-and protects nothing:
+## Running the daemon
+
+Install the systemd unit and start it (as root):
+
+```bash
+sudo pyvpn install --write
+sudo systemctl daemon-reload
+sudo systemctl enable --now pyvpn
+```
+
+`pyvpn install` points the unit at the `pyvpn-daemon` on your `PATH` (or pass
+`--exec-start`). Or run it in the foreground:
+
+```bash
+sudo pyvpn-daemon --config /etc/pyvpn/config.json
+```
+
+Send it `SIGHUP` (or run `pyvpn reload`) to re-read the config. Stopping the
+daemon leaves the installed rules in force, so kill switches keep blocking
+across a restart. `pyvpn disable` removes them.
+
+To try it without root, `--backend dry-run` logs each routing plan instead of
+installing it. It routes and protects nothing:
 
 ```bash
 pyvpn-daemon --backend dry-run --config config.json --socket /tmp/pyvpn.sock --state-dir /tmp/pyvpn-state
