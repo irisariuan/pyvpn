@@ -303,10 +303,63 @@ Fail-back hold and the latency-based selection are ported from snake's
 | systemd unit / slice | `unit: transmission-daemon.service` | match its existing cgroup path; nothing is moved |
 | user | `uid: 1001`, `user: torrent` | nft `meta skuid` |
 | Flatpak / Snap | `flatpak: org.mozilla.firefox` | its `app-flatpak-…scope` cgroup |
-| exclusions | `exclude_apps: [...]` | the same selectors; an excluded app never matches |
+| exclusions | `exclude_apps: [...]` | the same selectors; an excluded app never matches (see below for policies without apps) |
 
 Already-open sockets keep their route; new connections follow the new
 cgroup (as in snake: "connections keep their route").
+
+Exclusions on a policy with destination rules and no apps (an
+`any_process` binding) exempt processes from that policy's marking. This
+is how a userspace VPN client (OpenVPN, a provider app) whose server
+address is in the policy's destination set keeps its encrypted packets on
+the normal route instead of looping them into the target. Kernel tunnels
+(WireGuard) need no exclusion: `any_process` matches only packets with a
+socket owner (`meta skuid`), which kernel sockets lack. The app manager
+reports exclusions in `AppBinding.exclude_cgroup_paths` and
+`exclude_uids`, and the backend skips a socket in one of those cgroups (or
+below it) or owned by one of those uids:
+
+- `unit`, `flatpak`, `snap`: their existing cgroup path; nothing is moved.
+- `uid`, `user`: `exclude_uids`.
+- `exe`, `name`: the watcher moves matching processes into
+  `pyvpn.slice/x-<hex>` (`constants.excluded_cgroup`), one cgroup per
+  distinct set of destination-only policies that exclude the process, and
+  each of those policies lists it. `<hex>` is the policy-id bitmask (bit
+  `id - 1`) in lowercase hex, so names are collision-free and at most
+  `EXCLUDED_NAME_MAX` (27) bytes: `x-9` for policies 1 and 4.
+  `constants.parse_excluded_cgroup` decodes a path back to its policy ids,
+  the app policy it is nested under, and its `socket cgroupv2` level. A
+  process that is also an app of policy Q goes to `pyvpn.slice/p-Q/x-<hex>`
+  instead, so policy Q still matches it. The backend only matches paths:
+  the app manager creates the cgroup, and moves a process into it only
+  after a binding that lists the path has been applied. Until then the
+  process is not exempt, which can loop its traffic but never sends a
+  policy's traffic out the default route.
+
+An `any_process` binding may also list the policy's own cgroup
+(`pyvpn.slice/p-<id>`) in `cgroup_paths`, so `pyvpn run` works for
+destination-only policies; it never lists other cgroups or `uids`.
+
+Two rules keep exclusions fail-closed:
+
+- **Positive matches only.** The backend tests exclusions with positive
+  matches (a socket in an excluded cgroup or owned by an excluded uid
+  returns before the policy's rules) and every other socket continues
+  through normal policy handling: target route, kill switch and DNS
+  redirect. A negated `socket cgroupv2 level N != …` is not used, because it
+  does not match a socket with no ancestor at depth N (for example one in a
+  shallower cgroup), which would leave that socket ungoverned.
+- **Revalidate on reload and restart.** An `x-<hex>` name is keyed by
+  policy positions, not selectors, so it survives a reload that changes the
+  selectors. After every config commit and at daemon start, the app manager
+  withholds every existing `x-*` path from `exclude_cgroup_paths` until it
+  has checked each live member against the committed exclusions. Members
+  that no longer match go to the cgroup for their new set, or back to the
+  cgroup they came from, before the path is published again. Until then
+  those members are governed by the policy like any other process.
+  Exclusion cgroups (top-level `pyvpn.slice/x-*` and nested
+  `pyvpn.slice/p-Q/x-*`) are known paths for the backend's stale-cgroup
+  check and cgroup-id reapplication, not stale policy cgroups.
 
 Policy names are unique. Reload, and a daemon restart, keep each policy
 that has used an app cgroup at the same position in the config (the
@@ -334,7 +387,8 @@ A policy with only apps sends **all** of their traffic through the target. A
 policy with apps **and** destination rules sends only the matched
 destinations (snake's domain rules, `asn:`, `cidr:`) through it. A policy
 with destination rules and no app selectors or exclusions applies those
-destinations to every process. The per-policy DNS stub scopes the active
+destinations to every process except those its `exclude_apps` match
+(§3.3). The per-policy DNS stub scopes the active
 rule matcher to its own policy and those global policies before matching the
 query name and its CNAME chain. A and AAAA answers, HTTPS/SVCB address hints,
 and additional addresses for referenced names go into the winning policy's
