@@ -107,7 +107,7 @@ ships they exit with `cannot contact pyvpn daemon`:
 ```bash
 pyvpn run -p "Japan browsing" -- firefox   # start an app inside a policy
 pyvpn status                               # policies, active targets
-pyvpn apps                                 # live PID → policy → interface
+pyvpn apps                                 # policy bindings by cgroup and UID
 pyvpn audit                                # what each policy does and does not protect
 pyvpn reload                               # re-read the config
 pyvpn disable                              # remove all pyvpn rules and routes
