@@ -231,3 +231,94 @@ async def test_process_watcher_follows_reload(
         await assembly.daemon.stop()
         await assembly.close()
     assert FakeProcessWatcher.instances[-1].stopped
+
+
+class FlakyBackend(DryRunBackend):
+    """Fails the first ``fails`` applies, like a backend that is not ready yet."""
+
+    def __init__(self, fails: int) -> None:
+        super().__init__()
+        self.fails = fails
+
+    async def apply(self, plan: Any) -> None:
+        if self.fails:
+            self.fails -= 1
+            raise RuntimeError("nft: not ready")
+        await super().apply(plan)
+
+
+async def test_watcher_placement_is_refused_until_rules_are_installed(tmp_path: Path) -> None:
+    config = write_config(tmp_path / "config.json")
+    opts = Options(
+        config_path=tmp_path / "config.json",
+        socket_path=tmp_path / "pyvpn.sock",
+        state_dir=tmp_path / "state",
+        backend="dry-run",
+    )
+    backend = FlakyBackend(fails=1_000)  # every apply fails during the test
+    assembly = build_daemon(opts, backend=backend, config=config, netlink=FakeNetlink(up=False))
+    daemon = assembly.daemon
+    procs = tmp_path / "state" / "cgroup-dry-run" / "pyvpn.slice" / "p-1" / "cgroup.procs"
+    await daemon.start()
+    try:
+        assert daemon.reconciler.applied is None
+        with pytest.raises(daemon_main.ApiError, match="not installed"):
+            await daemon.place_trusted(4242, 1)
+        assert not procs.exists()
+    finally:
+        await daemon.stop()
+        await assembly.close()
+
+
+class PlacingWatcher:
+    """Tries to place pid 4242 in policy 1 at start and on every scan."""
+
+    instances: ClassVar[list[PlacingWatcher]] = []
+
+    def __init__(self, policies: Any, place: Any, *, groups: Any = ()) -> None:
+        self.place = place
+        self.scans = 0
+        PlacingWatcher.instances.append(self)
+
+    async def run_proc_connector(self) -> None:
+        await self.place(4242, 1)
+        await asyncio.Event().wait()
+
+    async def scan(self) -> int:
+        self.scans += 1
+        await self.place(4242, 1)
+        return 1
+
+    def stop(self) -> None:
+        pass
+
+
+async def test_deferred_processes_are_placed_once_rules_are_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    PlacingWatcher.instances = []
+    monkeypatch.setattr(daemon_main, "ProcessWatcher", PlacingWatcher)
+    config = write_config(tmp_path / "config.json")
+    opts = Options(
+        config_path=tmp_path / "config.json",
+        socket_path=tmp_path / "pyvpn.sock",
+        state_dir=tmp_path / "state",
+        backend="dry-run",
+        process_watcher=True,
+    )
+    backend = FlakyBackend(fails=1)  # startup apply fails, the target update succeeds
+    assembly = build_daemon(opts, backend=backend, config=config, netlink=FakeNetlink())
+    procs = tmp_path / "state" / "cgroup-dry-run" / "pyvpn.slice" / "p-1" / "cgroup.procs"
+    await assembly.daemon.start()
+    try:
+        await settle(backend, 1)
+        (watcher,) = PlacingWatcher.instances
+        for _ in range(200):
+            if watcher.scans:
+                break
+            await asyncio.sleep(0.01)
+        assert watcher.scans == 1
+        assert procs.read_text() == "4242\n"
+    finally:
+        await assembly.daemon.stop()
+        await assembly.close()

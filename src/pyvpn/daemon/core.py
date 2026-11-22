@@ -411,25 +411,42 @@ class Daemon:
             if peer.uid != 0 and not peer.same_process_alive():
                 # The caller may have exited while waiting for the lock.
                 raise ApiError("forbidden", "cannot verify that the calling process still exists")
-            r = self.reconciler
-            if not r.enabled:
-                raise ApiError("unavailable", "routing is disabled")
-            if r.applied is None:
-                raise ApiError("unavailable", "routing rules are not installed yet")
             pid = self._resolve_policy(p.policy)
-            installed = next((x for x in r.applied.policies if x.policy_id == pid), None)
-            governed = installed is not None and (
-                installed.apps.any_process or policy_cgroup(pid) in installed.apps.cgroup_paths
-            )
-            if not governed:
-                raise ApiError(
-                    "unavailable", f"policy {pid}'s placement cgroup is not governed by its rules"
-                )
-            if pid not in self._cgroup_policy_names:
-                name = self.config.policies[pid - 1].name
-                self._save_state(enabled=True, slots=self._cgroup_policy_names | {pid: name})
-            await self._apps.place_pid(p.pid, pid)
+            await self._place_locked(p.pid, pid)
         return {"policy_id": pid}
+
+    async def place_trusted(self, pid: int, policy_id: int) -> None:
+        """Place ``pid`` for an in-process caller (the process watcher).
+
+        Applies the same checks as the ``place_pid`` API, so a process never
+        lands in a policy cgroup whose rules are not installed (fail closed);
+        raises :class:`ApiError` ("unavailable") when placement must wait.
+        """
+        async with self._config_lock:
+            self._resolve_policy(policy_id)
+            await self._place_locked(pid, policy_id)
+
+    async def _place_locked(self, pid: int, policy_id: int) -> None:
+        """Move ``pid`` into ``policy_id``'s cgroup if its rules govern it.
+
+        Caller holds ``_config_lock``."""
+        r = self.reconciler
+        if not r.enabled:
+            raise ApiError("unavailable", "routing is disabled")
+        if r.applied is None:
+            raise ApiError("unavailable", "routing rules are not installed yet")
+        installed = next((x for x in r.applied.policies if x.policy_id == policy_id), None)
+        governed = installed is not None and (
+            installed.apps.any_process or policy_cgroup(policy_id) in installed.apps.cgroup_paths
+        )
+        if not governed:
+            raise ApiError(
+                "unavailable", f"policy {policy_id}'s placement cgroup is not governed by its rules"
+            )
+        if policy_id not in self._cgroup_policy_names:
+            name = self.config.policies[policy_id - 1].name
+            self._save_state(enabled=True, slots=self._cgroup_policy_names | {policy_id: name})
+        await self._apps.place_pid(pid, policy_id)
 
     def _resolve_policy(self, ref: str | int) -> int:
         n = len(self.config.policies)

@@ -113,19 +113,58 @@ class ProcessWatcherRunner:
     The watcher's selectors come from the config, so it is replaced every time
     the daemon commits a config (startup and reload). The replacement scans
     ``/proc`` again, so no running app is missed across a reload.
+
+    Placement goes through ``place`` (the daemon's :meth:`Daemon.place_trusted`),
+    which refuses while a policy's rules are not installed (fail closed). A
+    refused placement is retried by one more ``/proc`` scan after the next
+    successful apply (:meth:`on_applied`), so apps found during a failed
+    startup apply are placed once rules exist.
     """
 
     def __init__(self, place: Place) -> None:
-        self._place = place
+        self._place_pid = place
         self._watcher: ProcessWatcher | None = None
         self._task: asyncio.Task[None] | None = None
+        self._rescan: asyncio.Task[None] | None = None
+        self._deferred = False
 
     def update(self, config: Config) -> None:
         self._stop_current()
+        self._deferred = False
         watcher = ProcessWatcher(config.policies, self._place, groups=config.app_groups)
         self._watcher = watcher
         self._task = asyncio.ensure_future(self._run(watcher))
         self._task.set_name("pyvpn-process-watcher")
+
+    async def _place(self, pid: int, policy_id: int) -> None:
+        try:
+            await self._place_pid(pid, policy_id)
+        except ApiError as exc:
+            if exc.code != "unavailable":
+                log.warning("not placing process %d in policy %d: %s", pid, policy_id, exc)
+                return
+            self._deferred = True
+            log.debug("deferring process %d (policy %d): %s", pid, policy_id, exc)
+
+    def on_applied(self) -> None:
+        """Rescan once if a placement was refused before rules were installed."""
+        watcher = self._watcher
+        if not self._deferred or watcher is None:
+            return
+        if self._rescan is not None and not self._rescan.done():
+            return
+        self._deferred = False
+        self._rescan = asyncio.ensure_future(self._scan(watcher))
+        self._rescan.set_name("pyvpn-process-rescan")
+
+    @staticmethod
+    async def _scan(watcher: ProcessWatcher) -> None:
+        try:
+            moved = await watcher.scan()
+        except Exception:
+            log.exception("process rescan failed")
+            return
+        log.info("placed %d running processes after rules were installed", moved)
 
     @staticmethod
     async def _run(watcher: ProcessWatcher) -> None:
@@ -139,15 +178,15 @@ class ProcessWatcherRunner:
     def _stop_current(self) -> None:
         if self._watcher is not None:
             self._watcher.stop()
-        if self._task is not None:
-            self._task.cancel()
+        for task in (self._task, self._rescan):
+            if task is not None:
+                task.cancel()
 
     async def close(self) -> None:
-        task = self._task
+        tasks = [t for t in (self._task, self._rescan) if t is not None]
         self._stop_current()
-        self._watcher = self._task = None
-        if task is not None:
-            await asyncio.gather(task, return_exceptions=True)
+        self._watcher = self._task = self._rescan = None
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @dataclass
@@ -219,8 +258,11 @@ def build_daemon(
 
     runner: ProcessWatcherRunner | None = None
     if options.watch_processes():
-        runner = ProcessWatcherRunner(apps.place_pid)
+        # Through the daemon, never ``apps.place_pid`` directly: placement
+        # must wait until the policy's rules are installed.
+        runner = ProcessWatcherRunner(daemon.place_trusted)
         daemon.on_config = runner.update
+        daemon.reconciler.on_applied = runner.on_applied
     return Assembly(daemon=daemon, backend=backend, dns=dns, apps=apps, process_watcher=runner)
 
 

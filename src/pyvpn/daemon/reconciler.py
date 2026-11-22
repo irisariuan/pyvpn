@@ -130,6 +130,8 @@ class Reconciler:
         # Called (under the lock) whenever DNS-learned destinations change,
         # so the daemon can persist them for its successor.
         self.on_learned: Callable[[], None] | None = None
+        # Called (under the lock) after every successful apply. Must not block.
+        self.on_applied: Callable[[], None] | None = None
         # Learned sets saved by a previous daemon, by policy name; used once,
         # by the first config swap, before the first apply.
         self._restored: dict[str, tuple[tuple[str, ...], DestSet]] = {}
@@ -407,6 +409,11 @@ class Reconciler:
         await self._backend.apply(plan)
         self.applied = plan
         self._apply_error = None
+        if self.on_applied is not None:
+            try:
+                self.on_applied()
+            except Exception:
+                log.exception("on_applied hook failed")
 
     async def _stop_dns_locked(self, pid: int) -> bool:
         """Stop one stub. A failed stop is remembered and retried, since the
