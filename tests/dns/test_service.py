@@ -15,9 +15,11 @@ import dns.rrset
 import pytest
 
 from pyvpn.audit import audit_dns
+from pyvpn.config.models import Config
 from pyvpn.dns import service as dns_service
 from pyvpn.dns.aliases import AliasStore
 from pyvpn.dns.service import PolicyDnsService, _Stub, _UdpListener
+from pyvpn.match import PolicyMatcher
 from pyvpn.state import DestSet, PolicyPlan
 from tests.dns._helpers import plan_for_dns as _plan
 from tests.fakes.backend import FakeBackend
@@ -123,6 +125,35 @@ def test_chain_matcher_gets_all_cnames_and_controls_publication(winner: int | No
     assert dns.message.from_wire(wire).rcode() == dns.rcode.NOERROR
     expected = [DestSet(1, v4=frozenset({ip_network("192.0.2.10/32")}))] if winner else []
     assert backend.sets == expected
+
+
+@pytest.mark.parametrize("asked", ["ads.example", "www.ads.example"])
+def test_drop_rule_answers_go_into_the_drop_set(asked: str) -> None:
+    """A ``drop:`` match publishes the answer's addresses as a drop set of
+    the dropping policy, even when a later policy routes a CNAME target."""
+    config = Config.model_validate(
+        {
+            "targets": [{"name": "jp", "interface": "wg-jp"}],
+            "policies": [
+                {"name": "block", "targets": ["jp"], "domains": ["drop:ads.example"]},
+                {"name": "route", "targets": ["jp"], "domains": ["edge.example"]},
+            ],
+        }
+    )
+    matcher = PolicyMatcher.from_config(config)
+    upstream = AsyncMock(side_effect=lambda _, q: _answer(q))
+    service = PolicyDnsService(upstream, matcher_factory=lambda: matcher)
+    backend = FakeBackend()
+    service.on_answer(backend.add_to_set)
+    plan = replace(_plan(), dests=DestSet(1), drops=DestSet(1, drop=True))
+    query = dns.message.make_query(asked, "A")
+
+    wire = asyncio.run(_Stub(service, plan).answer(query.to_wire(), tcp=False))
+
+    assert dns.message.from_wire(wire).rcode() == dns.rcode.NOERROR
+    assert backend.sets == [
+        DestSet(1, v4=frozenset({ip_network("192.0.2.10/32")}), drop=True),
+    ]
 
 
 @pytest.mark.parametrize("winner", [1, 3, None], ids=["own-policy", "global-policy", "unmatched"])

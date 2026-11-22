@@ -52,12 +52,15 @@ def load_config_text(text: str, source: str = "<string>") -> Config:
 
 def validate_config_document(document: object, source: str = "<object>") -> Config:
     """migrate and validate one decoded configuration document."""
-    migrated = migrate_config(document)
+    try:
+        migrated = migrate_config(document)
+    except ConfigValidationError as exc:
+        raise ConfigValidationError(f"{source}: {exc.message}", exc.problems) from exc
     try:
         return Config.model_validate(migrated)
     except ValidationError as exc:
         problems = [
-            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+            f"{'.'.join(str(part) for part in error['loc']) or '<root>'}: {error['msg']}"
             for error in exc.errors(include_url=False)
         ]
         raise ConfigValidationError(

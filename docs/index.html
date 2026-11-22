@@ -158,7 +158,7 @@ footer { margin-top: 56px; padding-top: 16px; border-top: 1px solid var(--border
 <tr><th scope="row">App selector</th><td>How a policy finds its apps: launched with <code>pyvpn run</code>, executable path or name, systemd unit, uid or user, Flatpak or Snap ID.</td></tr>
 <tr><th scope="row"><code>on_down</code></th><td>Used after every target in the list is down: <code>default</code> falls back to the normal route, <code>block</code> drops the traffic (kill switch).</td></tr>
 <tr><th scope="row">Usable target</th><td>The link is up and has an address (and, with <code>"gateway": "auto"</code>, a gateway). A target with <code>"probe": true</code> must also pass TCP probes sent through its interface.</td></tr>
-<tr><th scope="row">Destination filter</th><td>Optional domain, <code>asn:</code> or <code>cidr:</code> rules (snake's rule language) that limit a policy to matching destinations.</td></tr>
+<tr><th scope="row">Destination filter</th><td>Optional domain, <code>asn:</code> or <code>cidr:</code> rules (snake's rule language) that limit a policy to matching destinations; <code>drop:</code> rules block a destination for the policy's apps.</td></tr>
 </tbody>
 </table></div>
 
@@ -240,6 +240,7 @@ pyvpn apps                                 # policy bindings by cgroup and uid
 pyvpn audit                                # what each policy does and does not protect
 pyvpn reload                               # re-read the config (root)
 pyvpn disable                              # remove all pyvpn rules and routes (root)
+pyvpn enable                               # reinstall them after disable (root)
 pyvpn test [config]                        # validate a config
 pyvpn rules check example.rules            # validate destination rules (snake format)
 pyvpn install --write                      # install the systemd unit for the daemon
