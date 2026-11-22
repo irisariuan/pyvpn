@@ -89,12 +89,17 @@ class _FakeAsnCache:
     def cached(self, asn: int) -> list[str]:
         return self._prefixes.get(asn, [])
 
+    def usable(self, asn: int) -> list[str]:
+        if asn not in self._prefixes:
+            raise AsnError(f"asn:{asn} is not in the ASN cache")
+        return self._prefixes[asn]
+
 
 def test_drop_asn_without_prefixes_is_refused() -> None:
     cfg = _config({"name": "a", "targets": ["jp"], "domains": ["drop:asn:64500"]})
     with pytest.raises(RuleConfigError, match="asn:64500 needs the ASN cache"):
         build_matcher(cfg)
-    with pytest.raises(RuleConfigError, match="asn:64500 has no cached prefixes"):
+    with pytest.raises(RuleConfigError, match="asn:64500 is not in the ASN cache"):
         build_matcher(cfg, _FakeAsnCache({}))  # type: ignore[arg-type]
 
 
@@ -181,7 +186,7 @@ def test_runtime_asn_rules_use_the_cache(tmp_path: Path) -> None:
         build_matcher(cfg)
     cache = AsnCache(tmp_path, fetch=lambda url: _ripe("198.38.96.0/19"))
     factory = matcher_factory(cache)
-    with pytest.raises(RuleConfigError, match="asn:2906 has no cached prefixes"):
+    with pytest.raises(RuleConfigError, match="asn:2906 is not in the ASN cache"):
         factory(cfg)
     cache.prefixes(2906)
     [ds] = factory(cfg).static_sets()
@@ -248,18 +253,23 @@ def test_asn_cache(tmp_path: Path) -> None:
         calls.append(url)
         return answer[0]
 
-    c = AsnCache(tmp_path, max_age=100, fetch=fetch, clock=lambda: now[0])
+    c = AsnCache(tmp_path, max_age=100, refresh_after=50, fetch=fetch, clock=lambda: now[0])
     assert c.cached(2906) == [] and c.stale(2906)
     assert c.prefixes(2906).prefixes == ("1.2.3.0/24", "2001:db8::/32")
     assert calls == [c.url.format(asn=2906)] and "AS2906" in calls[0]
     assert c.prefixes(2906).prefixes and len(calls) == 1  # fresh: no fetch
-    now[0] += 200
+    now[0] += 60  # due, still usable
     answer[0] = b"not json"
-    stale = c.prefixes(2906)
-    assert stale.prefixes == ("1.2.3.0/24", "2001:db8::/32") and stale.error
+    due = c.prefixes(2906)
+    assert due.prefixes == ("1.2.3.0/24", "2001:db8::/32") and due.error
+    now[0] += 60  # past max_age: a failed refresh does not fall back to it
+    with pytest.raises(AsnError):
+        c.prefixes(2906)
     with pytest.raises(AsnError):
         c.prefixes(13335)
-    assert c.cached(2906) == ["1.2.3.0/24", "2001:db8::/32"]
+    assert c.cached(2906) == ["1.2.3.0/24", "2001:db8::/32"]  # display only
+    with pytest.raises(AsnError, match="stale"):
+        c.usable(2906)
 
 
 def test_parse_ripe_empty() -> None:

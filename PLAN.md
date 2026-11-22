@@ -508,7 +508,7 @@ earlier policy that routes the same address for the same process wins.
 DNS-learned drop addresses are persisted and carried over reloads like
 learned destinations. The daemon refuses snake's per-device rules (they would hide
 plain rules in the same policy), rules that do not parse and `asn:` entries
-with no cached prefixes; `pyvpn rules check` reports all of these as
+without a usable ASN cache entry (below); `pyvpn test` reports all of these as
 errors, and `pyvpn rules test` names a policy whose per-device rule hid a
 name. Rule regexes and wildcards use RE2 syntax (constructs RE2 lacks or
 reads differently, such as `\Z`, `(?x)` or `a{,3}`, are rejected with either
@@ -521,6 +521,34 @@ still work. `pyvpn rules check` parses such rules and warns. snake's
 per-device rules (`session:`, `route:`, `drop[...]:`, `if:` branches) parse
 but route nothing; only the names in an `if:` condition are routed, as in
 snake. snake's Domain VPN Routing importer is not ported (router-only).
+
+ASN prefix cache (`match/asn.py`, `pyvpn asn status|refresh`): `asn:N`
+(and `drop:asn:N`) expands to the prefixes AS N announces, read from an on-disk cache,
+`<state_dir>/asn/AS<N>.json` (`{"version": 1, "asn", "source", "fetched",
+"prefixes"}`). The source is RIPEstat's public `announced-prefixes` data call
+(prefixes RIS collectors saw the AS originate in the last two weeks). The
+root daemon never fetches: it reads the cache when it builds the matcher (on
+start and reload), once per ASN, so the checks and the installed sets see the
+same prefixes. `pyvpn asn refresh` fetches; it changes no routing and needs
+only write access to the cache directory (`sudo` for the default one), and
+writes each file atomically (temp file, fsync, rename; files 0644).
+Validation refuses answers for another AS, a non-`ok` status, entries that are
+not networks, IPv4 prefixes shorter than /8 or IPv6 shorter than /16, empty
+lists and more than 250 000 prefixes; a bad answer never replaces the cache.
+Freshness: an entry younger than 1 day is fresh (`refresh` skips it unless
+`--force`), up to 7 days it is still used, and after that (or when dated more
+than an hour in the future) it is stale. Fail closed: the matcher refuses
+missing, invalid, stale and untrusted entries (the daemon accepts only files
+owned by its own uid, root in production, in a directory and files that group
+and others cannot write, opened without following symlinks), so a config that
+needs them does not load and a reload keeps the previous config. While
+running, the daemon re-checks the cache hourly and reports stale entries in
+`status` (`last error: ASN cache: ...`); the installed prefixes stay in force
+until the next successful reload, since removing them would send those
+destinations out the default route. `pyvpn test` reports cache problems as
+errors and `pyvpn rules check FILE` as warnings. Periodic refresh is left to
+the operator (a systemd timer or cron job running `pyvpn asn refresh &&
+pyvpn reload`).
 
 ### 3.5 Per-app DNS and leaks
 

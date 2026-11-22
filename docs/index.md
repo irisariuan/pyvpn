@@ -160,11 +160,14 @@ pyvpn disable                              # remove all pyvpn rules and routes (
 pyvpn enable                               # reinstall them after disable (root)
 pyvpn test [config]                        # validate a config
 pyvpn rules check example.rules            # validate destination rules (snake format)
+pyvpn asn refresh                          # fetch prefixes for asn: rules (RIPEstat)
 pyvpn install --write                      # install the systemd unit for the daemon
 pyvpn desktop --policy NAME                # print or install a menu launcher
 ```
 
-`pyvpn rules` also has `test`, `import` and `export` subcommands. Put
+`pyvpn rules` also has `test`, `import` and `export` subcommands, and
+`pyvpn asn status` shows the ASN prefix cache, which the daemon reads but
+never downloads (see [the ASN prefix cache](usage.md#the-asn-prefix-cache)). Put
 `--json` before a command for machine-readable output. See the
 [usage guide](usage.md) for examples and real output.
 

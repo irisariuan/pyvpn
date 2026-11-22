@@ -243,9 +243,10 @@ pyvpn disable                              # remove all pyvpn rules and routes (
 pyvpn enable                               # reinstall them after disable (root)
 pyvpn test [config]                        # validate a config
 pyvpn rules check example.rules            # validate destination rules (snake format)
+pyvpn asn refresh                          # fetch prefixes for asn: rules (RIPEstat)
 pyvpn install --write                      # install the systemd unit for the daemon
 pyvpn desktop --policy NAME                # print or install a menu launcher</code></pre>
-<p><code>pyvpn rules</code> also has <code>test</code>, <code>import</code> and <code>export</code> subcommands. Put <code>--json</code> before a command for machine-readable output. See the <a href="usage.md">usage guide</a> for examples and real output.</p>
+<p><code>pyvpn rules</code> also has <code>test</code>, <code>import</code> and <code>export</code> subcommands, and <code>pyvpn asn status</code> shows the ASN prefix cache, which the daemon reads but never downloads (see <a href="usage.md#the-asn-prefix-cache">the ASN prefix cache</a>). Put <code>--json</code> before a command for machine-readable output. See the <a href="usage.md">usage guide</a> for examples and real output.</p>
 </section>
 
 <section aria-labelledby="how-it-works">

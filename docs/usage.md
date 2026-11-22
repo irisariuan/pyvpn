@@ -343,9 +343,55 @@ doesn't change system DNS.**
 
 `domains` limits a policy to matching destinations, using snake's rule
 language: plain domains (`corp.example` also matches its subdomains),
-wildcards (`*.example.com`), and `cidr:10.20.0.0/16`. The policy's DNS stub
-learns the addresses of matching names as apps look them up, so **hostname
-rules need `dns_via_target: true`**.
+wildcards (`*.example.com`), `cidr:10.20.0.0/16` and `asn:2906` (every
+prefix an autonomous system announces). The policy's DNS stub learns the
+addresses of matching names as apps look them up, so **hostname rules need
+`dns_via_target: true`**. `cidr:` and `asn:` rules need no DNS.
+
+### The ASN prefix cache
+
+The daemon never downloads anything. `asn:` (and `drop:asn:`) rules use the prefixes in
+an on-disk cache, `/var/lib/pyvpn/asn/AS<n>.json`, which you fill with
+`pyvpn asn refresh`. It downloads each AS's announced prefixes from
+[RIPEstat](https://stat.ripe.net/docs/data-api/api-endpoints/announced-prefixes)
+(what the RIPE RIS route collectors saw it announce in the last two weeks),
+checks them, and replaces the cache file. It changes no routing and only needs
+write access to the cache directory, so with the default directory you run
+it with `sudo`:
+
+```bash
+sudo pyvpn asn refresh        # fetch the ASNs your config uses
+sudo pyvpn reload             # route by the new prefixes
+pyvpn asn status              # cached prefixes and their age
+```
+
+```text
+ASN cache: /var/lib/pyvpn/asn (refresh after 24.0 h, refused after 7.0 days)
+asn:2906: 518 prefixes, fetched 3 min ago (fresh)
+ok
+```
+
+Both take ASNs as arguments (`pyvpn asn refresh AS2906`) instead of reading
+the config, and `--asn-cache DIR` for another directory. `refresh` skips
+entries younger than a day unless you pass `--force`.
+
+Cache entries are refused, and the daemon won't load a config that needs
+them (it keeps the previous one on reload), when they are:
+
+- **missing**, or not valid (a prefix that isn't a network, shorter than
+  `/8` for IPv4 or `/16` for IPv6, an empty list, or a file for another AS);
+- **stale**: fetched more than 7 days ago, or dated in the future;
+- **not trusted**: the daemon only reads files owned by its own user (root)
+  that group and others can't write, so other users can't plant prefixes.
+
+pyvpn never routes `asn:` rules by a guess. `pyvpn test` and
+`pyvpn rules check` report these entries as errors (warnings for a rule
+file). While the daemon runs, it checks the cache every hour: when an entry
+it uses goes stale, `pyvpn status` shows it as `last error: ASN cache: …`.
+The installed prefixes stay in force until a reload, because removing them
+would send those destinations out the default route. Refresh the cache
+regularly, for example from a daily systemd timer or cron job that runs
+`pyvpn asn refresh && pyvpn reload` as root.
 
 `drop:` blocks a destination for the policy's apps instead of routing it:
 `drop:ads.example` (its subdomains too), `drop:cidr:192.0.2.0/24` or
@@ -358,7 +404,7 @@ blocked.
 Rule files can be checked and converted:
 
 ```bash
-pyvpn rules check work.rules                 # validate a rule file
+pyvpn rules check work.rules                 # validate a rule file (and its asn: cache entries)
 pyvpn rules test work.rules www.corp.example # which rule matches a name
 pyvpn rules import adguard-list.txt          # convert hosts/AdGuard/dnsmasq lists
 pyvpn rules export Office --config /etc/pyvpn/config.json
@@ -390,7 +436,6 @@ The daemon refuses these, or they have no effect yet. Don't rely on them:
 | Feature | What happens |
 |---|---|
 | `"isolation": "netns"` on a policy | The daemon refuses the config (`isolation 'netns' is not supported by the daemon yet`). |
-| `asn:` rules in `domains` | Refused: nothing fetches the ASN prefix cache yet. Use `cidr:` rules instead. |
 | snake's per-device rules (`session:`, `route:`, `drop[...]:`, `if:` with `then:`/`else:`) | Refused by the daemon; `pyvpn rules check` reports them. |
 | `exclude_apps` by `exe`, `name`, `unit`, `flatpak` or `snap` on a policy with only `domains` | Refused by the daemon and `pyvpn test`. Exclude by `uid` or `user` instead. |
 | `exclude_apps` for programs started from inside a policy with `apps` | They stay routed by the policy; exclusions only stop a process from being placed. `pyvpn test` warns. |
@@ -403,5 +448,6 @@ The daemon refuses these, or they have no effect yet. Don't rely on them:
 | A policy shows `unreachable` although the VPN is up | The interface name doesn't match `interface` (try a pattern like `tun*`), or `"gateway": "auto"` found no gateway. Check `ip -br addr`. With `"probe": true`, the probes may be failing: the daemon log says `probes fail through <interface>`. Check that the `settings.probe_targets` addresses accept TCP connections through the VPN, e.g. `curl --interface tun0 https://1.1.1.1`. |
 | An app isn't routed | Check that `pyvpn apps` lists its policy, and that the process is in the cgroup: `cat /proc/<pid>/cgroup` should show `pyvpn.slice/p-<id>`. Connections opened before it was placed keep their old route; restart the app or use `pyvpn run`. |
 | DNS fails inside a policy | `pyvpn audit` shows the DNS state. The stub answers `SERVFAIL` when the target is down, by design. |
+| `cannot activate destination rules: … asn:…` or `last error: ASN cache: …` | The ASN cache entry is missing, stale or not owned by root. Run `sudo pyvpn asn refresh`, then `sudo pyvpn reload`; `pyvpn asn status` shows each entry. |
 | `last error: process watcher failed` | The daemon can't subscribe to process events. It needs root, in the host's network namespace. `pyvpn run` still works. |
 | Everything is blocked after uninstalling | Rules stay after the daemon stops. Run `sudo pyvpn disable` with the daemon running, or remove them by hand: `sudo nft delete table inet pyvpn`, then delete the `ip rule`s with fwmark `0x5059…`. |
