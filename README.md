@@ -36,6 +36,10 @@ pip install snakevpn
 pyvpn --version
 ```
 
+The [installation guide](docs/install.md) covers the requirements, systemd
+setup, upgrades and uninstalling. The [usage guide](docs/usage.md) explains
+every configuration field, the command output and troubleshooting.
+
 The PyPI package is **`snakevpn`**; the command and the Python import are
 `pyvpn`. Requires Python 3.11 or newer.
 
@@ -59,7 +63,7 @@ to an ordered list of targets:
   "version": 1,
   "targets": [
     {"name": "jp", "interface": "wg-jp"},
-    {"name": "nl", "interface": "tun*", "probe": true}
+    {"name": "nl", "interface": "tun*"}
   ],
   "policies": [
     {"name": "Japan browsing", "targets": ["jp", "nl"], "on_down": "default",

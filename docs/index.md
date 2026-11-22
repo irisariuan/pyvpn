@@ -4,7 +4,7 @@ description: Per-process policy routing for Linux. Send each app's traffic and D
 canonical: https://irisariuan.github.io/pyvpn/
 html: https://irisariuan.github.io/pyvpn/index.html
 license: GPL-3.0-or-later
-status: pre-release (no working commands yet)
+status: alpha (0.0.x)
 ---
 
 # pyvpn wiki
@@ -14,10 +14,12 @@ traffic, and its DNS, out through an interface you choose (`wg-jp`, `tun0`,
 `wlan1`, …). When that interface is down, the policy falls back to the next
 interface or the normal default route, or blocks the traffic (kill switch).
 
-> **Status: early development.** Nothing on this page described as a command
-> works yet; the CLI only prints its version. Everything marked *planned*
-> follows [PLAN.md](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md),
-> which is the source of truth.
+> **Status: alpha (0.0.x).** `pyvpn-daemon` routes traffic and enforces kill
+> switches on Linux. It's tested end to end in network namespaces but hasn't
+> been audited, so don't rely on it alone for privacy yet. A few configuration
+> options are [not supported yet](usage.md#not-supported-yet).
+>
+> **Guides:** [Installation](install.md) · [Usage](usage.md)
 
 - PyPI name: `snakevpn` · import package and command: `pyvpn`
 - Python ≥ 3.11 · Linux with cgroup v2
@@ -64,7 +66,7 @@ It is the client-side counterpart of
 | **Policy** | A named rule: a set of apps, an ordered list of targets, and what to do when every target is down. |
 | **App selector** | How a policy finds its apps: launched with `pyvpn run`, executable path or name, systemd unit, uid or user, Flatpak or Snap ID. |
 | **`on_down`** | Used after every target in the list is down: `default` falls back to the normal route, `block` drops the traffic (kill switch). |
-| **Usable target** | The link is up and has an address. An optional reachability probe or exit-country check can also be required. |
+| **Usable target** | The link is up and has an address (and, with `"gateway": "auto"`, a gateway). Reachability probes are planned. |
 | **Destination filter** | Optional domain, `asn:` or `cidr:` rules (snake's rule language) that limit a policy to matching destinations. |
 
 ### Target types
@@ -81,38 +83,40 @@ It is the client-side counterpart of
 |---|---|---|
 | launched by pyvpn | `pyvpn run -p JP -- firefox` | The child starts in cgroup `pyvpn.slice/p-<id>`; every descendant follows. |
 | executable | `{"exe": "/usr/bin/qbittorrent"}`, `{"name": "steam"}` | A process watcher moves matching PIDs into the policy's cgroup. |
-| systemd unit | `{"unit": "transmission-daemon.service"}` | Matches the unit's existing cgroup; nothing is moved. |
+| systemd unit | `{"unit": "transmission-daemon.service"}` | The process watcher moves the unit's processes into the policy's cgroup. |
 | user | `{"uid": 1001}`, `{"user": "torrent"}` | nft `meta skuid`. |
 | Flatpak / Snap | `{"flatpak": "org.mozilla.firefox"}` | Its `app-flatpak-…scope` cgroup. |
-| exclusions | `"exclude_apps": [...]` | Same selectors; an excluded app never matches. |
+| exclusions | `"exclude_apps": [...]` | Same selectors; an excluded app never matches. Not enforced yet. |
 
 Sockets that are already open keep their route. New connections follow the
 new policy.
 
 ## Install
 
-*Planned.* pyvpn is not on PyPI yet. It will be published as `snakevpn`,
-because the name `pyvpn` is taken there.
-
 ```bash
 pip install snakevpn
 pyvpn --version
 ```
 
-Requirements: Linux with cgroup v2 (the default on current distributions),
-nftables, and root for the daemon. The CLI runs as a normal user.
+The PyPI package is `snakevpn`; the commands are `pyvpn` (CLI) and
+`pyvpn-daemon` (root daemon). Requirements: Linux with cgroup v2 (the default
+on current distributions), the `nft` command (nftables), and root for the
+daemon. The CLI, including `pyvpn run`, runs as a normal user. The
+[installation guide](install.md) covers systemd setup, upgrades and
+uninstalling.
 
 ## Configuration
 
-*Planned.* The configuration is JSON. Targets name interfaces; policies map
-apps to an ordered list of targets.
+The configuration is JSON, in `/etc/pyvpn/config.json` by default. Targets
+name interfaces; policies map apps to an ordered list of targets. The
+[usage guide](usage.md#writing-a-configuration) explains every field.
 
 ```json
 {
   "version": 1,
   "targets": [
     {"name": "jp",     "interface": "wg-jp"},
-    {"name": "nl",     "interface": "tun*", "probe": true},
+    {"name": "nl",     "interface": "tun*"},
     {"name": "office", "interface": "wlan1", "gateway": "auto"}
   ],
   "app_groups": [
@@ -122,12 +126,11 @@ apps to an ordered list of targets.
     {"name": "Japan browsing", "targets": ["jp", "nl"], "on_down": "default",
      "apps": ["group:browsers", {"name": "steam"}],
      "leak": {"dns_via_target": true, "block_doh": true, "ipv6": "route"}},
-    {"name": "Torrents", "targets": ["nl"], "on_down": "block", "isolation": "netns",
+    {"name": "Torrents", "targets": ["nl"], "on_down": "block",
      "apps": [{"exe": "/usr/bin/qbittorrent"}], "leak": {"ipv6": "block"}},
     {"name": "Office", "targets": ["office"],
      "apps": [{"name": "ssh"}], "domains": ["corp.example", "cidr:10.20.0.0/16"]}
-  ],
-  "settings": {"probe_targets": ["1.1.1.1:443"], "probe_interval": 15}
+  ]
 }
 ```
 
@@ -137,30 +140,32 @@ apps to an ordered list of targets.
 |---|---|---|
 | `interface` | target | Interface name or pattern (`tun*`). |
 | `gateway` | target | An address, or `"auto"` to require a discovered next hop. |
-| `probe` | target | `true` to require a TCP reachability probe through the interface. |
+| `probe` | target | *Not supported yet:* a target with `true` stays unusable. |
 | `targets` | policy | Target names in priority order. The first usable one wins. |
 | `on_down` | policy | `default` or `block`. |
 | `apps` | policy | App selectors or `group:<name>`. |
 | `domains` | policy | Optional destination filters. |
-| `isolation` | policy | `netns` to run the app in its own network namespace. |
+| `isolation` | policy | *Not supported yet:* the daemon refuses `netns`. |
 | `leak` | policy | DNS and leak toggles; see [DNS and leak protection](#dns-and-leak-protection). |
 
 ## Commands
 
-*Planned.*
-
 ```bash
 pyvpn run -p "Japan browsing" -- firefox   # start an app inside a policy
-pyvpn status                               # policies and their active targets
-pyvpn apps                                 # live PID → policy → interface
+pyvpn status                               # policies and their active routes
+pyvpn apps                                 # policy bindings by cgroup and uid
 pyvpn audit                                # what each policy does and does not protect
+pyvpn reload                               # re-read the config (root)
+pyvpn disable                              # remove all pyvpn rules and routes (root)
+pyvpn test [config]                        # validate a config
 pyvpn rules check example.rules            # validate destination rules (snake format)
-pyvpn install                              # install the systemd unit for the daemon
-pyvpn disable                              # remove all pyvpn rules and routes
+pyvpn install --write                      # install the systemd unit for the daemon
+pyvpn desktop --policy NAME                # print or install a menu launcher
 ```
 
-`pyvpn rules` also has `test`, `import` and `export` subcommands. A `--json`
-output mode is planned for scripts and agents.
+`pyvpn rules` also has `test`, `import` and `export` subcommands. Put
+`--json` before a command for machine-readable output. See the
+[usage guide](usage.md) for examples and real output.
 
 ## How it works
 
@@ -203,19 +208,18 @@ process ── in cgroup pyvpn.slice/p-<id>, or matched by uid / unit cgroup
 - `pyvpn audit` lists what each policy does and does not protect.
 - **Fail closed:** with `on_down: block`, traffic is dropped, never sent
   through the default route.
-- `isolation: netns` puts an app in its own network namespace, so it cannot
-  leak even if the daemon stops. This works only for apps started with
-  `pyvpn run`.
+- `isolation: netns`, which runs an app in its own network namespace, is
+  planned; the daemon refuses it for now.
 
 ## Limitations and risks
 
 - **Linux only.** macOS, Windows and a proxy mode are deferred.
-- **cgroup v2 is required.** On cgroup v1 or hybrid systems, only uid-based
-  policies will work.
+- **cgroup v2 is required.** There is no cgroup v1 or hybrid fallback yet.
 - **Moving running processes** between cgroups can conflict with systemd
   scopes. Prefer `pyvpn run` or systemd units.
-- **VPN apps with their own kill switch** can override pyvpn's rules.
-  `pyvpn audit` will report competing rules.
+- **VPN apps with their own kill switch** can override pyvpn's rules. pyvpn
+  drops marked traffic that would leave through the wrong interface, but
+  `pyvpn audit` doesn't report competing rules yet.
 - The daemon needs root; everything else runs as a normal user.
 
 ## Roadmap
@@ -248,7 +252,8 @@ With `on_down: default`, the app uses the normal route. With
 `on_down: block`, its traffic is dropped.
 
 **Why is the PyPI package called `snakevpn`?**
-The name `pyvpn` is already taken on PyPI.
+The name `pyvpn` was already taken on PyPI. The commands are still `pyvpn`
+and `pyvpn-daemon`.
 
 ## Development
 
@@ -257,7 +262,7 @@ pip install -e '.[dev]'
 ruff check . && ruff format --check .
 mypy src
 pytest                         # unit tests: no root, never touch the host network
-sudo pytest -m integration     # network-namespace tests (Linux, root), once available
+sudo pytest -m integration     # network-namespace tests (Linux, root)
 ```
 
 Read before contributing:
