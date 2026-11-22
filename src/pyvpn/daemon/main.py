@@ -228,7 +228,7 @@ def build_daemon(
 
     ``config`` (the startup config) is loaded from ``options.config_path``
     when not given; the target watcher needs its targets up front, since
-    reload cannot change targets.
+    reload cannot change targets or probe settings.
     """
     if config is None:
         config = load_config(options.config_path)
@@ -237,7 +237,7 @@ def build_daemon(
 
     apps = AppManager(CgroupManager(options.resolved_cgroup_root()))
     route_and_place = getattr(backend, "place_policy_pid", None)
-    targets = NetlinkTargetWatcher(config.targets, netlink)
+    targets = NetlinkTargetWatcher(config.targets, netlink, settings=config.settings)
 
     daemon: Daemon | None = None
 

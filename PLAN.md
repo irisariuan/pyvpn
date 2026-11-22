@@ -289,14 +289,46 @@ A policy lists targets in priority order. The first *usable* one wins:
 
 * **usable = link is up and has an address** (always checked, from netlink
   events)
-* optional **reachability probe**: TCP connect to `probe_targets` through
-  that interface (socket bound with `SO_BINDTODEVICE`), for VPNs that keep
-  the interface up while the tunnel behind it is dead
+* optional **reachability probe** (`"probe": true` on the target): TCP
+  connect to `settings.probe_targets` through that interface, for VPNs that
+  keep the interface up while the tunnel behind it is dead (see below)
 * optional **exit-country check** (snake's `expected_country`, geo URL
   through the interface)
 
 Fail-back hold and the latency-based selection are ported from snake's
 `health` module, but they are opt-in. The default is plain link state.
+
+**Probe design** (`targets/health.py`, `ProbingTargetWatcher`):
+
+* The daemon probes each probed target every `settings.probe_interval`
+  seconds (default 15) while its link is usable. A probe is a TCP connect to
+  each `settings.probe_targets` endpoint in turn (IP literals only, so no DNS
+  over the default route), with a timeout of `min(3 s, interval)`; any
+  successful connect is a success.
+* The socket is bound to the target's interface (`SO_BINDTODEVICE` on Linux,
+  `platform/linux/netlink.py:tcp_connect_bound`) and is never connected if
+  the bind fails, so a probe cannot succeed over another route. It carries no
+  fwmark, so pyvpn's policy rules and egress drops don't apply to it.
+* **Fail closed:** a probed target is down until its first probe succeeds.
+  Health resets (down, "fresh") at daemon start and whenever the interface
+  appears, disappears or changes: a new name (pattern targets) or the same
+  name with a new interface index (a delete and re-create that netlink
+  coalesced into one snapshot); results of probes still
+  in flight for the old interface are dropped. A fresh target is probed at
+  once and comes up on one success, so a reconnected VPN is used quickly.
+* **Hysteresis:** once it has been up, a target goes down after 2
+  consecutive failed probes and comes back after 2 consecutive successes
+  (`PROBE_FALL`, `PROBE_RISE`). Link loss still takes it down at once.
+* Only an up/down flip changes the target's `TargetStatus` (`usable`); the
+  watcher yields a status map only when it differs from the last one, so a
+  probe that confirms the current state never triggers a reconcile.
+* A probed target that is down is treated like any unusable target: the
+  policy moves to its next target, then `on_down` (fallback or block).
+* Reload cannot change targets or `settings` (the watcher is built at
+  startup); restart the daemon instead.
+* Limitation: probing a broadcast interface relies on the main table having
+  a route through it (e.g. its own default route with a metric); without one
+  the kernel assumes the probe address is on-link.
 
 ### 3.3 Identifying apps
 

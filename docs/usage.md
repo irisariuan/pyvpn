@@ -85,10 +85,36 @@ A complete example:
 | `name` | yes | Name used in policies. Must be unique. |
 | `interface` | yes | Interface name (`wg-jp`) or a glob pattern (`tun*`, `wg-jp*`). Use a pattern for VPN apps whose interface name changes on reconnect. |
 | `gateway` | no | Next hop. Leave it out for point-to-point interfaces (`wg*`, `tun*`, `ppp*`). Use `"auto"` on Ethernet or Wi-Fi to take the interface's own default gateway; the target is only usable once one is found. Or give an IP address. |
+| `probe` | no | `true` to check that traffic really gets through the interface (see [Health probes](#health-probes)). Default `false`. |
 
 A target is **usable** when its link is up and has an address (and, with
 `"gateway": "auto"`, a gateway). The daemon sees changes immediately through
 netlink; it doesn't poll.
+
+#### Health probes
+
+Some VPN apps keep their interface up while the tunnel behind it is dead. For
+those, set `"probe": true` on the target. The daemon then also opens a TCP
+connection to the addresses in `settings.probe_targets` every
+`settings.probe_interval` seconds, on a socket bound to the target's
+interface, so a probe can never succeed over another route:
+
+```json
+"settings": {"probe_targets": ["1.1.1.1:443", "[2606:4700:4700::1111]:443"], "probe_interval": 15}
+```
+
+- A probe succeeds when a connection to any of the addresses opens (at most
+  3 seconds each). Use IP addresses, not hostnames. The defaults are
+  `["1.1.1.1:443"]` and 15 seconds.
+- A probed target is **down until its first probe succeeds**, and again each
+  time its interface appears or changes. The first success brings it up.
+- After that, it goes down after **2 failed probes in a row** and comes back
+  after **2 successful probes in a row**, so one lost probe doesn't switch
+  the route.
+- While a probed target is down, the policy uses its next target or its
+  `on_down` (fallback or kill switch), as for a target whose link is down.
+- Probes only run while the link is up; a link that goes down takes the
+  target down at once.
 
 ### Policies
 
@@ -255,8 +281,8 @@ rejected, the old one stays in force and `pyvpn reload` prints the reason.
 
 Reloading has two limits:
 
-- **Targets can't change on reload.** Restart the daemon instead
-  (`sudo systemctl restart pyvpn`).
+- **Targets and `settings` can't change on reload.** Restart the daemon
+  instead (`sudo systemctl restart pyvpn`).
 - **Policy positions are reserved.** Once a policy's cgroup has held apps, a
   reload must keep that policy at the same position, because running apps are
   still in `pyvpn.slice/p-<id>`. Add new policies at the end.
@@ -332,11 +358,9 @@ The daemon refuses these, or they have no effect yet. Don't rely on them:
 
 | Feature | What happens |
 |---|---|
-| `"probe": true` on a target | The target stays **unusable**, with a warning in the log. Leave it out. |
 | `"isolation": "netns"` on a policy | The daemon refuses the config (`isolation 'netns' is not supported by the daemon yet`). |
 | `asn:` rules in `domains` | Refused: nothing fetches the ASN prefix cache yet. Use `cidr:` rules instead. |
 | snake's per-device rules (`session:`, `route:`, `drop[...]:`, `if:` with `then:`/`else:`) | Refused by the daemon; `pyvpn rules check` reports them. |
-| `settings.probe_targets`, `settings.probe_interval` | Accepted, but unused until probes work. |
 | `exclude_apps` | Accepted, but the daemon doesn't enforce it: excluded apps are still routed by the policy. |
 
 ## Troubleshooting
@@ -344,7 +368,7 @@ The daemon refuses these, or they have no effect yet. Don't rely on them:
 | Symptom | What to check |
 |---|---|
 | `pyvpn run` says `routing rules are not installed yet` | The daemon's apply failed or it's disabled. `pyvpn status` shows `last error:`; check `journalctl -u pyvpn`. |
-| A policy shows `unreachable` although the VPN is up | The interface name doesn't match `interface` (try a pattern like `tun*`), or the target has `"probe": true`, or `"gateway": "auto"` found no gateway. Check `ip -br addr`. |
+| A policy shows `unreachable` although the VPN is up | The interface name doesn't match `interface` (try a pattern like `tun*`), or `"gateway": "auto"` found no gateway. Check `ip -br addr`. With `"probe": true`, the probes may be failing: the daemon log says `probes fail through <interface>`. Check that the `settings.probe_targets` addresses accept TCP connections through the VPN, e.g. `curl --interface tun0 https://1.1.1.1`. |
 | An app isn't routed | Check that `pyvpn apps` lists its policy, and that the process is in the cgroup: `cat /proc/<pid>/cgroup` should show `pyvpn.slice/p-<id>`. Connections opened before it was placed keep their old route; restart the app or use `pyvpn run`. |
 | DNS fails inside a policy | `pyvpn audit` shows the DNS state. The stub answers `SERVFAIL` when the target is down, by design. |
 | `last error: process watcher failed` | The daemon can't subscribe to process events. It needs root, in the host's network namespace. `pyvpn run` still works. |

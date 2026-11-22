@@ -119,7 +119,7 @@ def test_status_for_missing_interface_is_down() -> None:
     assert not status.usable
 
 
-def test_unsupported_probe_only_marks_its_target_unusable() -> None:
+def test_probed_target_is_down_until_a_probe_succeeds() -> None:
     probe_target = Target(name="vpn", interface="tun0", probe=True)
     healthy_target = Target(name="office", interface="eth0")
     snapshots = (
@@ -134,6 +134,7 @@ def test_unsupported_probe_only_marks_its_target_unusable() -> None:
     statuses = NetlinkTargetWatcher(
         (probe_target, healthy_target),
         OneSnapshotReader(),
+        connect=lambda *_: False,  # never a real socket in unit tests
     )
 
     async def collect() -> list[dict[str, TargetStatus]]:
@@ -301,12 +302,15 @@ def test_watchers_skip_bursts_that_change_no_target() -> None:
     assert asyncio.run(collect()) == (1, 1)
 
 
-def test_probe_target_is_unusable_and_warns(caplog: pytest.LogCaptureFixture) -> None:
+def test_probed_target_needs_probe_health_on_top_of_link_state() -> None:
     target = Target(name="probed", interface="wg0", probe=True)
-    snapshot = InterfaceSnapshot("wg0", 42, True, (_address("10.0.0.2"),))
-    assert not status_for_target(target, (snapshot,)).usable
-    assert not status_for_target(target, (snapshot,)).usable
-    assert caplog.text.count("probe: true, which is not supported yet") == 1
+    up = InterfaceSnapshot("wg0", 42, True, (_address("10.0.0.2"),))
+    down = InterfaceSnapshot("wg0", 42, False, (_address("10.0.0.2"),))
+    assert not status_for_target(target, (up,)).usable  # fail closed by default
+    assert status_for_target(target, (up,), probe_ok=True).usable
+    assert not status_for_target(target, (down,), probe_ok=True).usable
+    plain = Target(name="plain", interface="wg0")
+    assert status_for_target(plain, (up,), probe_ok=False).usable
 
 
 def test_watchers_conform_to_the_services_protocol() -> None:

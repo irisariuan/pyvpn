@@ -11,7 +11,6 @@ from pyvpn.state import IPAddress, TargetStatus
 from pyvpn.targets.resolver import resolve_interfaces
 
 log = logging.getLogger(__name__)
-_warned_probe: set[str] = set()
 
 
 @dataclass(frozen=True)
@@ -26,8 +25,15 @@ class InterfaceSnapshot:
 def status_for_target(
     target: Target,
     interfaces: Iterable[InterfaceSnapshot],
+    *,
+    probe_ok: bool = False,
 ) -> TargetStatus:
-    """Build one target status from a point-in-time interface snapshot."""
+    """Build one target status from a point-in-time interface snapshot.
+
+    ``probe_ok`` is the target's probe health (see ``pyvpn.targets.health``).
+    It only matters for targets with ``probe: true``, which stay unusable
+    unless it is true: fail closed.
+    """
 
     snapshots = tuple(interfaces)
     matches = resolve_interfaces(target.interface, (item.name for item in snapshots))
@@ -49,16 +55,10 @@ def status_for_target(
     else:
         gateways = (target.gateway,)
 
-    if target.probe and target.name not in _warned_probe:
-        _warned_probe.add(target.name)
-        log.warning(
-            "target %r sets probe: true, which is not supported yet; it stays unusable",
-            target.name,
-        )
     usable = (
         snapshot.up
         and bool(snapshot.addresses)
-        and not target.probe
+        and (probe_ok or not target.probe)
         and (target.gateway != "auto" or bool(gateways))
     )
     # TargetStatus carries one next hop (Phase 0 contract); IPv4 is preferred.
@@ -76,7 +76,9 @@ class SnapshotTargetWatcher:
     """Reconcile configured targets whenever a snapshot stream changes.
 
     Implements the ``pyvpn.services.TargetWatcher`` protocol on top of any
-    OS-specific stream of interface snapshots (e.g. Linux netlink).
+    OS-specific stream of interface snapshots (e.g. Linux netlink). It sends
+    no probes, so targets with ``probe: true`` stay unusable here; use
+    :class:`pyvpn.targets.health.ProbingTargetWatcher` for those.
     """
 
     def __init__(
