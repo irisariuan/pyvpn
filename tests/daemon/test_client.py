@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from pyvpn.constants import MAX_POLICIES
 from pyvpn.daemon.client import (
     DaemonClient,
     DaemonProtocolError,
@@ -184,3 +185,15 @@ def test_place_pid_rejects_invalid_pid(pid: int) -> None:
 def test_place_pid_rejects_invalid_policy(policy: object) -> None:
     with pytest.raises(ValueError, match="policy"):
         DaemonClient().place_pid(123, policy)
+
+
+@pytest.mark.parametrize("policy", [0, -1, MAX_POLICIES + 1])
+def test_place_pid_rejects_out_of_range_ids(policy: int) -> None:
+    with pytest.raises(ValueError, match=f"between 1 and {MAX_POLICIES}"):
+        DaemonClient().place_pid(123, policy)
+
+
+def test_place_pid_accepts_the_last_policy_id() -> None:
+    # Validation passes, so the request is attempted and fails on the socket.
+    with pytest.raises(DaemonUnavailable):
+        DaemonClient(Path("/nonexistent/pyvpn.sock")).place_pid(123, MAX_POLICIES)
