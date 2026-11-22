@@ -15,6 +15,8 @@ Packet path (PLAN.md §3)::
         loaded ones (re-created, so its id changed) -> reject
         LAN / loopback / multicast destination -> accept unchanged
         socket already carries a pyvpn mark -> accept unchanged
+        conntrack mark of a later policy Q, <policy P apps>, daddr in P's
+            drop set -> reject (P comes first, so its drops win over Q)
         conntrack mark of policy P -> enforce P's current leak rules and route
             (reject while P is a kill switch)
         <policy P apps> -> jump p<P>
@@ -396,6 +398,7 @@ def _output_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:
         ("output", [_daddr_in(6, "lan_v6"), _ACCEPT]),
         ("output", [_any_pyvpn_mark(), _ACCEPT]),
     ]
+    rules += _tracked_drop_rules(plan)
     for p in plan.policies:
         if p.route == "unreachable":
             rules.append(("output", [_ct_mark_is(p.mark), _REJECT]))
@@ -404,6 +407,32 @@ def _output_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:
     for p in plan.policies:
         for sel in _selectors(p):
             rules.append(("output", [*sel, {"jump": {"target": f"p{p.policy_id}"}}]))
+    return rules
+
+
+def _tracked_drop_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:
+    """Apply earlier policies' drop sets to flows tracked for a later policy.
+
+    A tracked flow jumps straight to the chain of the policy that first
+    marked it, skipping the selectors of earlier policies. Policies are
+    tried in order, so a destination that an earlier policy P (whose apps
+    the packet comes from) learned to drop must also cut a flow a later
+    policy Q marked before the address was learned. P's own flows reach its
+    drop rules at the head of ``p<P>``; flows of policies before P are not
+    affected, since P never had a say for them.
+    """
+    rules: list[tuple[str, Expr]] = []
+    policies = plan.policies
+    for i, p in enumerate(policies):
+        later = sorted({q.mark for q in policies[i + 1 :]})
+        if p.drops is None or not later:
+            continue
+        marks: Any = later[0] if len(later) == 1 else {"set": later}
+        tracked = _match(_masked({"ct": {"key": "mark"}}, POLICY_MARK_MASK), marks)
+        for sel in _selectors(p):
+            for version in (4, 6):
+                dropped = _daddr_in(version, drop_set_name(p.policy_id, version))
+                rules.append(("output", [tracked, *sel, dropped, _REJECT]))
     return rules
 
 

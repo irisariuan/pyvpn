@@ -33,6 +33,7 @@ from pyvpn.routing.plan import POLICY_MARK_MASK
 from pyvpn.state import AppBinding, DestSet, PolicyPlan, RoutingPlan
 
 GOLDEN = Path(__file__).parent / "golden"
+_REJECT = {"reject": {"type": "icmpx", "expr": "admin-prohibited"}}
 UPDATE = os.environ.get("PYVPN_UPDATE_GOLDEN") == "1"
 
 
@@ -133,6 +134,22 @@ VARIANTS: dict[str, RoutingPlan] = {
                 dests=DestSet(1),
                 drops=drops(),
             ),
+        )
+    ),
+    # An app policy that drops before a policy for every process that routes,
+    # and a later kill-switch policy: tracked flows of both must still hit
+    # policy 1's drop set.
+    "multi_drops": RoutingPlan(
+        (
+            policy(1, dests=DestSet(1), drops=drops()),
+            policy(2, apps=AppBinding(2, any_process=True), dests=dests(2)),
+            policy(3, route="unreachable", interface=None, apps=AppBinding(3, uids=(1003,))),
+        )
+    ),
+    "two_policy_drops": RoutingPlan(
+        (
+            policy(1, apps=AppBinding(1, uids=(1001,)), dests=DestSet(1), drops=drops()),
+            policy(2, apps=AppBinding(2, any_process=True), dests=dests(2), drops=drops(2)),
         )
     ),
     "multi": RoutingPlan(
@@ -351,6 +368,44 @@ def test_drop_sets_reject_first_in_the_policy_chain(name: str) -> None:
     }
     assert sets["p1_drop_v4"]["type"] == "ipv4_addr"
     assert sets["p1_drop_v6"]["type"] == "ipv6_addr"
+
+
+@pytest.mark.parametrize("name", ["multi_drops", "two_policy_drops"])
+def test_tracked_flows_of_later_policies_hit_earlier_drop_sets(name: str) -> None:
+    """A flow marked by a later policy jumps straight to that policy's chain,
+    so the earlier policies' drop sets are checked before that jump."""
+    plan = VARIANTS[name]
+    output = _rules(build_ruleset(plan), "output")
+    tracked_mark = {"&": [{"ct": {"key": "mark"}}, POLICY_MARK_MASK]}
+
+    def index(pred: Any) -> int:
+        return next(i for i, r in enumerate(output) if pred(r))
+
+    for i, p in enumerate(plan.policies):
+        later = plan.policies[i + 1 :]
+        drop_rules = [
+            r for r in output if r[-1] == _REJECT and f"@p{p.policy_id}_drop_v" in json.dumps(r)
+        ]
+        if p.drops is None or not later:
+            assert drop_rules == []
+            continue
+        marks = sorted(q.mark for q in later)
+        right: Any = marks[0] if len(marks) == 1 else {"set": marks}
+        assert drop_rules and all(
+            r[0] == {"match": {"op": "==", "left": tracked_mark, "right": right}}
+            for r in drop_rules
+        )
+        last_drop = max(output.index(r) for r in drop_rules)
+        for q in later:
+            # ``ct mark Q -> jump p<Q>`` (or reject, for a kill switch)
+            jump = index(
+                lambda r, q=q: len(r) == 2 and r[0].get("match", {}).get("right") == q.mark
+            )
+            assert last_drop < jump
+        # Not before the exemptions (LAN, pyvpn's own sockets).
+        assert output.index(drop_rules[0]) > index(
+            lambda r: r[-1] == {"accept": None} and "mark" in json.dumps(r)
+        )
 
 
 def test_policies_without_drop_rules_have_no_drop_sets() -> None:

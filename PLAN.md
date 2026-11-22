@@ -435,7 +435,10 @@ it as `PolicyPlan.drops` (None for a policy without `drop:` rules), the
 backend loads it as `p<id>_drop_v4` / `p<id>_drop_v6`, and the first rules
 of the policy's chain reject those destinations with `icmpx
 admin-prohibited`, before the conntrack mark and the route, so connections
-opened before the address was learned are cut too. Like routing, drop sets
+opened before the address was learned are cut too. A flow tracked for a
+later policy jumps straight to that policy's chain, so the output chain
+first rejects such flows (`ct mark` of any later policy) from an earlier
+policy's processes to that policy's drop set. Like routing, drop sets
 apply only to the policy's processes, after the LAN / loopback / multicast
 exemption and pyvpn's own marked sockets (the DNS stub's upstreams), and an
 earlier policy that routes the same address for the same process wins.
