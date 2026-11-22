@@ -322,3 +322,77 @@ async def test_deferred_processes_are_placed_once_rules_are_installed(
     finally:
         await assembly.daemon.stop()
         await assembly.close()
+
+
+def test_backend_dependency_errors_exit_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    def import_module(name: str, package: str | None = None) -> types.ModuleType:
+        raise ModuleNotFoundError("No module named 'pyroute2'", name="pyroute2")
+
+    monkeypatch.setattr(daemon_main.importlib, "import_module", import_module)
+    with pytest.raises(BackendUnavailable, match="missing module 'pyroute2'"):
+        load_backend("linux")
+
+
+def test_process_watcher_is_rejected_with_dry_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_config(tmp_path / "config.json")
+    argv = ["--backend", "dry-run", "--process-watcher", "--config", str(tmp_path / "config.json")]
+    assert daemon_main.main(argv) == 2
+    assert "cannot be used with --backend dry-run" in capsys.readouterr().err
+
+
+async def test_netns_isolation_is_refused_until_enforced(tmp_path: Path) -> None:
+    policy = {
+        "name": "Strict",
+        "targets": ["jp"],
+        "on_down": "block",
+        "apps": [{"name": "firefox"}],
+        "isolation": "netns",
+        "leak": {"dns_via_target": False},
+    }
+    config = write_config(tmp_path / "config.json", policies=[policy])
+    opts = Options(
+        config_path=tmp_path / "config.json",
+        socket_path=tmp_path / "pyvpn.sock",
+        state_dir=tmp_path / "state",
+        backend="dry-run",
+    )
+    backend = DryRunBackend()
+    assembly = build_daemon(opts, backend=backend, config=config, netlink=FakeNetlink())
+    try:
+        with pytest.raises(daemon_main.ApiError, match="isolation 'netns' is not supported"):
+            await assembly.daemon.start()
+        assert backend.applies == 0
+    finally:
+        await assembly.close()
+
+
+class FailingWatcher:
+    def __init__(self, policies: Any, place: Any, *, groups: Any = ()) -> None:
+        pass
+
+    async def run_proc_connector(self) -> None:
+        raise PermissionError("proc connector needs CAP_NET_ADMIN")
+
+    def stop(self) -> None:
+        pass
+
+
+async def test_process_watcher_failure_shows_in_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(daemon_main, "ProcessWatcher", FailingWatcher)
+    assembly = build(tmp_path, process_watcher=True)
+    await assembly.daemon.start()
+    try:
+        for _ in range(100):
+            if assembly.daemon.status().last_error:
+                break
+            await asyncio.sleep(0.01)
+        error = assembly.daemon.status().last_error
+        assert error is not None
+        assert "process watcher failed: proc connector needs CAP_NET_ADMIN" in error
+    finally:
+        await assembly.daemon.stop()
+        await assembly.close()

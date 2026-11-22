@@ -239,10 +239,17 @@ class Daemon:
         - hostname rules need a stub to learn addresses, which only runs with
           ``dns_via_target`` (otherwise their traffic is never matched);
         - the target watcher is fixed at startup, so reload cannot change the
-          target definitions.
+          target definitions;
+        - ``isolation: netns`` cannot be enforced yet, and placing such an app
+          in an ordinary cgroup would silently give it weaker protection.
         """
         for policy in config.policies:
             where = f"policy {policy.name!r}"
+            if policy.isolation == "netns":
+                raise ApiError(
+                    "bad_request",
+                    f"{where}: isolation 'netns' is not supported by the daemon yet",
+                )
             if policy.domains and self._matcher_factory is None:
                 raise ApiError("bad_request", f"{where}: destination rules need a rule matcher")
             if policy.leak.dns_via_target and self._dns is None:
@@ -414,6 +421,10 @@ class Daemon:
             pid = self._resolve_policy(p.policy)
             await self._place_locked(p.pid, pid)
         return {"policy_id": pid}
+
+    def report_watcher_error(self, name: str, reason: str) -> None:
+        """Record a failed watcher owned by the composition root; ``status`` shows it."""
+        self._watcher_errors[name] = reason
 
     async def place_trusted(self, pid: int, policy_id: int) -> None:
         """Place ``pid`` for an in-process caller (the process watcher).

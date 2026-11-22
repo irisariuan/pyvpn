@@ -24,7 +24,7 @@ import importlib
 import logging
 import signal
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -69,13 +69,16 @@ def load_backend(name: str) -> Backend:
         raise BackendUnavailable(f"unknown backend {name!r}; choose one of {', '.join(BACKENDS)}")
     try:
         module = importlib.import_module(LINUX_BACKEND_MODULE)
-    except ModuleNotFoundError as exc:
-        if exc.name != LINUX_BACKEND_MODULE:
-            raise
+    except ImportError as exc:
+        if isinstance(exc, ModuleNotFoundError) and exc.name == LINUX_BACKEND_MODULE:
+            raise BackendUnavailable(
+                "the Linux routing backend is not part of this build "
+                f"({LINUX_BACKEND_MODULE} is missing), so nothing can be routed; refusing "
+                "to start. Use --backend dry-run to run the daemon without routing."
+            ) from exc
+        missing = f" (missing module {exc.name!r})" if exc.name else ""
         raise BackendUnavailable(
-            "the Linux routing backend is not part of this build "
-            f"({LINUX_BACKEND_MODULE} is missing), so nothing can be routed; refusing "
-            "to start. Use --backend dry-run to run the daemon without routing."
+            f"cannot load the Linux routing backend{missing}: {exc}; refusing to start"
         ) from exc
     backend_class = getattr(module, LINUX_BACKEND_CLASS, None)
     if backend_class is None:
@@ -121,8 +124,9 @@ class ProcessWatcherRunner:
     startup apply are placed once rules exist.
     """
 
-    def __init__(self, place: Place) -> None:
+    def __init__(self, place: Place, on_failure: Callable[[str], None] | None = None) -> None:
         self._place_pid = place
+        self._on_failure = on_failure
         self._watcher: ProcessWatcher | None = None
         self._task: asyncio.Task[None] | None = None
         self._rescan: asyncio.Task[None] | None = None
@@ -133,10 +137,12 @@ class ProcessWatcherRunner:
         self._deferred = False
         watcher = ProcessWatcher(config.policies, self._place, groups=config.app_groups)
         self._watcher = watcher
-        self._task = asyncio.ensure_future(self._run(watcher))
+        self._task = asyncio.ensure_future(self._run(watcher, self._on_failure))
         self._task.set_name("pyvpn-process-watcher")
 
     async def _place(self, pid: int, policy_id: int) -> None:
+        # CgroupError / OSError (e.g. the process exited first) propagate to
+        # ``ProcessWatcher._place``, which handles them per pid.
         try:
             await self._place_pid(pid, policy_id)
         except ApiError as exc:
@@ -167,13 +173,17 @@ class ProcessWatcherRunner:
         log.info("placed %d running processes after rules were installed", moved)
 
     @staticmethod
-    async def _run(watcher: ProcessWatcher) -> None:
+    async def _run(watcher: ProcessWatcher, on_failure: Callable[[str], None] | None) -> None:
         try:
             await watcher.run_proc_connector()
+            return
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             log.exception("process watcher failed; new processes are no longer placed")
+            reason = f"process watcher failed: {exc}"
+        if on_failure is not None:
+            on_failure(reason)
 
     def _stop_current(self) -> None:
         if self._watcher is not None:
@@ -260,7 +270,10 @@ def build_daemon(
     if options.watch_processes():
         # Through the daemon, never ``apps.place_pid`` directly: placement
         # must wait until the policy's rules are installed.
-        runner = ProcessWatcherRunner(daemon.place_trusted)
+        runner = ProcessWatcherRunner(
+            daemon.place_trusted,
+            on_failure=lambda reason: daemon.report_watcher_error("processes", reason),
+        )
         daemon.on_config = runner.update
         daemon.reconciler.on_applied = runner.on_applied
     return Assembly(daemon=daemon, backend=backend, dns=dns, apps=apps, process_watcher=runner)
@@ -364,18 +377,23 @@ async def serve(assembly: Assembly) -> int:
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, lambda: later(daemon.stop()))
-    loop.add_signal_handler(signal.SIGHUP, lambda: later(reload()))
     try:
         try:
             await daemon.start()
         except (ConfigError, ApiError, StateError, OSError) as exc:
             log.error("cannot start: %s", exc)
             return 1
+        # Only now: a reload must not run concurrently with startup's install.
+        loop.add_signal_handler(signal.SIGHUP, lambda: later(reload()))
         await daemon.wait_stopped()
         return 0
     finally:
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             loop.remove_signal_handler(sig)
+        # Finish shutdown deterministically: no reload may still be applying.
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
         await assembly.close()
 
 
@@ -383,6 +401,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=args.log_level, format="%(levelname)s %(name)s: %(message)s")
     options = options_from_args(args)
+    if options.dry_run and options.process_watcher:
+        print(
+            "pyvpn-daemon: --process-watcher cannot be used with --backend dry-run: "
+            "dry-run cgroups are plain directories, so no process would actually move",
+            file=sys.stderr,
+        )
+        return 2
     try:
         backend = load_backend(options.backend)
     except BackendUnavailable as exc:

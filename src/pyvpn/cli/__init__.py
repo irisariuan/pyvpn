@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -81,7 +82,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     install = commands.add_parser("install", help="render or write systemd installation files")
     install.add_argument("--scope", choices=("system", "user"), default="system")
-    install.add_argument("--exec-start", default="/usr/bin/pyvpn-daemon")
+    install.add_argument(
+        "--exec-start",
+        default=None,
+        help="daemon executable (default: pyvpn-daemon on PATH, else /usr/bin/pyvpn-daemon)",
+    )
     install.add_argument("--root", default=None, help="redirect absolute destinations for testing")
     install.add_argument("--write", action="store_true", help="write the generated unit file")
 
@@ -252,8 +257,14 @@ def _redirect_path(path: Path, root: str | None) -> Path:
     return Path(root) / str(path).lstrip("/")
 
 
+def _default_daemon_executable() -> str:
+    """The installed ``pyvpn-daemon`` (pip puts it in a venv or /usr/local/bin)."""
+    found = shutil.which("pyvpn-daemon")
+    return str(Path(found).absolute()) if found else "/usr/bin/pyvpn-daemon"
+
+
 def _run_install(args: argparse.Namespace, as_json: bool) -> int:
-    unit = render_systemd_unit(args.exec_start)
+    unit = render_systemd_unit(args.exec_start or _default_daemon_executable())
     path = _redirect_path(systemd_unit_path(args.scope), args.root)
     if args.write:
         write_install_file(InstallFile(path, unit))
