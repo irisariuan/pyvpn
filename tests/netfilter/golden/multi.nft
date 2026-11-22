@@ -1,0 +1,62 @@
+add table inet pyvpn
+delete table inet pyvpn
+add table inet pyvpn
+add set inet pyvpn lan_v4 { type ipv4_addr; flags interval; auto-merge; elements = { 0.0.0.0/8, 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255 }; }
+add set inet pyvpn lan_v6 { type ipv6_addr; flags interval; auto-merge; elements = { ::1, fc00::/7, fe80::/10, ff00::/8 }; }
+add set inet pyvpn p4_v4 { type ipv4_addr; flags interval; auto-merge; elements = { 198.51.100.7, 203.0.113.0/24 }; }
+add set inet pyvpn p4_v6 { type ipv6_addr; flags interval; auto-merge; elements = { 2001:db8::/32, 2001:db8:1::5 }; }
+add chain inet pyvpn dns { type nat hook output priority -100; policy accept; }
+add chain inet pyvpn output { type route hook output priority -90; policy accept; }
+add chain inet pyvpn egress { type filter hook postrouting priority 0; policy accept; }
+add chain inet pyvpn masq { type nat hook postrouting priority 100; policy accept; }
+add chain inet pyvpn restore { type filter hook prerouting priority -150; policy accept; }
+add chain inet pyvpn check_cgroup
+add chain inet pyvpn p1
+add chain inet pyvpn p1_route
+add chain inet pyvpn p2
+add chain inet pyvpn p2_route
+add chain inet pyvpn p3
+add chain inet pyvpn p3_route
+add chain inet pyvpn p4
+add chain inet pyvpn p4_route
+add rule inet pyvpn dns meta mark & 0xffff0000 0x50590000 return
+add rule inet pyvpn dns socket cgroupv2 level 2 "pyvpn.slice/p-1" meta l4proto { tcp, udp } th dport 53 redirect to :5301
+add rule inet pyvpn dns meta skuid 1003 meta l4proto { tcp, udp } th dport 53 redirect to :5303
+add rule inet pyvpn dns meta skuid >= 0 meta l4proto { tcp, udp } th dport 53 redirect to :5304
+add rule inet pyvpn output socket cgroupv2 level 1 "pyvpn.slice" jump check_cgroup
+add rule inet pyvpn check_cgroup socket cgroupv2 level 2 "pyvpn.slice/p-1" return
+add rule inet pyvpn check_cgroup socket cgroupv2 level 2 "pyvpn.slice/p-2" return
+add rule inet pyvpn check_cgroup reject with icmpx type admin-prohibited
+add rule inet pyvpn output ip daddr @lan_v4 accept
+add rule inet pyvpn output ip6 daddr @lan_v6 accept
+add rule inet pyvpn output meta mark & 0xffff0000 0x50590000 accept
+add rule inet pyvpn output ct mark & 0xffff007f 0x50590001 jump p1
+add rule inet pyvpn output ct mark & 0xffff007f 0x50590002 reject with icmpx type admin-prohibited
+add rule inet pyvpn output ct mark & 0xffff007f 0x50590003 jump p3
+add rule inet pyvpn output ct mark & 0xffff007f 0x50590004 jump p4
+add rule inet pyvpn output socket cgroupv2 level 2 "pyvpn.slice/p-1" jump p1
+add rule inet pyvpn output socket cgroupv2 level 2 "pyvpn.slice/p-2" jump p2
+add rule inet pyvpn output meta skuid 1003 jump p3
+add rule inet pyvpn output meta skuid >= 0 jump p4
+add rule inet pyvpn p1 goto p1_route
+add rule inet pyvpn p1_route meta mark set meta mark & 0xff80 | 0x50590001 ct mark set ct mark & 0xff80 | 0x50590001 accept
+add rule inet pyvpn p2 goto p2_route
+add rule inet pyvpn p2_route reject with icmpx type admin-prohibited
+add rule inet pyvpn p3 goto p3_route
+add rule inet pyvpn p3_route meta mark set meta mark & 0xff80 | 0x50590003 ct mark set ct mark & 0xff80 | 0x50590003 accept
+add rule inet pyvpn p4 ct mark & 0xffff007f 0x50590004 goto p4_route
+add rule inet pyvpn p4 ip daddr @p4_v4 goto p4_route
+add rule inet pyvpn p4 ip6 daddr @p4_v6 goto p4_route
+add rule inet pyvpn p4_route meta mark set meta mark & 0xff80 | 0x50590004 ct mark set ct mark & 0xff80 | 0x50590004 accept
+add rule inet pyvpn egress meta mark & 0xffff007f 0x50590001 meta nfproto ipv4 meta oifname != "wg-jp" drop
+add rule inet pyvpn egress meta mark & 0xffff007f 0x50590001 meta nfproto ipv6 meta oifname != "wg-jp" drop
+add rule inet pyvpn egress meta mark & 0xffff007f 0x50590002 meta nfproto ipv4 drop
+add rule inet pyvpn egress meta mark & 0xffff007f 0x50590002 meta nfproto ipv6 drop
+add rule inet pyvpn egress meta mark & 0xffff007f 0x50590004 meta nfproto ipv4 meta oifname != "tun0" drop
+add rule inet pyvpn egress meta mark & 0xffff007f 0x50590004 meta nfproto ipv6 meta oifname != "tun0" drop
+add rule inet pyvpn masq meta mark & 0xffff007f 0x50590001 meta oifname "wg-jp" masquerade
+add rule inet pyvpn masq meta mark & 0xffff007f 0x50590004 meta oifname "tun0" masquerade
+add rule inet pyvpn restore ct mark & 0xffff007f 0x50590001 meta mark set meta mark & 0xff80 | 0x50590001
+add rule inet pyvpn restore ct mark & 0xffff007f 0x50590002 meta mark set meta mark & 0xff80 | 0x50590002
+add rule inet pyvpn restore ct mark & 0xffff007f 0x50590003 meta mark set meta mark & 0xff80 | 0x50590003
+add rule inet pyvpn restore ct mark & 0xffff007f 0x50590004 meta mark set meta mark & 0xff80 | 0x50590004

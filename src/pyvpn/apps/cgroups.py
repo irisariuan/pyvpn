@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from pyvpn.constants import CGROUP_ROOT, MAX_POLICIES, policy_cgroup
@@ -36,13 +37,26 @@ class CgroupManager:
         path.mkdir(exist_ok=True)
         return path
 
-    def place_pid(self, pid: int, policy_id: int) -> Path:
+    def place_pid(self, pid: int, policy_id: int, *, installed_id: int | None = None) -> Path:
+        """Place a PID, optionally requiring the exact cgroup installed by nft."""
         if pid <= 0:
             raise ValueError("pid must be positive")
-        path = self.create(policy_id)
-        procs = path / "cgroup.procs"
+        path = self.create(policy_id) if installed_id is None else self.path_for(policy_id)
         try:
-            procs.write_text(f"{pid}\n", encoding="ascii")
+            if installed_id is None:
+                (path / "cgroup.procs").write_text(f"{pid}\n", encoding="ascii")
+            else:
+                directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    if os.fstat(directory).st_ino != installed_id:
+                        raise CgroupError(f"routing rules for {path} are stale")
+                    # Open relative to the checked directory. If it was
+                    # removed, this cannot open a replacement's cgroup.procs.
+                    procs = os.open("cgroup.procs", os.O_WRONLY | os.O_TRUNC, dir_fd=directory)
+                    with os.fdopen(procs, "w", encoding="ascii") as stream:
+                        stream.write(f"{pid}\n")
+                finally:
+                    os.close(directory)
         except OSError as exc:
             raise CgroupError(f"cannot place pid {pid} in {path}: {exc}") from exc
         return path
