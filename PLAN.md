@@ -485,9 +485,10 @@ policy as `not_installed`.
   command on every pull request in the `integration` job (ubuntu-24.04,
   Python 3.12), which remounts cgroups v2 read-write and runs
   `tests.ci.preflight` first: one clear message instead of test errors when
-  the runner has no cgroup v2, no writable cgroup tree, no root or no `ip`/
-  `nft`/`sysctl`. The unit suite stays root-free because the marker is
-  deselected by default.
+  the runner has no cgroup v2, no writable cgroup tree, no root or is missing
+  one of the test-bed tools (`ip`, `nft`, `ping`, `openssl`, `sysctl`,
+  `unshare`). The unit suite stays root-free because the marker is deselected
+  by default.
 * **Standalone DNS integration (root on Linux):**
   `sudo .venv/bin/python -m pytest -m integration tests/dns/test_namespace.py`
   exercises the stubs with two DNS peers in disposable namespaces. It checks
