@@ -19,8 +19,8 @@ which picks a tunnel per *device* on a router.
 
 **Alpha (0.0.x): pyvpn does not route traffic yet.** The CLI, configuration
 validation and rule tools work. The daemon and the Linux backend that
-applies the nft rules and routes are not shipped in 0.0.1: there is no
-daemon entry point and nothing changes routing yet (see
+apply the nft rules and routes are not shipped in 0.0.1: nothing changes
+routing yet (see
 [PLAN.md §7](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md#7-milestones)
 for milestones). Do not rely on it for privacy yet.
 
@@ -45,9 +45,9 @@ Optional extras:
 
 ## Configuration
 
-The config is JSON, read from `/etc/pyvpn/config.json` by default. Set
-`PYVPN_CONFIG` or pass `--config` to a command that accepts it (see
-Commands) to use another file. **Targets** are
+The config is JSON, read from `/etc/pyvpn/config.json` by default. To
+use another file, set `PYVPN_CONFIG` or pass `--config` to a command that
+takes it (see Commands). **Targets** are
 interfaces (exact names or patterns such as `tun*`); **policies** map apps
 to an ordered list of targets:
 
