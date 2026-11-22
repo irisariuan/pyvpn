@@ -318,24 +318,30 @@ is how a userspace VPN client (OpenVPN, a provider app) whose server
 address is in the policy's destination set keeps its encrypted packets on
 the normal route instead of looping them into the target. Kernel tunnels
 (WireGuard) need no exclusion: `any_process` matches only packets with a
-socket owner (`meta skuid`), which kernel sockets lack. The app manager
-reports exclusions in `AppBinding.exclude_cgroup_paths` and
-`exclude_uids`, and the backend skips a socket in one of those cgroups (or
-below it) or owned by one of those uids:
+socket owner (`meta skuid`), which kernel sockets lack. Exclusions travel
+in `AppBinding.exclude_cgroup_paths` and `exclude_uids`, and the backend
+skips a socket in one of those cgroups (or below it) or owned by one of
+those uids:
 
 - `unit`, `flatpak`, `snap`: their existing cgroup path; nothing is moved.
 - `uid`, `user`: `exclude_uids`.
-- `exe`, `name`: **deferred.** A destination-only policy reports these
-  selectors as unsupported and grants no exemption, because Linux keeps a
-  process's cgroup across `exec`: a new program can open a socket before the
-  watcher revokes the exemption, and that socket would then skip the policy.
-  With `on_down: block` it would leave through the default route instead of
-  being dropped, and rechecking on reload or restart does not close that
-  window. Exemptions by `exe`/`name` can return once they can be revoked
-  before a new executable opens a socket. The `pyvpn.slice/x-<hex>` names
+- `exe`, `name`: **deferred.** A destination-only binding grants no
+  exemption for these selectors (the test fake records them in
+  `unresolved`), because Linux keeps a process's cgroup across `exec`: a new
+  program can open a socket before the watcher revokes the exemption, and
+  that socket would then skip the policy. With `on_down: block` it would
+  leave through the default route instead of being dropped, and rechecking
+  on reload or restart does not close that window. Exemptions by
+  `exe`/`name` can return once they can be revoked before a new executable
+  opens a socket. The `pyvpn.slice/x-<hex>` names
   (`constants.excluded_cgroup` / `parse_excluded_cgroup`) and the backend's
   handling of them are reserved for that change; nothing creates such a
   cgroup today.
+
+Only the test fake fills these fields today: the real app manager grants no
+exemption on a destination-only binding for any selector kind. That is
+fail-closed, but silent; reporting it in `pyvpn test` and `pyvpn audit` is a
+follow-up.
 
 An `any_process` binding may also list the policy's own cgroup
 (`pyvpn.slice/p-<id>`) in `cgroup_paths`, so `pyvpn run` works for
