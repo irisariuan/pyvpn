@@ -56,6 +56,7 @@ Json = dict[str, Any]
 Expr = list[Json]
 
 FAMILY = "inet"
+ROUTE_GUARD_TABLE = f"{NFT_TABLE}_guard"
 DNS_PRIORITY = -100  # NF_IP_PRI_NAT_DST
 ROUTE_PRIORITY = -90  # after dns, so app marks never exempt a query
 GUARD_PRIORITY = -80  # after the route chain has classified outgoing packets
@@ -143,7 +144,7 @@ def build_teardown() -> Json:
 
 def build_route_guard(*, enabled: bool) -> Json:
     """Keep marked packets from egress while kernel routes are being replaced."""
-    name = f"{NFT_TABLE}_guard"
+    name = ROUTE_GUARD_TABLE
     cmds = _table_reset(name)
     if enabled:
         chain = {**_ref(name), "name": "output"}

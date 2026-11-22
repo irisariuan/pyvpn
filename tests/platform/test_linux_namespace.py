@@ -244,12 +244,13 @@ def _pyvpn_state() -> tuple[str, str, str]:
 async def _worker(cgroup: str) -> None:
     from pyvpn.config.models import LeakSettings
     from pyvpn.constants import dns_stub_port, policy_mark, policy_rule_pref, policy_table
-    from pyvpn.platform.linux.backend import LinuxBackend, NftError, run_nft
+    from pyvpn.platform.linux.backend import LinuxBackend, NftError, NftOutcomeUnknown, run_nft
     from pyvpn.state import AppBinding, DestSet, PolicyPlan, RoutingPlan
     from tests.netfilter.test_ruleset import VARIANTS
 
     _install_counters()
     fail_commit = False
+    lose_commit_ack = False
 
     async def commit_with_probe(script: str) -> None:
         if fail_commit and script.startswith("add table inet pyvpn\n"):
@@ -262,6 +263,8 @@ async def _worker(cgroup: str) -> None:
             assert delta == {"wan_data": 1}, delta
             raise NftError("simulated commit failure")
         await run_nft(script)
+        if lose_commit_ack and script.startswith("add table inet pyvpn\n"):
+            raise NftOutcomeUnknown("simulated timeout after commit")
 
     backend = LinuxBackend(nft=commit_with_probe)
     active = PolicyPlan(
@@ -289,6 +292,12 @@ async def _worker(cgroup: str) -> None:
     assert "unreachable default table 1001 proto static metric 32760" in routes, routes
     chains = _run("nft", "list", "table", "inet", "pyvpn")
     assert f'socket cgroupv2 level 2 "{cgroup}" jump p1' in chains, chains
+
+    # Lost acknowledgement after a real commit: the kernel's table list
+    # confirms the guard was removed atomically with the new classifier.
+    lose_commit_ack = True
+    await backend.apply(RoutingPlan((active,)))
+    lose_commit_ack = False
 
     # The policy's process leaves via the target, every other process via wan0.
     before = _counters()

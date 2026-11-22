@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 from collections.abc import Awaitable, Callable
@@ -33,9 +34,11 @@ from dataclasses import replace
 from pathlib import Path
 
 from pyvpn.apps.cgroups import CgroupError, CgroupManager
-from pyvpn.constants import policy_cgroup
+from pyvpn.constants import NFT_TABLE, policy_cgroup
 from pyvpn.netfilter.render import render
 from pyvpn.netfilter.ruleset import (
+    FAMILY,
+    ROUTE_GUARD_TABLE,
     build_route_guard,
     build_ruleset,
     build_set_update,
@@ -55,26 +58,84 @@ from pyvpn.state import DestSet, RoutingPlan
 log = logging.getLogger(__name__)
 
 NftRunner = Callable[[str], Awaitable[None]]
+NftTables = Callable[[], Awaitable[set[str]]]
 CGROUP_ROOT = Path("/sys/fs/cgroup")
+_NFT_TIMEOUT = 10.0
+_NFT_EXIT_GRACE = 1.0
 
 
 class NftError(RuntimeError):
     pass
 
 
+class NftOutcomeUnknown(NftError):
+    """The nft command stopped responding or exited without an acknowledgement."""
+
+    def __init__(self, message: str, process: asyncio.subprocess.Process | None = None) -> None:
+        super().__init__(message)
+        self.process = process
+
+
+class _NftCommitUnconfirmed(NftError):
+    """Read-back could not prove whether it is safe to restore the old routes."""
+
+
 async def run_nft(script: str) -> None:
     """Load ``script`` with ``nft -f -`` (one transaction)."""
+    await _nft_command("-f", "-", data=script.encode())
+
+
+def _consume_nft_result(task: asyncio.Task[tuple[bytes, bytes]]) -> None:
+    if not task.cancelled():
+        task.exception()
+
+
+async def _nft_command(*args: str, data: bytes | None = None) -> bytes:
     proc = await asyncio.create_subprocess_exec(
         "nft",
-        "-f",
-        "-",
-        stdin=asyncio.subprocess.PIPE,
+        *args,
+        stdin=asyncio.subprocess.PIPE if data is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _, err = await proc.communicate(script.encode())
-    if proc.returncode != 0:
-        raise NftError(f"nft failed ({proc.returncode}): {err.decode(errors='replace').strip()}")
+    communication = asyncio.create_task(proc.communicate(data))
+    try:
+        async with asyncio.timeout(_NFT_TIMEOUT):
+            out, err = await asyncio.shield(communication)
+    except (Exception, asyncio.CancelledError) as exc:
+        # Keep draining the pipes while the killed process exits. Bound the
+        # cleanup too, since the process may still be blocked in the kernel.
+        communication.add_done_callback(_consume_nft_result)
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        except OSError:
+            log.exception("could not terminate nft after losing its response")
+        await asyncio.wait((communication,), timeout=_NFT_EXIT_GRACE)
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        detail = f"timed out after {_NFT_TIMEOUT:g}s" if isinstance(exc, TimeoutError) else str(exc)
+        raise NftOutcomeUnknown(f"nft {' '.join(args)}: {detail}", proc) from exc
+
+    code = proc.returncode
+    assert code is not None
+    if code < 0:
+        raise NftOutcomeUnknown(f"nft terminated by signal {-code}", proc)
+    if code:
+        raise NftError(f"nft failed ({code}): {err.decode(errors='replace').strip()}")
+    return out
+
+
+async def _list_nft_tables() -> set[str]:
+    entries = json.loads(await _nft_command("-j", "list", "tables"))["nftables"]
+    if not isinstance(entries, list):
+        raise NftError("nft returned an invalid table list")
+    return {
+        entry["table"]["name"]
+        for entry in entries
+        if "metainfo" not in entry and entry["table"]["family"] == FAMILY
+    }
 
 
 async def _finish_transaction(operation: Awaitable[None]) -> None:
@@ -101,17 +162,21 @@ class LinuxBackend:
         self,
         *,
         nft: NftRunner | None = None,
+        nft_tables: NftTables | None = None,
         netlink: RouteNetlink | None = None,
         cgroup_root: Path = CGROUP_ROOT,
         proc_sys: Path = PROC_SYS,
         cgroup_poll: float = 0.5,
     ) -> None:
         self._nft = nft or run_nft
+        self._nft_tables = nft_tables or _list_nft_tables
         self._routes = RouteManager(netlink or Pyroute2Netlink(proc_sys=proc_sys))
         self._cgroup_root = cgroup_root
         self._proc_sys = proc_sys
         self._cgroup_poll = cgroup_poll
         self._known_state = False
+        self._needs_recovery = False
+        self._exiting_nft: asyncio.subprocess.Process | None = None
         # Last applied plan plus destinations added since, and the ids of the
         # cgroups it names as recorded just before nft resolved them.
         self._plan: RoutingPlan | None = None
@@ -218,13 +283,13 @@ class LinuxBackend:
                 await self.recheck_cgroups()
             except Exception:
                 if not failed:
-                    log.exception("re-apply after a cgroup change failed; retrying")
+                    log.exception("routing recovery failed; retrying")
                 failed = True
             else:
                 failed = False
 
     async def recheck_cgroups(self) -> bool:
-        """Re-apply the last plan if a cgroup it names was re-created.
+        """Re-apply the last plan after a cgroup change or nft recovery failure.
 
         Waits while a named cgroup is missing (the apply would be refused);
         returns whether it re-applied.
@@ -233,40 +298,95 @@ class LinuxBackend:
             if self._plan is None:
                 return False
             ids = self._plan_cgroups(self._plan)
-            if None in ids.values() or ids == self._cgroup_ids:
+            if None in ids.values() or (ids == self._cgroup_ids and not self._needs_recovery):
                 return False
             await self._apply_locked(self._plan)
-            log.info("re-applied the routing plan after cgroup ids changed")
+            log.info("re-applied the routing plan after a cgroup change or nft failure")
             return True
 
-    async def _replace(self, routes: RoutePlan, script: str) -> None:
+    def _require_nft_idle(self) -> None:
+        if self._exiting_nft is not None and self._exiting_nft.returncode is None:
+            raise NftError("a terminated nft command is still exiting")
+        self._exiting_nft = None
+
+    async def _run_nft(self, script: str) -> None:
+        self._require_nft_idle()
+        try:
+            await self._nft(script)
+        except NftOutcomeUnknown as exc:
+            self._exiting_nft = exc.process
+            raise
+
+    async def _commit(self, script: str, *, expect_table: bool) -> None:
+        try:
+            await self._run_nft(script)
+        except asyncio.CancelledError as exc:
+            raise _NftCommitUnconfirmed("nft transaction interrupted before confirmation") from exc
+        except NftOutcomeUnknown as exc:
+            try:
+                self._require_nft_idle()
+                tables = await self._nft_tables()
+            except (Exception, asyncio.CancelledError) as probe_error:
+                if isinstance(probe_error, NftOutcomeUnknown):
+                    self._exiting_nft = probe_error.process
+                raise _NftCommitUnconfirmed(
+                    f"{exc}; could not verify nft transaction: {probe_error}"
+                ) from probe_error
+
+            # Installation of the guard was acknowledged. Only the final
+            # atomic batch removes it, so its presence means rollback is safe.
+            if ROUTE_GUARD_TABLE in tables:
+                raise
+            if (NFT_TABLE in tables) != expect_table:
+                raise _NftCommitUnconfirmed(
+                    f"{exc}; nft tables did not match either transaction outcome"
+                ) from exc
+            log.warning("%s; the kernel confirms the nft transaction committed", exc)
+
+    async def _replace(self, routes: RoutePlan, script: str, *, expect_table: bool = True) -> None:
         previous = await asyncio.to_thread(self._routes.snapshot)
         guard = render(build_route_guard(enabled=True))
         release = render(build_route_guard(enabled=False))
-        await self._nft(guard)
+        try:
+            await self._run_nft(guard)
+        except NftOutcomeUnknown:
+            self._known_state = False
+            self._needs_recovery = True
+            raise
         try:
             await asyncio.to_thread(self._routes.sync, routes)
-            await self._nft(script + release)
+            await self._commit(script + release, expect_table=expect_table)
+        except _NftCommitUnconfirmed:
+            # New routes match a committed classifier. An uncommitted
+            # classifier still has the guard. Reapplying under a fresh guard
+            # can recover either state without mixing old routes and new rules.
+            self._known_state = False
+            self._needs_recovery = True
+            raise
         except (Exception, asyncio.CancelledError):
             try:
                 await asyncio.to_thread(self._routes.sync, previous)
                 # On restart we may have inherited a guard from a failed apply.
                 # Only a successful commit can establish that it is safe to lift.
                 if self._known_state:
-                    await self._nft(release)
+                    await self._run_nft(release)
                 else:
                     log.warning("leaving the routing guard active until a plan is installed")
             except Exception:
                 self._known_state = False
-                log.exception("routing rollback failed; leaving the routing guard active")
+                self._needs_recovery = True
+                log.exception("routing rollback failed; routing must be re-applied")
             raise
         self._known_state = True
+        self._needs_recovery = False
 
     async def add_to_set(self, dests: DestSet) -> None:
         script = render(build_set_update(dests))
         if script:
             async with self._lock:
-                await _finish_transaction(self._nft(script))
+                if self._needs_recovery:
+                    raise NftError("routing must be re-applied before publishing destinations")
+                await _finish_transaction(self._run_nft(script))
                 if self._plan is not None:
                     # Keep them for a backend-initiated re-apply (cgroup change).
                     self._plan = RoutingPlan(
@@ -285,5 +405,7 @@ class LinuxBackend:
                 await self._watch
             self._watch = None
         async with self._lock:
+            await _finish_transaction(
+                self._replace(RoutePlan((), ()), render(build_teardown()), expect_table=False)
+            )
             self._plan, self._cgroup_ids = None, {}
-            await _finish_transaction(self._replace(RoutePlan((), ()), render(build_teardown())))

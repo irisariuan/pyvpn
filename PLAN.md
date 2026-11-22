@@ -226,6 +226,15 @@ Linux backend details (stream C, `netfilter/`, `routing/`,
   previously installed a plan successfully. If recovery fails or startup
   cannot install its first plan, the guard remains until a successful apply.
   A plan referring to a missing cgroup is rejected before changing rules.
+  Each `nft` command has a deadline. The backend terminates a stalled
+  command and waits briefly for it to exit. After a final-batch timeout, it
+  reads the kernel's tables once the command has exited. The same atomic
+  batch replaces the classifier and removes the guard, so a retained guard
+  permits rollback and a verified commit keeps the new routes. If the
+  outcome cannot be verified, the backend keeps the matching routes or the
+  guard already in the kernel and recovers by reapplying under a fresh
+  guard. It waits for the old command to exit before issuing further nft
+  commands, and holds DNS destination updates until routing is recovered.
 * `socket cgroupv2` rules hold the cgroup ID nft resolved at load time. If
   a policy cgroup or its parent slice is recreated, Linux placement
   reinstalls the last plan, including learned destinations, before moving

@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from ipaddress import IPv4Network
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from pyvpn.apps.cgroups import CgroupError, CgroupManager
 from pyvpn.config.models import LeakSettings
-from pyvpn.constants import policy_cgroup, policy_mark, policy_rule_pref, policy_table
+from pyvpn.constants import NFT_TABLE, policy_cgroup, policy_mark, policy_rule_pref, policy_table
+from pyvpn.netfilter.ruleset import ROUTE_GUARD_TABLE
 from pyvpn.platform.base import Backend, Capabilities
-from pyvpn.platform.linux.backend import LinuxBackend
+from pyvpn.platform.linux import backend as linux_backend
+from pyvpn.platform.linux.backend import LinuxBackend, NftError, NftOutcomeUnknown
+from pyvpn.routing.plan import build_route_plan
 from pyvpn.state import AppBinding, DestSet, PolicyPlan, RoutingPlan
 from tests.routing._fakes import FakeNetlink
 
@@ -117,6 +121,137 @@ def test_failed_nft_restores_previous_routes(cgroups: Path) -> None:
         asyncio.run(backend.apply(RoutingPlan((policy(1, interface="tun0"), policy(2)))))
     assert (sorted(nl.rules(), key=repr), sorted(nl.routes(), key=repr)) == before
     assert not nft.guarded
+
+
+def test_run_nft_terminates_and_reaps_timed_out_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
+    spawn = asyncio.create_subprocess_exec
+
+    async def start_slow_nft(*args: str, **kwargs: object) -> asyncio.subprocess.Process:
+        assert args == ("nft", "-f", "-")
+        return await spawn(sys.executable, "-c", "import time; time.sleep(60)", **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", start_slow_nft)
+    monkeypatch.setattr(linux_backend, "_NFT_TIMEOUT", 0.05)
+    with pytest.raises(NftOutcomeUnknown, match="timed out") as caught:
+        asyncio.run(linux_backend.run_nft(""))
+    assert caught.value.process is not None
+    assert caught.value.process.returncode is not None
+
+
+@pytest.mark.parametrize("committed", [True, False])
+@pytest.mark.parametrize("teardown", [True, False])
+def test_final_nft_timeout_uses_kernel_readback(
+    cgroups: Path, committed: bool, teardown: bool
+) -> None:
+    log: list[str] = []
+    nft, nl = FakeNft(log), FakeNetlink(log)
+    timeout = False
+    old, new = RoutingPlan((policy(1),)), RoutingPlan((policy(2),))
+    expected = build_route_plan(RoutingPlan() if teardown else new)
+
+    async def load(script: str) -> None:
+        if timeout and script.startswith("add table inet pyvpn\n"):
+            if committed:
+                await nft(script)
+            raise NftOutcomeUnknown("nft timed out")
+        await nft(script)
+
+    async def read_tables() -> set[str]:
+        assert set(nl.routes()) == set(expected.routes)
+        assert set(nl.rules()) == set(expected.rules)
+        log.append("read nft tables")
+        if nft.guarded:
+            return {NFT_TABLE, ROUTE_GUARD_TABLE}
+        return set() if teardown else {NFT_TABLE}
+
+    backend = LinuxBackend(
+        nft=load,
+        nft_tables=read_tables,
+        netlink=nl,
+        cgroup_root=cgroups,
+        proc_sys=proc_sys(cgroups),
+    )
+
+    async def scenario() -> None:
+        nonlocal timeout
+        await backend.apply(old)
+        previous = build_route_plan(old)
+        timeout = True
+        operation = backend.teardown() if teardown else backend.apply(new)
+        if committed:
+            await operation
+            assert set(nl.routes()) == set(expected.routes)
+            assert set(nl.rules()) == set(expected.rules)
+            assert log[-2:] == ["nft commit", "read nft tables"]
+        else:
+            with pytest.raises(NftOutcomeUnknown, match="timed out"):
+                await operation
+            assert set(nl.routes()) == set(previous.routes)
+            assert set(nl.rules()) == set(previous.rules)
+            assert log.index("read nft tables") < log.index("nft release")
+        assert not nft.guarded
+        timeout = False
+        await backend.teardown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("unreaped", "committed"), [(True, False), (False, False), (False, True)])
+def test_unconfirmed_nft_commit_keeps_routes_until_guarded_recovery(
+    cgroups: Path, unreaped: bool, committed: bool
+) -> None:
+    log: list[str] = []
+    nft, nl = FakeNft(log), FakeNetlink(log)
+    process = Mock(returncode=None)
+    read_tables = AsyncMock(side_effect=NftError("read-back failed"))
+    timeout = False
+    learned = DestSet(1, frozenset({IPv4Network("192.0.2.0/24")}))
+    old = RoutingPlan((policy(1, dests=DestSet(1)),))
+    new = RoutingPlan((policy(2),))
+
+    async def load(script: str) -> None:
+        if timeout and script.startswith("add table inet pyvpn\n"):
+            if committed:
+                await nft(script)
+            raise NftOutcomeUnknown("nft timed out", process if unreaped else None)
+        await nft(script)
+
+    backend = LinuxBackend(
+        nft=load,
+        nft_tables=read_tables,
+        netlink=nl,
+        cgroup_root=cgroups,
+        proc_sys=proc_sys(cgroups),
+    )
+
+    async def scenario() -> None:
+        nonlocal timeout
+        await backend.apply(old)
+        await backend.add_to_set(learned)
+        timeout = True
+        with pytest.raises(NftError, match="could not verify nft transaction"):
+            await backend.apply(new)
+        assert nft.guarded is not committed and "nft release" not in log
+        assert set(nl.routes()) == set(build_route_plan(new).routes)
+        assert read_tables.await_count == (0 if unreaped else 1)
+        with pytest.raises(NftError, match="before publishing destinations"):
+            await backend.add_to_set(learned)
+
+        timeout = False
+        if unreaped:
+            log.clear()
+            with pytest.raises(NftError, match="still exiting"):
+                await backend.recheck_cgroups()
+            assert not log
+            process.returncode = -9
+        assert await backend.recheck_cgroups()
+        assert set(nl.routes()) == set(build_route_plan(old).routes)
+        assert not nft.guarded
+        assert "elements = { 192.0.2.0/24 }" in nft.scripts[-1]
+        assert not await backend.recheck_cgroups()
+        await backend.teardown()
+
+    asyncio.run(scenario())
 
 
 def test_failed_first_apply_keeps_unknown_previous_rules(cgroups: Path) -> None:
