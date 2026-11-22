@@ -236,7 +236,9 @@ async def test_kill_switch_blocks_when_target_is_down(tmp_path: Path) -> None:
 class FakeProcessWatcher:
     instances: ClassVar[list[FakeProcessWatcher]] = []
 
-    def __init__(self, policies: Any, place: Any, *, groups: Any = ()) -> None:
+    def __init__(
+        self, policies: Any, place: Any, *, groups: Any = (), exclude_pid: Any = None
+    ) -> None:
         self.names = [policy.name for policy in policies]
         self.stopped = False
         FakeProcessWatcher.instances.append(self)
@@ -328,7 +330,9 @@ class PlacingWatcher:
 
     instances: ClassVar[list[PlacingWatcher]] = []
 
-    def __init__(self, policies: Any, place: Any, *, groups: Any = ()) -> None:
+    def __init__(
+        self, policies: Any, place: Any, *, groups: Any = (), exclude_pid: Any = None
+    ) -> None:
         self.place = place
         self.scans = 0
         PlacingWatcher.instances.append(self)
@@ -447,7 +451,9 @@ async def test_netns_isolation_is_refused_until_enforced(tmp_path: Path) -> None
 
 
 class FailingWatcher:
-    def __init__(self, policies: Any, place: Any, *, groups: Any = ()) -> None:
+    def __init__(
+        self, policies: Any, place: Any, *, groups: Any = (), exclude_pid: Any = None
+    ) -> None:
         pass
 
     async def run_proc_connector(self) -> None:
