@@ -60,10 +60,11 @@ class DryRunBackend:
 
     async def add_to_set(self, dests: DestSet) -> None:
         log.info(
-            "dry-run backend: policy %d learned %d v4 / %d v6 destinations",
+            "dry-run backend: policy %d learned %d v4 / %d v6 %s",
             dests.policy_id,
             len(dests.v4),
             len(dests.v6),
+            "drop addresses" if dests.drop else "destinations",
         )
 
     async def teardown(self) -> None:

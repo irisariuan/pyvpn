@@ -427,9 +427,20 @@ matcher to all stubs, including app-only stubs.
 
 Rule semantics (`match/policy.py`): policies are tried in config order and
 the first whose rules route a name wins; `!rule` exempts a name from that
-policy only. `drop:` rules parse but are not enforced yet (that needs a
-drop set in the backend contract), so the daemon refuses to load a config
-that has them. It also refuses snake's per-device rules (they would hide
+policy only. `drop:` rules block instead of route: a name a `drop:` rule
+claims goes to no later policy, and the stub publishes its answer's
+addresses as a drop set (`DestSet.drop`) of that policy; `drop:cidr:`,
+`drop:ip:` and `drop:asn:` fill the same set statically. The plan carries
+it as `PolicyPlan.drops` (None for a policy without `drop:` rules), the
+backend loads it as `p<id>_drop_v4` / `p<id>_drop_v6`, and the first rules
+of the policy's chain reject those destinations with `icmpx
+admin-prohibited`, before the conntrack mark and the route, so connections
+opened before the address was learned are cut too. Like routing, drop sets
+apply only to the policy's processes, after the LAN / loopback / multicast
+exemption and pyvpn's own marked sockets (the DNS stub's upstreams), and an
+earlier policy that routes the same address for the same process wins.
+DNS-learned drop addresses are persisted and carried over reloads like
+learned destinations. The daemon refuses snake's per-device rules (they would hide
 plain rules in the same policy), rules that do not parse and `asn:` entries
 with no cached prefixes; `pyvpn rules check` reports all of these as
 errors, and `pyvpn rules test` names a policy whose per-device rule hid a

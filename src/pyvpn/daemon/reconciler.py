@@ -10,7 +10,9 @@ pushed with ``Backend.add_to_set`` under the same lock, so a concurrent full
 apply can never drop them. The callback only returns once the destination is
 governed by the installed rules; in every other case (nothing installed yet,
 disabled, mid-batch, config replaced while waiting, push failed) it raises, so
-the stub answers SERVFAIL instead of releasing the reply.
+the stub answers SERVFAIL instead of releasing the reply. Answers for
+``drop:`` rules (``DestSet.drop``) take the same path into the policy's drop
+set, tracked apart from its route set.
 
 DNS stubs are tracked separately from the routing plan (``dns_applied``): a
 failed start or update is retried on the next reconcile even when the routing
@@ -66,6 +68,17 @@ def _carry_learned_dests(
     return out
 
 
+def _split(sets: Iterable[DestSet]) -> tuple[dict[int, DestSet], dict[int, DestSet]]:
+    """Merge sets per policy: (route sets, drop sets)."""
+    route: dict[int, DestSet] = {}
+    drop: dict[int, DestSet] = {}
+    for s in sets:
+        into = drop if s.drop else route
+        prev = into.get(s.policy_id)
+        into[s.policy_id] = s if prev is None else prev | s
+    return route, drop
+
+
 def _carry_restored(
     restored: Mapping[str, tuple[tuple[str, ...], DestSet]], new: Config
 ) -> dict[int, DestSet]:
@@ -86,6 +99,23 @@ def _only_adds_rules(old: tuple[str, ...], new: tuple[str, ...]) -> bool:
     if not set(old) <= kept:
         return False
     return not any(rule.lstrip().startswith("!") for rule in kept - set(old))
+
+
+def _restore_entries(
+    entries: Iterable[tuple[str, tuple[str, ...], tuple[str, ...]]], *, drop: bool
+) -> dict[str, tuple[tuple[str, ...], DestSet]]:
+    restored: dict[str, tuple[tuple[str, ...], DestSet]] = {}
+    for name, domains, nets in entries:
+        v4: set[IPv4Network] = set()
+        v6: set[IPv6Network] = set()
+        for n in nets:
+            net = ip_network(n, strict=False)
+            if isinstance(net, IPv4Network):
+                v4.add(net)
+            else:
+                v6.add(net)
+        restored[name] = (domains, DestSet(0, frozenset(v4), frozenset(v6), drop))
+    return restored
 
 
 def _dns_changed(old: PolicyPlan | None, new: PolicyPlan) -> bool:
@@ -120,6 +150,9 @@ class Reconciler:
         self.bindings: dict[int, AppBinding] = {}
         self.static_dests: dict[int, DestSet] = {}
         self.dynamic_dests: dict[int, DestSet] = {}
+        # The same for ``drop:`` rules (``DestSet.drop``).
+        self.static_drops: dict[int, DestSet] = {}
+        self.dynamic_drops: dict[int, DestSet] = {}
 
         self.enabled = True
         self.applied: RoutingPlan | None = None
@@ -135,6 +168,7 @@ class Reconciler:
         # Learned sets saved by a previous daemon, by policy name; used once,
         # by the first config swap, before the first apply.
         self._restored: dict[str, tuple[tuple[str, ...], DestSet]] = {}
+        self._restored_drops: dict[str, tuple[tuple[str, ...], DestSet]] = {}
         # Learned destinations the last save did not persist; any DNS answer
         # retries the save before it is acknowledged.
         self._learned_unsaved = False
@@ -220,34 +254,31 @@ class Reconciler:
                 await self._sync_dns_locked(plan)
 
     def restore_learned(
-        self, entries: Iterable[tuple[str, tuple[str, ...], tuple[str, ...]]]
+        self,
+        entries: Iterable[tuple[str, tuple[str, ...], tuple[str, ...]]],
+        drops: Iterable[tuple[str, tuple[str, ...], tuple[str, ...]]] = (),
     ) -> None:
-        """Seed destinations a previous daemon learned (``learned_entries``).
+        """Seed destinations a previous daemon learned (``learned_entries``),
+        and the drop addresses (``learned_entries(drops=True)``).
 
         Must run before the first config: that swap carries them over (same
         rules as a reload), so the first apply does not empty sets that
         surviving apps still rely on.
         """
-        restored: dict[str, tuple[tuple[str, ...], DestSet]] = {}
-        for name, domains, nets in entries:
-            v4: set[IPv4Network] = set()
-            v6: set[IPv6Network] = set()
-            for n in nets:
-                net = ip_network(n, strict=False)
-                if isinstance(net, IPv4Network):
-                    v4.add(net)
-                else:
-                    v6.add(net)
-            restored[name] = (domains, DestSet(0, frozenset(v4), frozenset(v6)))
-        self._restored = restored
+        self._restored = _restore_entries(entries, drop=False)
+        self._restored_drops = _restore_entries(drops, drop=True)
 
-    def learned_entries(self) -> tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...]:
-        """The committed config's learned destinations, by policy name."""
+    def learned_entries(
+        self, *, drops: bool = False
+    ) -> tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...]:
+        """The committed config's learned destinations (or drop addresses),
+        by policy name."""
         if self.config is None:
             return ()
+        learned = self.dynamic_drops if drops else self.dynamic_dests
         out = []
         for pid, policy in enumerate(self.config.policies, start=1):
-            d = self.dynamic_dests.get(pid)
+            d = learned.get(pid)
             if d:
                 nets = tuple(sorted(str(n) for n in (*d.v4, *d.v6)))
                 out.append((policy.name, policy.domains, nets))
@@ -271,17 +302,17 @@ class Reconciler:
         static_sets: Iterable[DestSet],
         bindings: Mapping[int, AppBinding],
     ) -> None:
-        if self.config is None and self._restored:
+        if self.config is None and (self._restored or self._restored_drops):
             self.dynamic_dests = _carry_restored(self._restored, config)
+            self.dynamic_drops = _carry_restored(self._restored_drops, config)
         else:
             self.dynamic_dests = _carry_learned_dests(self.config, config, self.dynamic_dests)
+            self.dynamic_drops = _carry_learned_dests(self.config, config, self.dynamic_drops)
         self._restored = {}
+        self._restored_drops = {}
         self.config = config
         self.bindings = dict(bindings)
-        self.static_dests = {}
-        for s in static_sets:
-            prev = self.static_dests.get(s.policy_id)
-            self.static_dests[s.policy_id] = s if prev is None else prev | s
+        self.static_dests, self.static_drops = _split(static_sets)
         self._generation = next(self._generations)
 
     def _snapshot(self) -> tuple[object, ...]:
@@ -290,6 +321,8 @@ class Reconciler:
             self.bindings,
             self.static_dests,
             self.dynamic_dests,
+            self.static_drops,
+            self.dynamic_drops,
             self._generation,
         )
 
@@ -299,6 +332,8 @@ class Reconciler:
             self.bindings,
             self.static_dests,
             self.dynamic_dests,
+            self.static_drops,
+            self.dynamic_drops,
             self._generation,
         ) = saved  # type: ignore[assignment]
 
@@ -337,17 +372,23 @@ class Reconciler:
             if not self.enabled or self.applied is None or self._batch_depth:
                 raise DnsNotGoverned("no rules installed for this policy yet")
             plans = list(self.applied.policies)
+            learned = self.dynamic_drops if dests.drop else self.dynamic_dests
             for i, p in enumerate(plans):
                 if p.policy_id != dests.policy_id:
                     continue
-                if p.dests is None:
+                if dests.drop:
+                    if p.drops is None:
+                        raise DnsNotGoverned(f"policy {p.policy_id} has no drop set installed")
+                    plans[i] = replace(p, drops=p.drops | dests)
+                elif p.dests is None:
                     return  # the policy already routes every destination
+                else:
+                    plans[i] = replace(p, dests=p.dests | dests)
                 await self._backend.add_to_set(dests)
-                prev = self.dynamic_dests.get(dests.policy_id)
-                self.dynamic_dests[dests.policy_id] = dests if prev is None else prev | dests
-                plans[i] = replace(p, dests=p.dests | dests)
+                prev = learned.get(dests.policy_id)
+                learned[dests.policy_id] = dests if prev is None else prev | dests
                 self.applied = RoutingPlan(tuple(plans))
-                if self.dynamic_dests[dests.policy_id] != prev or self._learned_unsaved:
+                if learned[dests.policy_id] != prev or self._learned_unsaved:
                     # Only acknowledge the answer once a successor daemon will
                     # also govern it: a failed save means SERVFAIL, and the
                     # next answer (even for the same address) retries it.
@@ -378,7 +419,11 @@ class Reconciler:
         for src in (self.static_dests, self.dynamic_dests):
             for pid, d in src.items():
                 dests[pid] = d if pid not in dests else dests[pid] | d
-        return build_plan(self.config, self.statuses, self.bindings, dests)
+        drops: dict[int, DestSet] = {}
+        for src in (self.static_drops, self.dynamic_drops):
+            for pid, d in src.items():
+                drops[pid] = d if pid not in drops else drops[pid] | d
+        return build_plan(self.config, self.statuses, self.bindings, dests, drops)
 
     async def reconcile(self) -> None:
         if self._batch_depth:

@@ -19,7 +19,8 @@ Packet path (PLAN.md §3)::
             (reject while P is a kill switch)
         <policy P apps> -> jump p<P>
 
-    chain p<P>        DoT / DoH rejects (anything that bypasses the stub)
+    chain p<P>        daddr in @p<P>_drop_v4 / @p<P>_drop_v6 -> reject (drop: rules)
+                      DoT / DoH rejects (anything that bypasses the stub)
                       [daddr in @p<P>_v4 / @p<P>_v6] -> goto p<P>_route
     chain p<P>_route  IPv6 / QUIC rejects, then
                       route unreachable -> reject (kill switch)
@@ -102,6 +103,11 @@ def set_name(policy_id: int, version: int) -> str:
     return f"p{policy_id}_v{version}"
 
 
+def drop_set_name(policy_id: int, version: int) -> str:
+    """Name of a policy's drop set (``drop:`` rules), e.g. ``p3_drop_v4``."""
+    return f"p{policy_id}_drop_v{version}"
+
+
 def build_ruleset(plan: RoutingPlan, *, idle_exclusions: Iterable[str] = ()) -> Json:
     """Replace ``table inet pyvpn`` with the state described by ``plan``.
 
@@ -139,12 +145,14 @@ def build_ruleset(plan: RoutingPlan, *, idle_exclusions: Iterable[str] = ()) -> 
 
 
 def build_set_update(dests: DestSet) -> Json:
-    """Add ``dests`` to its policy's sets (``Backend.add_to_set``)."""
+    """Add ``dests`` to its policy's sets (``Backend.add_to_set``): the drop
+    sets when ``dests.drop`` is set, the destination sets otherwise."""
     cmds: list[Json] = []
+    naming = drop_set_name if dests.drop else set_name
     for version, nets in ((4, dests.v4), (6, dests.v6)):
         if nets:
             elem = _elements(nets)
-            name = set_name(dests.policy_id, version)
+            name = naming(dests.policy_id, version)
             cmds.append({"add": {"element": {**_ref(), "name": name, "elem": elem}}})
     return {"nftables": cmds}
 
@@ -225,6 +233,9 @@ def _sets(plan: RoutingPlan) -> list[Json]:
         if p.dests is not None:
             out.append(_set(set_name(p.policy_id, 4), 4, p.dests.v4))
             out.append(_set(set_name(p.policy_id, 6), 6, p.dests.v6))
+        if p.drops is not None:
+            out.append(_set(drop_set_name(p.policy_id, 4), 4, p.drops.v4))
+            out.append(_set(drop_set_name(p.policy_id, 6), 6, p.drops.v6))
     return out
 
 
@@ -402,6 +413,11 @@ def _policy_rules(policy: PolicyPlan) -> list[tuple[str, Expr]]:
     leak = policy.leak
     rules: list[tuple[str, Expr]] = []
 
+    if policy.drops is not None:
+        # First, so neither a conntrack mark from before the address was
+        # learned nor the policy's route lets the connection through.
+        for version in (4, 6):
+            rules.append((head, [_daddr_in(version, drop_set_name(pid, version)), _REJECT]))
     if leak.block_dot:
         rules.append((head, [*_l4(("tcp", "udp"), 853), _REJECT]))
     if leak.block_doh:

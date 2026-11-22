@@ -19,6 +19,9 @@ class PersistentState:
     # (policy name, its domains, learned networks): DNS-learned destinations,
     # so a restarted daemon keeps governing addresses apps have cached.
     learned: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = ()
+    # The same for DNS-learned addresses of ``drop:`` rules, so a restarted
+    # daemon keeps blocking addresses apps have cached.
+    learned_drops: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = ()
 
 
 class StateError(RuntimeError):
@@ -52,15 +55,17 @@ def _strings(raw: object, what: str) -> tuple[str, ...]:
     return tuple(raw)
 
 
-def _learned(raw: object) -> tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...]:
+def _learned(
+    raw: object, what: str = "learned"
+) -> tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...]:
     if raw is None:
         return ()
     if not isinstance(raw, list):
-        raise StateError("learned is not a list")
+        raise StateError(f"{what} is not a list")
     out = []
     for item in raw:
         if not (isinstance(item, list) and len(item) == 3 and isinstance(item[0], str)):
-            raise StateError(f"bad learned entry {item!r}")
+            raise StateError(f"bad {what} entry {item!r}")
         out.append((item[0], _strings(item[1], "domains"), _strings(item[2], "networks")))
     return tuple(out)
 
@@ -87,10 +92,14 @@ class StateStore:
         try:
             slots = _slots(data.get("policy_slots"))
             learned = _learned(data.get("learned"))
+            learned_drops = _learned(data.get("learned_drops"), "learned_drops")
         except StateError as e:
             raise StateError(f"daemon state {self.path}: {e}") from None
         return PersistentState(
-            enabled=data.get("enabled", True), policy_slots=slots, learned=learned
+            enabled=data.get("enabled", True),
+            policy_slots=slots,
+            learned=learned,
+            learned_drops=learned_drops,
         )
 
     def save(self, state: PersistentState) -> None:

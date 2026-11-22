@@ -67,7 +67,7 @@ It is the client-side counterpart of
 | **App selector** | How a policy finds its apps: launched with `pyvpn run`, executable path or name, systemd unit, uid or user, Flatpak or Snap ID. |
 | **`on_down`** | Used after every target in the list is down: `default` falls back to the normal route, `block` drops the traffic (kill switch). |
 | **Usable target** | The link is up and has an address (and, with `"gateway": "auto"`, a gateway). Reachability probes are planned. |
-| **Destination filter** | Optional domain, `asn:` or `cidr:` rules (snake's rule language) that limit a policy to matching destinations. |
+| **Destination filter** | Optional domain, `asn:` or `cidr:` rules (snake's rule language) that limit a policy to matching destinations; `drop:` rules block a destination for the policy's apps. |
 
 ### Target types
 

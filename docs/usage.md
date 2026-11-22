@@ -281,6 +281,14 @@ wildcards (`*.example.com`), and `cidr:10.20.0.0/16`. The policy's DNS stub
 learns the addresses of matching names as apps look them up, so **hostname
 rules need `dns_via_target: true`**.
 
+`drop:` blocks a destination for the policy's apps instead of routing it:
+`drop:ads.example` (its subdomains too), `drop:cidr:192.0.2.0/24` or
+`drop:ip:2001:db8::7`. Connections to a dropped address are rejected right
+away, including ones opened before the address was learned. Policies are
+checked in order, so an earlier policy that routes the same address for the
+same app wins. Local network, loopback and multicast addresses are never
+blocked.
+
 Rule files can be checked and converted:
 
 ```bash
@@ -319,7 +327,7 @@ The daemon refuses these, or they have no effect yet. Don't rely on them:
 | `"probe": true` on a target | The target stays **unusable**, with a warning in the log. Leave it out. |
 | `"isolation": "netns"` on a policy | The daemon refuses the config (`isolation 'netns' is not supported by the daemon yet`). |
 | `asn:` rules in `domains` | Refused: nothing fetches the ASN prefix cache yet. Use `cidr:` rules instead. |
-| `drop:` rules and snake's per-device rules | Refused by the daemon; `pyvpn rules check` reports them. |
+| snake's per-device rules (`session:`, `route:`, `drop[...]:`, `if:` with `then:`/`else:`) | Refused by the daemon; `pyvpn rules check` reports them. |
 | `settings.probe_targets`, `settings.probe_interval` | Accepted, but unused until probes work. |
 | `pyvpn enable` | Missing; see [Turning pyvpn off](#turning-pyvpn-off). |
 | `exclude_apps` | Accepted, but the daemon doesn't enforce it: excluded apps are still routed by the policy. |

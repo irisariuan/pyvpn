@@ -62,6 +62,15 @@ def dests(pid: int = 1) -> DestSet:
     )
 
 
+def drops(pid: int = 1) -> DestSet:
+    return DestSet(
+        pid,
+        frozenset({IPv4Network("192.0.2.0/24"), IPv4Network("198.18.0.9/32")}),
+        frozenset({IPv6Network("2001:db8:dead::/48")}),
+        drop=True,
+    )
+
+
 VARIANTS: dict[str, RoutingPlan] = {
     "empty": RoutingPlan(),
     "dev_cgroup": RoutingPlan((policy(),)),
@@ -110,6 +119,22 @@ VARIANTS: dict[str, RoutingPlan] = {
             ),
         )
     ),
+    "dev_drops": RoutingPlan((policy(dests=dests(), drops=drops()),)),
+    "dev_drops_empty": RoutingPlan((policy(dests=DestSet(1), drops=DestSet(1, drop=True)),)),
+    "any_process_drops": RoutingPlan(
+        (policy(apps=AppBinding(1, any_process=True), dests=dests(), drops=drops()),)
+    ),
+    "unreachable_drops": RoutingPlan(
+        (
+            policy(
+                route="unreachable",
+                interface=None,
+                apps=AppBinding(1, any_process=True),
+                dests=DestSet(1),
+                drops=drops(),
+            ),
+        )
+    ),
     "multi": RoutingPlan(
         (
             policy(1),
@@ -145,6 +170,14 @@ def test_set_update_and_teardown_match_golden() -> None:
     _check_golden("set_update.json", json.dumps(update, indent=2, sort_keys=True) + "\n")
     _check_golden("set_update.nft", render(update))
     _check_golden("teardown.nft", render(build_teardown()))
+
+
+def test_drop_set_update_matches_golden() -> None:
+    update = build_set_update(drops(2))
+    _check_golden("set_update_drop.json", json.dumps(update, indent=2, sort_keys=True) + "\n")
+    _check_golden("set_update_drop.nft", render(update))
+    names = [cmd["add"]["element"]["name"] for cmd in update["nftables"]]
+    assert names == ["p2_drop_v4", "p2_drop_v6"]
 
 
 def test_set_update_skips_empty_families() -> None:
@@ -284,6 +317,47 @@ def test_tracked_flows_go_through_current_leak_rules() -> None:
     route_rules = _rules(doc, "p1_route")
     assert all("reject" in rule[-1] for rule in route_rules[:2])
     assert all("mangle" in expr for expr in route_rules[-1][:-1])
+
+
+@pytest.mark.parametrize("name", ["dev_drops", "any_process_drops", "unreachable_drops"])
+def test_drop_sets_reject_first_in_the_policy_chain(name: str) -> None:
+    """Drop sets are checked before the conntrack mark and the route, so a
+    connection opened before its address was learned is cut too."""
+    doc = build_ruleset(VARIANTS[name])
+    head = _rules(doc, "p1")
+    for version, rule in zip((4, 6), head[:2], strict=True):
+        proto = "ip" if version == 4 else "ip6"
+        assert rule == [
+            {
+                "match": {
+                    "op": "==",
+                    "left": {"payload": {"protocol": proto, "field": "daddr"}},
+                    "right": f"@p1_drop_v{version}",
+                }
+            },
+            {"reject": {"type": "icmpx", "expr": "admin-prohibited"}},
+        ]
+    assert not any("reject" in r[-1] for r in head[2:])
+    # The pyvpn sockets (DNS stub upstreams) are accepted before any policy
+    # chain, so a drop rule never blocks the stub's own resolver.
+    output = _rules(doc, "output")
+    mark_accept = next(i for i, r in enumerate(output) if r[-1] == {"accept": None} and i > 1)
+    first_jump = next(i for i, r in enumerate(output) if "jump" in r[-1] and "p1" in str(r[-1]))
+    assert mark_accept < first_jump
+    sets = {
+        cmd["add"]["set"]["name"]: cmd["add"]["set"]
+        for cmd in doc["nftables"]
+        if "set" in cmd.get("add", {})
+    }
+    assert sets["p1_drop_v4"]["type"] == "ipv4_addr"
+    assert sets["p1_drop_v6"]["type"] == "ipv6_addr"
+
+
+def test_policies_without_drop_rules_have_no_drop_sets() -> None:
+    for name, plan in VARIANTS.items():
+        if any(p.drops is not None for p in plan.policies):
+            continue
+        assert "_drop_" not in json.dumps(build_ruleset(plan)), name
 
 
 def test_temporary_route_guard_only_rejects_pyvpn_marks_after_classification() -> None:
