@@ -63,10 +63,27 @@ def cgroups(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def make(cgroups: Path) -> tuple[LinuxBackend, FakeNft, FakeNetlink, list[str]]:
+def proc_sys(root: Path, *, ipv6: bool = True) -> Path:
+    """A fake /proc/sys: unit tests never touch the real one."""
+    proc = root / "_proc"
+    knob = proc / "net/ipv4/conf/all/src_valid_mark"
+    if not knob.exists():
+        knob.parent.mkdir(parents=True)
+        knob.write_text("0\n")
+    if ipv6:
+        (proc / "net/ipv6").mkdir(exist_ok=True)
+    return proc
+
+
+def make(
+    cgroups: Path, *, ipv6: bool = True
+) -> tuple[LinuxBackend, FakeNft, FakeNetlink, list[str]]:
     log: list[str] = []
     nft, nl = FakeNft(log), FakeNetlink(log)
-    return LinuxBackend(nft=nft, netlink=nl, cgroup_root=cgroups), nft, nl, log
+    backend = LinuxBackend(
+        nft=nft, netlink=nl, cgroup_root=cgroups, proc_sys=proc_sys(cgroups, ipv6=ipv6)
+    )
+    return backend, nft, nl, log
 
 
 def test_constructible_without_arguments_and_reports_capabilities() -> None:
@@ -103,9 +120,9 @@ def test_failed_first_apply_keeps_unknown_previous_rules(cgroups: Path) -> None:
     """Rules a previous daemon left must survive: its nft table is still loaded."""
     backend, nft, nl, _ = make(cgroups)
     asyncio.run(
-        LinuxBackend(nft=FakeNft([]), netlink=nl, cgroup_root=cgroups).apply(
-            RoutingPlan((policy(2),))
-        )
+        LinuxBackend(
+            nft=FakeNft([]), netlink=nl, cgroup_root=cgroups, proc_sys=proc_sys(cgroups)
+        ).apply(RoutingPlan((policy(2),)))
     )
     before = (nl.rules(), nl.routes())
     nft.fail_on = "add table inet pyvpn\n"
@@ -165,7 +182,9 @@ def test_cancellation_waits_for_commit(cgroups: Path) -> None:
                 await resume.wait()
             await nft(script)
 
-        backend = LinuxBackend(nft=blocked_commit, netlink=nl, cgroup_root=cgroups)
+        backend = LinuxBackend(
+            nft=blocked_commit, netlink=nl, cgroup_root=cgroups, proc_sys=proc_sys(cgroups)
+        )
 
         async def apply_and_record() -> None:
             await backend.apply(RoutingPlan((policy(1),)))
@@ -220,3 +239,69 @@ def test_teardown_keeps_guard_until_routes_are_removed(cgroups: Path) -> None:
     assert nl.rules() == [] and nl.routes() == []
     assert nft.scripts[-1].startswith("add table inet pyvpn\ndelete table inet pyvpn\n")
     assert not nft.guarded
+
+
+def test_apply_enables_src_valid_mark(cgroups: Path) -> None:
+    backend, _, _, _ = make(cgroups)
+    asyncio.run(backend.apply(RoutingPlan((policy(1),))))
+    knob = cgroups / "_proc/net/ipv4/conf/all/src_valid_mark"
+    assert knob.read_text().strip() == "1"
+    asyncio.run(backend.teardown())
+    assert knob.read_text().strip() == "1"  # other tunnels may rely on it
+
+
+def test_kernel_without_ipv6_gets_only_ipv4_rules_and_routes(cgroups: Path) -> None:
+    backend, nft, nl, _ = make(cgroups, ipv6=False)
+    asyncio.run(backend.apply(RoutingPlan((policy(1, leak=LeakSettings(ipv6="block")),))))
+    assert {r.version for r in nl.rules()} == {4}
+    assert {r.version for r in nl.routes()} == {4}
+    assert "meta nfproto ipv6 reject" in nft.scripts[-1]
+
+
+def test_recreated_cgroup_is_reapplied_with_learned_destinations(cgroups: Path) -> None:
+    from ipaddress import IPv4Network
+
+    backend, nft, _, _ = make(cgroups)
+    ids: dict[str, int] = {policy_cgroup(1): 100}
+    backend._cgroup_id = ids.get  # type: ignore[method-assign]
+
+    async def scenario() -> None:
+        await backend.apply(RoutingPlan((policy(1, dests=DestSet(1)),)))
+        learned = DestSet(1, frozenset({IPv4Network("192.0.2.0/24")}))
+        await backend.add_to_set(learned)
+        assert not await backend.recheck_cgroups()
+        loads = len(nft.scripts)
+
+        del ids[policy_cgroup(1)]  # removed: wait, an apply would be refused
+        assert not await backend.recheck_cgroups()
+        ids[policy_cgroup(1)] = 101  # created again with a new id
+        assert await backend.recheck_cgroups()
+        assert len(nft.scripts) > loads
+        assert "elements = { 192.0.2.0/24 }" in nft.scripts[-1]
+        assert not await backend.recheck_cgroups()
+
+        await backend.teardown()
+        ids[policy_cgroup(1)] = 102
+        assert not await backend.recheck_cgroups()  # nothing installed
+
+    asyncio.run(scenario())
+
+
+def test_watcher_reapplies_in_the_background(cgroups: Path) -> None:
+    backend, nft, _, _ = make(cgroups)
+    backend._cgroup_poll = 0.01
+    ids = {policy_cgroup(1): 1}
+    backend._cgroup_id = ids.get  # type: ignore[method-assign]
+
+    async def scenario() -> None:
+        await backend.apply(RoutingPlan((policy(1),)))
+        loads = len(nft.scripts)
+        ids[policy_cgroup(1)] = 2
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if len(nft.scripts) > loads:
+                break
+        assert len(nft.scripts) > loads
+        await backend.teardown()
+
+    asyncio.run(scenario())

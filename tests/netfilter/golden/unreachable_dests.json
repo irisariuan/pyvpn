@@ -273,6 +273,17 @@
               "match": {
                 "left": {
                   "meta": {
+                    "key": "skuid"
+                  }
+                },
+                "op": ">=",
+                "right": 0
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
                     "key": "l4proto"
                   }
                 },
@@ -428,6 +439,17 @@
         "rule": {
           "chain": "output",
           "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "skuid"
+                  }
+                },
+                "op": ">=",
+                "right": 0
+              }
+            },
             {
               "jump": {
                 "target": "p1"

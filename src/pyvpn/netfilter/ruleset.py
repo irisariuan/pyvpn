@@ -285,7 +285,11 @@ def _selectors(policy: PolicyPlan) -> list[Expr]:
     """Match prefixes for the policy's processes (empty list: matches nothing)."""
     apps = policy.apps
     if apps.any_process:
-        return [[]]
+        # Only packets from user processes: ``meta skuid`` does not match
+        # kernel sockets, so a kernel tunnel's own encapsulated packets (e.g.
+        # WireGuard to an endpoint inside a destination set) are never marked
+        # back into the tunnel.
+        return [[_match(_meta("skuid"), 0, ">=")]]
     out: list[Expr] = []
     for path in apps.cgroup_paths:
         clean = path.strip("/")

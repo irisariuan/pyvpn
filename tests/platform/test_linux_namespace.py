@@ -23,6 +23,7 @@ import subprocess
 import sys
 import uuid
 from dataclasses import replace
+from ipaddress import IPv4Network, ip_address
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,7 @@ CGROUP_FS = Path("/sys/fs/cgroup")
 REMOTE = "203.0.113.9"  # off-link: only the default routes reach it
 DNS_REMOTE = "198.51.100.53"
 PORT = 9999
+VETH_LOCAL, VETH_PEER = "198.18.0.1", "198.18.0.2"  # not in the LAN exemption
 
 
 def _run(*args: str, input: str | None = None) -> str:
@@ -52,10 +54,12 @@ def test_linux_backend_in_namespace() -> None:
         pytest.skip("requires cgroup v2 at /sys/fs/cgroup")
 
     tag = uuid.uuid4().hex[:8]
-    ns = f"pyvpn-c-{tag}"
+    ns, peer = f"pyvpn-c-{tag}", f"pyvpn-p-{tag}"
     cgroup = f"pyvpn-it-{tag}.slice"
+    echo: subprocess.Popen[bytes] | None = None
     _run("ip", "netns", "add", ns)
     try:
+        _run("ip", "netns", "add", peer)
         (CGROUP_FS / cgroup).mkdir()
         for args in (
             ("link", "set", "lo", "up"),
@@ -66,8 +70,22 @@ def test_linux_backend_in_namespace() -> None:
             ("link", "add", "d0", "type", "dummy"),
             ("addr", "add", "192.0.2.1/24", "dev", "d0"),
             ("link", "set", "d0", "up"),
+            # A real target for reply traffic: veth to a peer that echoes.
+            ("link", "add", "v0", "type", "veth", "peer", "name", "e0", "netns", peer),
+            ("addr", "add", f"{VETH_LOCAL}/30", "dev", "v0"),
+            ("link", "set", "v0", "up"),
         ):
             _run("ip", "-n", ns, *args)
+        for args in (
+            ("link", "set", "lo", "up"),
+            ("addr", "add", f"{REMOTE}/32", "dev", "lo"),
+            ("addr", "add", f"{VETH_PEER}/30", "dev", "e0"),
+            ("link", "set", "e0", "up"),
+        ):
+            _run("ip", "-n", peer, *args)
+        echo = subprocess.Popen(
+            ["nsenter", f"--net=/run/netns/{peer}", sys.executable, "-c", _ECHO, REMOTE]
+        )
         env = {**os.environ, "PYTHONPATH": f"{ROOT / 'src'}:{ROOT}", "PYTHONDONTWRITEBYTECODE": "1"}
         result = subprocess.run(
             ["nsenter", f"--net=/run/netns/{ns}", sys.executable, "-m", __spec__.name, cgroup],
@@ -79,9 +97,23 @@ def test_linux_backend_in_namespace() -> None:
         )
         assert result.returncode == 0, result.stdout + result.stderr
     finally:
-        _run("ip", "netns", "delete", ns)
+        if echo is not None:
+            echo.kill()
+            echo.wait()
+        for name in (ns, peer):
+            subprocess.run(["ip", "netns", "delete", name], capture_output=True, timeout=20)
         if (CGROUP_FS / cgroup).exists():
             (CGROUP_FS / cgroup).rmdir()
+
+
+_ECHO = """
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind((sys.argv[1], 7777))
+while True:
+    data, addr = s.recvfrom(64)
+    s.sendto(data, addr)
+"""
 
 
 # --- worker (runs inside the namespace) -------------------------------------------
@@ -91,6 +123,8 @@ _COUNTERS = {
     "target_data": 'oifname "d0" udp dport 9999',
     "wan_dns": 'oifname "wan0" udp dport 53',
     "target_dns": 'oifname "d0" udp dport 53',
+    "wan_wg": 'oifname "wan0" udp dport 51820',
+    "target_wg": 'oifname "d0" udp dport 51820',
 }
 
 
@@ -119,10 +153,13 @@ if cgroup:
     with open(f"/sys/fs/cgroup/{cgroup}/cgroup.procs", "w") as f:
         f.write(str(os.getpid()))
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(3)
 if mark:
     s.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, mark)
 try:
     s.sendto(b"pyvpn", (addr, port))
+    if port == 7777:
+        print("reply" if s.recvfrom(64)[0] == b"pyvpn" else "garbage")
 except OSError as e:
     print("send failed:", e)
 """
@@ -150,7 +187,7 @@ async def _worker(cgroup: str) -> None:
     from pyvpn.config.models import LeakSettings
     from pyvpn.constants import dns_stub_port, policy_mark, policy_rule_pref, policy_table
     from pyvpn.platform.linux.backend import LinuxBackend, NftError, run_nft
-    from pyvpn.state import AppBinding, PolicyPlan, RoutingPlan
+    from pyvpn.state import AppBinding, DestSet, PolicyPlan, RoutingPlan
     from tests.netfilter.test_ruleset import VARIANTS
 
     _install_counters()
@@ -238,6 +275,30 @@ async def _worker(cgroup: str) -> None:
     assert _delta(before) == {}, _delta(before)
     _run("ip", "link", "set", "d0", "up")
 
+    # A cgroup removed and created again gets a new id; the backend notices
+    # and re-applies, so its processes are matched again.
+    await backend.apply(RoutingPlan((active,)))
+    (CGROUP_FS / cgroup).rmdir()
+    (CGROUP_FS / cgroup).mkdir()
+    await asyncio.sleep(2)  # the watcher polls every 0.5 s
+    before = _counters()
+    _send(cgroup)
+    assert _delta(before) == {"target_data": 1}, _delta(before)
+
+    # Strict rp_filter: replies through the target pass only because the
+    # restored mark is used for validation (src_valid_mark, set by apply).
+    veth = replace(active, interface="v0", gateway=ip_address(VETH_PEER))
+    for knob in ("all", "v0"):
+        _run("sysctl", "-q", f"net.ipv4.conf.{knob}.rp_filter=1")
+    await backend.apply(RoutingPlan((veth,)))
+    assert _run("sysctl", "-n", "net.ipv4.conf.all.src_valid_mark").strip() == "1"
+    assert _send(cgroup, REMOTE, 7777).strip() == "reply"
+    _run("sysctl", "-q", "net.ipv4.conf.all.src_valid_mark=0")  # control
+    assert "timed out" in _send(cgroup, REMOTE, 7777)
+    await backend.apply(RoutingPlan((veth,)))
+    assert _send(cgroup, REMOTE, 7777).strip() == "reply"
+    _run("sysctl", "-q", "net.ipv4.conf.all.rp_filter=0")
+
     # teardown -> nothing pyvpn owns is left.
     await backend.teardown()
     tables, rules, routes = _pyvpn_state()
@@ -248,6 +309,50 @@ async def _worker(cgroup: str) -> None:
     before = _counters()
     _send(cgroup)
     assert _delta(before) == {"wan_data": 1}, _delta(before)
+
+    # A destination policy for every process must not catch the kernel
+    # tunnel's own packets to an endpoint inside its destination set.
+    if shutil.which("wg"):
+        key = _run("wg", "genkey").strip()
+        peer_key = _run("wg", "pubkey", input=_run("wg", "genkey")).strip()
+        Path("/run/pyvpn-it-wg.key").write_text(key + "\n")
+        try:
+            _run("ip", "link", "add", "wg0", "type", "wireguard")
+            _run(
+                "wg",
+                "set",
+                "wg0",
+                "private-key",
+                "/run/pyvpn-it-wg.key",
+                "peer",
+                peer_key,
+                "endpoint",
+                f"{REMOTE}:51820",
+                "allowed-ips",
+                "10.99.0.2/32",
+            )
+        finally:
+            Path("/run/pyvpn-it-wg.key").unlink()
+        _run("ip", "addr", "add", "10.99.0.1/24", "dev", "wg0")
+        _run("ip", "link", "set", "wg0", "up")
+        everyone = replace(
+            active,
+            apps=AppBinding(1, any_process=True),
+            dests=DestSet(1, frozenset({IPv4Network(f"{REMOTE}/32")})),
+            dns_stub_port=None,
+        )
+        await backend.apply(RoutingPlan((everyone,)))
+        before = _counters()
+        _send(None)  # a user process to the destination: via the target
+        _send(None, "10.99.0.2", 9)  # makes wg0 send a handshake to the endpoint
+        await asyncio.sleep(1)
+        delta = _delta(before)
+        assert delta.get("target_data") == 1 and "target_wg" not in delta, delta
+        assert delta.get("wan_wg", 0) >= 1, delta
+        await backend.teardown()
+        _run("ip", "link", "delete", "wg0")
+    else:
+        print("wg not installed; skipped the WireGuard endpoint check")
 
     # Every golden variant loads into the kernel and tears down cleanly.
     for name, plan in sorted(VARIANTS.items()):

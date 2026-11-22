@@ -22,13 +22,23 @@ from __future__ import annotations
 import errno
 import socket
 from ipaddress import ip_address
+from pathlib import Path
 from typing import Any, Protocol
 
 from pyvpn.constants import MAX_POLICIES, TABLE_BASE, policy_mark, policy_rule_pref
 from pyvpn.routing.plan import POLICY_MARK_MASK, DefaultRoute, IPVersion, RoutePlan, Rule
 
+PROC_SYS = Path("/proc/sys")
 _RTN_UNICAST = 1
 _RTN_UNREACHABLE = 7
+
+
+def ipv6_available(proc_sys: Path = PROC_SYS) -> bool:
+    """False on a kernel booted with ``ipv6.disable=1`` (no IPv6 stack).
+
+    ``disable_ipv6=1`` alone keeps the stack, and IPv6 rules still work.
+    """
+    return (proc_sys / "net/ipv6").is_dir()
 
 
 def owns_rule(rule: Rule) -> bool:
@@ -153,8 +163,12 @@ def _ignore(err: Exception, *codes: int) -> None:
 class Pyroute2Netlink:
     """``RouteNetlink`` on a pyroute2 ``IPRoute`` socket (opened lazily)."""
 
-    def __init__(self, ipr: Any = None) -> None:
+    def __init__(self, ipr: Any = None, *, proc_sys: Path = PROC_SYS) -> None:
         self._ipr = ipr
+        self._proc_sys = proc_sys
+
+    def _versions(self) -> tuple[IPVersion, ...]:
+        return (4, 6) if ipv6_available(self._proc_sys) else (4,)
 
     @property
     def ipr(self) -> Any:
@@ -171,8 +185,7 @@ class Pyroute2Netlink:
 
     def rules(self) -> list[Rule]:
         out: list[Rule] = []
-        versions: tuple[IPVersion, ...] = (4, 6)
-        for version in versions:
+        for version in self._versions():
             for msg in self.ipr.get_rules(family=_family(version)):
                 mark = _attr(msg, "FRA_FWMARK")
                 mask = _attr(msg, "FRA_FWMASK")
@@ -188,8 +201,7 @@ class Pyroute2Netlink:
     def routes(self) -> list[DefaultRoute]:
         out: list[DefaultRoute] = []
         names: dict[int, str | None] = {}
-        versions: tuple[IPVersion, ...] = (4, 6)
-        for version in versions:
+        for version in self._versions():
             for msg in self.ipr.get_routes(family=_family(version), table=None):
                 table = _attr(msg, "RTA_TABLE") or msg.get("table")
                 if table is None or not owns_table(int(table)) or msg.get("dst_len") != 0:

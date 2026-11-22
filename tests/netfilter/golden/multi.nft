@@ -20,7 +20,7 @@ add chain inet pyvpn p4_route
 add rule inet pyvpn dns meta mark & 0xffff0000 0x50590000 return
 add rule inet pyvpn dns socket cgroupv2 level 2 "pyvpn.slice/p-1" meta l4proto { tcp, udp } th dport 53 redirect to :5301
 add rule inet pyvpn dns meta skuid 1003 meta l4proto { tcp, udp } th dport 53 redirect to :5303
-add rule inet pyvpn dns meta l4proto { tcp, udp } th dport 53 redirect to :5304
+add rule inet pyvpn dns meta skuid >= 0 meta l4proto { tcp, udp } th dport 53 redirect to :5304
 add rule inet pyvpn output ip daddr @lan_v4 accept
 add rule inet pyvpn output ip6 daddr @lan_v6 accept
 add rule inet pyvpn output meta mark & 0xffff0000 0x50590000 accept
@@ -31,7 +31,7 @@ add rule inet pyvpn output ct mark & 0xffff007f 0x50590004 jump p4
 add rule inet pyvpn output socket cgroupv2 level 2 "pyvpn.slice/p-1" jump p1
 add rule inet pyvpn output socket cgroupv2 level 2 "pyvpn.slice/p-2" jump p2
 add rule inet pyvpn output meta skuid 1003 jump p3
-add rule inet pyvpn output jump p4
+add rule inet pyvpn output meta skuid >= 0 jump p4
 add rule inet pyvpn p1 goto p1_route
 add rule inet pyvpn p1_route meta mark set meta mark & 0xff80 | 0x50590001 ct mark set ct mark & 0xff80 | 0x50590001 accept
 add rule inet pyvpn p2 goto p2_route
