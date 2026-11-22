@@ -318,3 +318,9 @@ def test_boolean_fields_reject_strings(field: str) -> None:
                     ],
                 }
             )
+
+
+def test_selector_round_trips_through_model_dump() -> None:
+    # model_dump() writes uid=None for unset selectors; it must validate again
+    selector = AppSelector(name="firefox")
+    assert AppSelector.model_validate(selector.model_dump()) == selector

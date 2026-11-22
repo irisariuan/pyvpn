@@ -49,6 +49,8 @@ class AppSelector(_Model):
     @field_validator("uid", mode="before")
     @classmethod
     def _uid_type(cls, value: object) -> object:
+        if value is None:
+            return value
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError("uid must be a JSON integer")
         return value
