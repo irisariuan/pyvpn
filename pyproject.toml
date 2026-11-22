@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "snakevpn"
-version = "0.0.1"
+version = "0.0.2"
 description = "Per-process policy routing: send each app out through a chosen interface"
 readme = "README.md"
 requires-python = ">=3.11"
