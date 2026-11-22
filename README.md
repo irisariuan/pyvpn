@@ -18,9 +18,11 @@ which picks a tunnel per *device* on a router.
 ## Status
 
 **Alpha (0.0.x): pyvpn does not route traffic yet.** The CLI, configuration
-validation and rule tools work. The daemon and the Linux backend that
-apply the nft rules and routes are not shipped in 0.0.1: nothing changes
-routing yet (see
+validation and rule tools work, and the `pyvpn-daemon` daemon ships. The
+Linux backend that applies the nft rules and routes is not in this release
+yet, so the daemon refuses to start unless you pass `--backend dry-run`.
+That mode exercises the daemon, CLI and DNS stubs, but it **applies no
+routing and no leak protection** (see
 [PLAN.md §7](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md#7-milestones)
 for milestones). Do not rely on it for privacy yet.
 
@@ -100,12 +102,13 @@ pyvpn rules check FILE                     # validate a destination rule file
 pyvpn rules test FILE NAME...              # show which rule matches a DNS name
 pyvpn rules import FILE                    # convert a foreign list to snake rules
 pyvpn rules export POLICY [--config FILE]  # print a policy's rules
-pyvpn install [--scope user]               # print the systemd unit for the coming daemon (--write needs root)
+pyvpn install [--scope user]               # print the systemd unit for pyvpn-daemon (--write needs root)
 pyvpn desktop --policy NAME                # print a .desktop launcher for a policy
 ```
 
-These talk to the root daemon over `/run/pyvpn/pyvpn.sock`. Until the daemon
-ships they exit with `cannot contact pyvpn daemon`:
+These talk to `pyvpn-daemon` over its socket (`/run/pyvpn/pyvpn.sock` by
+default; pass `--socket PATH` before the command to use another). If no daemon
+is running, they exit with `cannot contact pyvpn daemon`:
 
 ```bash
 pyvpn run -p "Japan browsing" -- firefox   # start an app inside a policy
@@ -118,6 +121,15 @@ pyvpn disable                              # remove all pyvpn rules and routes
 
 Add `--json` before the command (`pyvpn --json status`) for machine-readable
 output.
+
+To try the daemon without root while the Linux backend is pending, run it in
+dry-run mode. It logs each routing plan instead of installing it, and routes
+and protects nothing:
+
+```bash
+pyvpn-daemon --backend dry-run --config config.json --socket /tmp/pyvpn.sock --state-dir /tmp/pyvpn-state
+pyvpn --socket /tmp/pyvpn.sock status
+```
 
 ## How it works
 
