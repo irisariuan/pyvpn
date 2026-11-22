@@ -97,6 +97,10 @@ class _Probed:
     # Interface the probes go out through; None while link state alone makes
     # the target unusable (no probes are sent then).
     interface: str | None = None
+    # Netlink coalesces bursts, so a deleted and re-created interface can
+    # show up with the same name and a new index: the index is part of the
+    # identity whose probe results count.
+    ifindex: int | None = None
     generation: int = 0
     wake: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -111,7 +115,8 @@ class ProbingTargetWatcher:
     ``on_down`` (fallback or block) applies.
 
     Probes run every ``interval`` seconds per probed target while its link is
-    usable, and immediately when its interface appears or changes. The stream
+    usable, and immediately when its interface appears or changes (a new
+    name, or the same name with a new interface index). The stream
     ends when ``events`` ends.
     """
 
@@ -208,11 +213,13 @@ class ProbingTargetWatcher:
                 continue
             link = status_for_target(target, snapshots, probe_ok=True)
             interface = link.interface if link.usable else None
-            if interface == state.interface:
+            ifindex = link.ifindex if link.usable else None
+            if (interface, ifindex) == (state.interface, state.ifindex):
                 continue
-            # A new or vanished interface invalidates every earlier result,
-            # including probes still in flight (dropped by generation).
+            # A new, re-created or vanished interface invalidates every earlier
+            # result, including probes still in flight (dropped by generation).
             state.interface = interface
+            state.ifindex = ifindex
             state.generation += 1
             if state.health.up:
                 log.warning("target %r: interface changed, probing again", target.name)

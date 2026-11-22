@@ -311,7 +311,9 @@ Fail-back hold and the latency-based selection are ported from snake's
   fwmark, so pyvpn's policy rules and egress drops don't apply to it.
 * **Fail closed:** a probed target is down until its first probe succeeds.
   Health resets (down, "fresh") at daemon start and whenever the interface
-  appears, disappears or changes (pattern targets); results of probes still
+  appears, disappears or changes: a new name (pattern targets) or the same
+  name with a new interface index (a delete and re-create that netlink
+  coalesced into one snapshot); results of probes still
   in flight for the old interface are dropped. A fresh target is probed at
   once and comes up on one success, so a reconnected VPN is used quickly.
 * **Hysteresis:** once it has been up, a target goes down after 2

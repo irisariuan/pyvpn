@@ -304,6 +304,56 @@ async def test_a_result_from_an_old_interface_is_ignored() -> None:
 
 
 @_async
+async def test_a_recreated_interface_with_the_same_name_starts_fresh() -> None:
+    target = Target(name="vpn", interface="wg0", probe=True)
+    snapshots, connect, ticks = Snapshots(), Connector(ok=True), Ticks()
+    run = Run(_watcher((target,), snapshots, connect, ticks))
+    snapshots.push(_snap(ifindex=42))
+    await until(lambda: run.usable() == [False, True])
+
+    # Delete + re-create coalesced into one burst: same name, new index.
+    connect.ok = False
+    snapshots.push(_snap(ifindex=43))
+    await until(lambda: len(connect.calls) == 2)  # probed at once, no tick
+    await settle()
+    assert [(s["vpn"].ifindex, s["vpn"].usable) for s in run.seen] == [
+        (42, False),
+        (42, True),
+        (43, False),  # down before its own probe, not carried over from 42
+    ]
+    await run.stop()
+
+
+@_async
+async def test_a_result_from_a_replaced_ifindex_is_ignored() -> None:
+    target = Target(name="vpn", interface="wg0", probe=True)
+    snapshots, ticks = Snapshots(), Ticks()
+    release = threading.Event()
+    entered = threading.Event()
+    results = iter((True, False))
+
+    def slow(interface: str, host: str, port: int, timeout: float) -> bool:
+        ok = next(results, False)
+        if ok:  # the first probe, for ifindex 42, is still in flight
+            entered.set()
+            release.wait(5)
+        return ok
+
+    run = Run(_watcher((target,), snapshots, slow, ticks))
+    try:
+        snapshots.push(_snap(ifindex=42))
+        await until(entered.is_set)
+        snapshots.push(_snap(ifindex=43))  # replaced while that probe runs
+        await until(lambda: len(run.seen) >= 2)
+    finally:
+        release.set()
+    await settle()
+    # The late success belongs to ifindex 42 and must not bring 43 up.
+    assert [(s["vpn"].ifindex, s["vpn"].usable) for s in run.seen] == [(42, False), (43, False)]
+    await run.stop()
+
+
+@_async
 async def test_a_raising_connector_counts_as_a_failure() -> None:
     target = Target(name="vpn", interface="wg0", probe=True)
     snapshots, ticks = Snapshots(), Ticks()
