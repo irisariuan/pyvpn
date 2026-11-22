@@ -61,12 +61,11 @@ EXCLUDED_NAME_MAX: Final = len(EXCLUDED_PREFIX) + (MAX_POLICIES + 3) // 4
 def excluded_cgroup(policy_ids: Iterable[int], app_policy_id: int | None = None) -> str:
     """Cgroup for processes the watcher moves to exempt them (PLAN.md §3.3).
 
-    ``policy_ids`` are the policies whose ``exclude_apps`` exempt the
-    process. The watcher moves processes excluded from policies *with apps*
-    to the top-level form today; no binding lists these paths yet, since
-    destination-only exclusions by ``exe``/``name`` are deferred until they
-    can be revoked before a new executable opens a socket (PLAN.md §3.3).
-    The leaf is ``x-<hex>``, where bit ``id - 1`` of
+    ``policy_ids`` are the destination-only policies whose ``exclude_apps``
+    match the process. Nothing creates these cgroups yet: exclusions by
+    ``exe``/``name`` are deferred until they can be revoked before a new
+    executable opens a socket (PLAN.md §3.3); the names are reserved for
+    that change. The leaf is ``x-<hex>``, where bit ``id - 1`` of
     ``<hex>`` (lowercase, no leading zeros) is set for each policy id: one
     cgroup per distinct set, bounded by ``EXCLUDED_NAME_MAX`` bytes and free
     of collisions, so each policy can list exactly the cgroups whose

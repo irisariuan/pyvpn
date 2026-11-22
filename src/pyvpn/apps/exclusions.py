@@ -3,9 +3,13 @@
 OS-agnostic: the daemon calls :func:`unsupported_exclusions` before it binds
 a config, and ``pyvpn test`` reports the same problems.
 
-- A policy **with apps** enforces every selector: the process watcher never
-  places an excluded process in the policy's cgroup and moves one that
-  inherited it out to ``pyvpn.slice/x-<hex>``.
+- A policy **with apps**: ``exclude_apps`` filter placement. The process
+  watcher never places an excluded process in the policy's cgroup, but it
+  never moves one out either: a process that inherited the cgroup (started
+  from an app already in the policy) stays routed. Moving it out would
+  grant an exemption that outlives the next ``exec``, so a new program
+  could run outside the policy's kill switch. :func:`exclusion_warnings`
+  says so in ``pyvpn test``.
 - A policy with destination rules and **no apps** (``any_process``) can only
   exempt by ``uid`` / ``user`` today (``exclude_uids``, a static nft match).
   ``exe`` / ``name`` are deferred: an exemption granted to a process by its
@@ -66,4 +70,15 @@ def config_exclusion_problems(config: Config) -> list[str]:
         problem
         for policy in config.policies
         for problem in unsupported_exclusions(policy, config.app_groups)
+    ]
+
+
+def exclusion_warnings(config: Config) -> list[str]:
+    """Exclusions that are enforced only in part (policies with apps)."""
+    return [
+        f"policy {policy.name!r}: exclude_apps only keep matching processes from being "
+        "placed; an excluded program started from a process already in this policy "
+        "stays routed by it"
+        for policy in config.policies
+        if policy.apps and policy.exclude_apps
     ]

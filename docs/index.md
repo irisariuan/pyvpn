@@ -86,7 +86,7 @@ It is the client-side counterpart of
 | systemd unit | `{"unit": "transmission-daemon.service"}` | The process watcher moves the unit's processes into the policy's cgroup. |
 | user | `{"uid": 1001}`, `{"user": "torrent"}` | nft `meta skuid`. |
 | Flatpak / Snap | `{"flatpak": "org.mozilla.firefox"}` | Its `app-flatpak-…scope` cgroup. |
-| exclusions | `"exclude_apps": [...]` | Same selectors; an excluded app never matches the policy. On a policy with only `domains`, only `uid`/`user` work. |
+| exclusions | `"exclude_apps": [...]` | Same selectors; an excluded app is never placed in the policy (programs started from inside it stay routed). On a policy with only `domains`, only `uid`/`user` work. |
 
 Sockets that are already open keep their route. New connections follow the
 new policy.

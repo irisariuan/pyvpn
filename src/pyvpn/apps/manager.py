@@ -37,11 +37,6 @@ class AppManager:
             )
         else:
             self.cgroups.create(policy_id)
-            if policy.exclude_apps:
-                # Pre-create the cgroup the watcher moves excluded processes
-                # to, so the ruleset applied with this binding already knows
-                # it (an unknown child of pyvpn.slice is rejected).
-                self.cgroups.create_excluded((policy_id,))
             group_map = {group.name: group.apps for group in groups}
             uids: set[int] = set()
             for ref in policy.apps:
@@ -66,7 +61,6 @@ class AppManager:
 
     async def unbind(self, policy_id: int) -> None:
         self._bindings.pop(policy_id, None)
-        self.cgroups.remove_excluded(policy_id)
         self.cgroups.remove(policy_id)
 
     async def place_pid(self, pid: int, policy_id: int) -> None:
