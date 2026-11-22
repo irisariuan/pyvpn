@@ -470,12 +470,18 @@ policy as `not_installed`.
 * **Unit (no root):** nft ruleset generation (golden JSON), route/rule plans,
   target selection with fake netlink events, selector matching against fake
   `/proc` trees, rule engine (snake's vectors), config migrations.
-* **Integration (root, GitHub ubuntu-24.04 runners with sudo):** a pytest
-  fixture builds namespaces: "host" with a veth "WAN" to an "internet" ns,
-  and a second veth or WireGuard link that stands in for a VPN interface
-  (the fixture creates it, pyvpn does not). Tests launch processes through
-  `pyvpn run`, delete and re-create interfaces, and assert by capture which
-  interface the traffic and DNS left through.
+* **Network test bed (root on Linux):** `tests/conftest.py` provides the
+  `netbed` fixture (stream I): a "host" namespace with a veth WAN to an
+  "internet" namespace, a second veth standing in for a VPN interface, and
+  one service address reachable over either link, so a source address
+  identifies the egress interface. The fixture creates every part of it and
+  removes both namespaces on teardown; nothing outside them is touched.
+  Tests launch processes inside "host", delete and re-create links, and
+  assert by capture which interface the traffic and DNS left through.
+  Run the root suite with `sudo pytest -m integration`; CI runs the same
+  command on every pull request in the `integration` job (ubuntu-24.04,
+  Python 3.12). The unit suite stays root-free because the marker is
+  deselected by default.
 * **Standalone DNS integration (root on Linux):**
   `sudo .venv/bin/python -m pytest -m integration tests/dns/test_namespace.py`
   exercises the stubs with two DNS peers in disposable namespaces. It checks
