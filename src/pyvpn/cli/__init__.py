@@ -77,7 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run", help="place a launched process in a policy")
     run.add_argument("-p", "--policy", required=True, help="policy name or id")
     run.add_argument("--socket", default=argparse.SUPPRESS, help="daemon socket path")
-    run.add_argument("--isolation", choices=("none", "netns"), default="none")
+    run.add_argument(
+        "--isolation",
+        choices=("auto", "none", "netns"),
+        default="auto",
+        help="auto (default): what the policy's config says",
+    )
     run.add_argument("command_args", nargs=argparse.REMAINDER, help="command and arguments")
 
     install = commands.add_parser("install", help="render or write systemd installation files")
@@ -232,7 +237,7 @@ def _run_app(args: argparse.Namespace) -> int:
     elif args.policy.isascii() and args.policy.isdigit():
         policy = int(args.policy)
     try:
-        run_app(
+        code = run_app(
             policy,
             command,
             socket_path=args.socket if args.socket is not None else SOCKET_PATH,
@@ -247,7 +252,8 @@ def _run_app(args: argparse.Namespace) -> int:
     ) as exc:
         print(f"pyvpn: {exc}", file=sys.stderr)
         return 1
-    return 0
+    # ``none`` replaces this process; ``netns`` returns the command's status.
+    return code if isinstance(code, int) else 0
 
 
 def _redirect_path(path: Path, root: str | None) -> Path:

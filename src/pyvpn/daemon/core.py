@@ -17,11 +17,18 @@ from typing import Any
 
 from pyvpn.config.models import Config
 from pyvpn.constants import SOCKET_PATH, policy_cgroup
-from pyvpn.daemon.api import AppsEntry, PlacePidParams, PolicyStatus, StatusResult
+from pyvpn.daemon.api import (
+    AppsEntry,
+    PlacePidParams,
+    PolicyStatus,
+    RunIsolatedParams,
+    StatusResult,
+    WaitIsolatedParams,
+)
 from pyvpn.daemon.persistence import PersistentState, StateStore
 from pyvpn.daemon.reconciler import Reconciler
 from pyvpn.daemon.server import ApiError, ApiServer, PeerCred, acquire_instance_lock
-from pyvpn.platform.base import Backend
+from pyvpn.platform.base import Backend, IsolatedCommand, IsolatedLauncher, IsolatedProcess
 from pyvpn.services import (
     AppManager,
     DnsService,
@@ -37,6 +44,9 @@ ConfigLoader = Callable[[], Config]
 NOT_INSTALLED = "not_installed"  # PolicyStatus.route when no rules are installed
 AuditFn = Callable[[], Awaitable[Any]]
 PlacePidFn = Callable[[int, int, Callable[[], None]], Awaitable[None]]
+# Exit statuses of isolated commands nobody waited for are kept this long.
+ISOLATED_RESULT_TTL = 60.0
+_MAX_ARGV = 4096
 
 
 class Daemon:
@@ -51,6 +61,7 @@ class Daemon:
         matcher_factory: RuleMatcherFactory | None = None,
         audit: AuditFn | None = None,
         place_policy_pid: PlacePidFn | None = None,
+        spawn_isolated: IsolatedLauncher | None = None,
         # Required: the enabled flag and cgroup reservations must survive a
         # restart. Pass ``None`` only to opt out explicitly (tests).
         store: StateStore | None,
@@ -65,6 +76,9 @@ class Daemon:
         self._matcher_factory = matcher_factory
         self._audit = audit
         self._place_policy_pid = place_policy_pid
+        self._spawn_isolated = spawn_isolated
+        # Commands started by ``run_isolated``: pid -> (owner uid, wait task).
+        self._isolated: dict[int, tuple[int, asyncio.Future[int]]] = {}
         self._store = store
         self._teardown_on_stop = teardown_on_stop
         self.reconciler = Reconciler(backend, dns)
@@ -243,16 +257,31 @@ class Daemon:
           ``dns_via_target`` (otherwise their traffic is never matched);
         - the target watcher is fixed at startup, so reload cannot change the
           target definitions;
-        - ``isolation: netns`` cannot be enforced yet, and placing such an app
-          in an ordinary cgroup would silently give it weaker protection.
+        - ``isolation: netns`` needs a backend that keeps namespaces and a
+          launcher for them; the namespace sends everything through the
+          target, so destination rules cannot apply, and its DNS only works
+          through the policy's stub (PLAN.md §3.6).
         """
         for policy in config.policies:
             where = f"policy {policy.name!r}"
             if policy.isolation == "netns":
-                raise ApiError(
-                    "bad_request",
-                    f"{where}: isolation 'netns' is not supported by the daemon yet",
-                )
+                if not self._backend.capabilities.netns or self._spawn_isolated is None:
+                    raise ApiError(
+                        "bad_request",
+                        f"{where}: isolation 'netns' is not supported by this backend",
+                    )
+                if policy.domains:
+                    raise ApiError(
+                        "bad_request",
+                        f"{where}: isolation 'netns' sends all of the app's traffic through "
+                        "the target; remove 'domains' or use isolation 'none'",
+                    )
+                if not policy.leak.dns_via_target:
+                    raise ApiError(
+                        "bad_request",
+                        f"{where}: isolation 'netns' needs dns_via_target: true, since the "
+                        "namespace can only resolve names through the policy's DNS stub",
+                    )
             if policy.domains and self._matcher_factory is None:
                 raise ApiError("bad_request", f"{where}: destination rules need a rule matcher")
             if policy.leak.dns_via_target and self._dns is None:
@@ -334,6 +363,10 @@ class Daemon:
                 return [dataclasses.asdict(e) for e in self.apps()]
         if method == "place_pid":
             return await self._place_pid(params, peer)
+        if method == "run_isolated":
+            return await self._run_isolated(params, peer)
+        if method == "wait_isolated":
+            return await self._wait_isolated(params, peer)
         if method == "reload":
             self._require_admin(peer)
             await self.reload()
@@ -378,6 +411,7 @@ class Daemon:
                     target=p.target if p else None,
                     interface=p.interface if p else None,
                     on_down=pol.on_down,
+                    isolation=pol.isolation,
                 )
             )
         targets = {
@@ -422,8 +456,124 @@ class Daemon:
                 # The caller may have exited while waiting for the lock.
                 raise ApiError("forbidden", "cannot verify that the calling process still exists")
             pid = self._resolve_policy(p.policy)
+            if self.config.policies[pid - 1].isolation == "netns":
+                # A cgroup alone would give weaker protection than the
+                # policy asks for; ``pyvpn run`` uses ``run_isolated``.
+                raise ApiError(
+                    "bad_request",
+                    f"policy {p.policy!r} uses isolation 'netns': start the app with "
+                    "'pyvpn run' (run_isolated), not place_pid",
+                )
             await self._place_locked(p.pid, pid, peer=peer)
         return {"policy_id": pid}
+
+    async def _run_isolated(self, params: dict[str, Any], peer: PeerCred | None) -> dict[str, int]:
+        """Start a command inside an ``isolation: netns`` policy's namespace."""
+        try:
+            p = RunIsolatedParams(**params)
+        except TypeError as e:
+            raise ApiError("bad_request", str(e)) from None
+        argv, env = p.argv, p.env
+        if (
+            not isinstance(argv, list)
+            or not argv
+            or len(argv) > _MAX_ARGV
+            or not all(isinstance(a, str) and "\0" not in a for a in argv)
+            or not argv[0]
+        ):
+            raise ApiError("bad_request", "argv must be a non-empty list of strings")
+        if not isinstance(env, dict) or not all(
+            isinstance(k, str)
+            and isinstance(v, str)
+            and k
+            and "=" not in k
+            and "\0" not in k
+            and "\0" not in v
+            for k, v in env.items()
+        ):
+            raise ApiError("bad_request", "env must map variable names to strings")
+        if not isinstance(p.cwd, str) or not p.cwd.startswith("/") or "\0" in p.cwd:
+            raise ApiError("bad_request", "cwd must be an absolute path")
+        if not isinstance(p.umask, int) or isinstance(p.umask, bool) or not 0 <= p.umask <= 0o777:
+            raise ApiError("bad_request", "umask must be in 0..0o777")
+        if peer is None:
+            raise ApiError("forbidden", "caller credentials unavailable")
+        if not peer.same_process_alive():
+            raise ApiError("forbidden", "cannot verify that the calling process still exists")
+
+        def verify_peer() -> None:
+            if not peer.same_process_alive():
+                raise ApiError("forbidden", "cannot verify that the calling process still exists")
+
+        async with self._config_lock:
+            verify_peer()
+            pid = self._resolve_policy(p.policy)
+            if self.config.policies[pid - 1].isolation != "netns":
+                raise ApiError("bad_request", f"policy {p.policy!r} does not use isolation 'netns'")
+            if self._spawn_isolated is None:
+                raise ApiError("unavailable", "isolated launch is not available")
+            r = self.reconciler
+            if not r.enabled:
+                raise ApiError("unavailable", "routing is disabled")
+            installed = (
+                next((x for x in r.applied.policies if x.policy_id == pid), None)
+                if r.applied is not None
+                else None
+            )
+            if installed is None or installed.isolation != "netns":
+                raise ApiError("unavailable", f"policy {pid}'s namespace is not installed yet")
+            if pid not in self._cgroup_policy_names:
+                name = self.config.policies[pid - 1].name
+                self._save_state(enabled=True, slots=self._cgroup_policy_names | {pid: name})
+            command = IsolatedCommand(
+                policy_id=pid,
+                argv=tuple(argv),
+                env=dict(env),
+                cwd=p.cwd,
+                umask=p.umask,
+                uid=peer.uid,
+                gid=peer.gid,
+                client_pid=peer.pid,
+                client_pidfd=peer.pidfd,
+            )
+            try:
+                child = await self._spawn_isolated(command, verify_peer)
+            except ApiError:
+                raise
+            except (OSError, RuntimeError, ValueError) as e:
+                raise ApiError("unavailable", f"cannot start the command: {e}") from None
+        self._track_isolated(peer.uid, child)
+        log.info("started pid %d in policy %d's namespace for uid %d", child.pid, pid, peer.uid)
+        return {"pid": child.pid, "policy_id": pid}
+
+    def _track_isolated(self, uid: int, child: IsolatedProcess) -> None:
+        task = asyncio.ensure_future(child.wait())
+        self._isolated[child.pid] = (uid, task)
+
+        def expire(done: asyncio.Future[int]) -> None:
+            def drop() -> None:
+                if self._isolated.get(child.pid, (None, None))[1] is done:
+                    del self._isolated[child.pid]
+
+            with contextlib.suppress(RuntimeError):  # loop already closed
+                asyncio.get_running_loop().call_later(ISOLATED_RESULT_TTL, drop)
+
+        task.add_done_callback(expire)
+
+    async def _wait_isolated(self, params: dict[str, Any], peer: PeerCred | None) -> dict[str, int]:
+        try:
+            p = WaitIsolatedParams(**params)
+        except TypeError as e:
+            raise ApiError("bad_request", str(e)) from None
+        if peer is None:
+            raise ApiError("forbidden", "caller credentials unavailable")
+        entry = self._isolated.get(p.pid) if isinstance(p.pid, int) else None
+        if entry is None or (peer.uid != 0 and peer.uid != entry[0]):
+            raise ApiError("not_found", f"no isolated command with pid {p.pid!r}")
+        code = await asyncio.shield(entry[1])
+        if self._isolated.get(p.pid) is entry:
+            del self._isolated[p.pid]
+        return {"returncode": code}
 
     def report_watcher_error(self, name: str, reason: str) -> None:
         """Record a failed watcher owned by the composition root; ``status`` shows it."""

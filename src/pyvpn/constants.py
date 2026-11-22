@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from ipaddress import IPv4Address, IPv4Network
 from typing import Final
 
 MAX_POLICIES: Final = 99
@@ -50,6 +51,42 @@ def dns_stub_port(policy_id: int) -> int:
 
 def policy_cgroup(policy_id: int) -> str:
     return f"{CGROUP_ROOT}/p-{_check(policy_id)}"
+
+
+# ``isolation: netns`` (PLAN.md §3.6): one network namespace per policy,
+# joined to the host by a veth pair on a /30 from a benchmarking range
+# (RFC 2544) that home and office LANs rarely use.
+NETNS_PREFIX: Final = "pyvpn-p"  # /run/netns/pyvpn-p<id>
+NETNS_RANGE: Final = IPv4Network("198.18.128.0/17")
+
+
+def policy_netns(policy_id: int, prefix: str = NETNS_PREFIX) -> str:
+    """Name of a policy's network namespace (a file in ``/run/netns``)."""
+    return f"{prefix}{_check(policy_id)}"
+
+
+def netns_host_veth(policy_id: int) -> str:
+    """Host end of the policy's veth pair (``pyvpn-h<id>``)."""
+    return f"pyvpn-h{_check(policy_id)}"
+
+
+def netns_peer_veth(policy_id: int) -> str:
+    """Namespace end of the policy's veth pair (``pyvpn-n<id>``)."""
+    return f"pyvpn-n{_check(policy_id)}"
+
+
+def netns_subnet(policy_id: int) -> IPv4Network:
+    """The /30 of the policy's veth pair: host ``.1``, namespace ``.2``."""
+    base = int(NETNS_RANGE.network_address) + 4 * _check(policy_id)
+    return IPv4Network((base, 30))
+
+
+def netns_host_address(policy_id: int) -> IPv4Address:
+    return netns_subnet(policy_id).network_address + 1
+
+
+def netns_peer_address(policy_id: int) -> IPv4Address:
+    return netns_subnet(policy_id).network_address + 2
 
 
 EXCLUDED_PREFIX: Final = "x-"

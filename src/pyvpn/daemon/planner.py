@@ -77,6 +77,7 @@ def plan_policy(
         leak=policy.leak,
         dns_stub_port=dns_stub_port(policy_id) if policy.leak.dns_via_target else None,
         target=target,
+        isolation=policy.isolation,
     )
 
 

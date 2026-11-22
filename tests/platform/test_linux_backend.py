@@ -102,7 +102,7 @@ def make(
 
 def test_constructible_without_arguments_and_reports_capabilities() -> None:
     backend: Backend = LinuxBackend()
-    assert backend.capabilities == Capabilities(transparent=True, per_app_dns=True)
+    assert backend.capabilities == Capabilities(transparent=True, per_app_dns=True, netns=True)
 
 
 def test_apply_guards_route_changes_until_nft_commit(cgroups: Path) -> None:

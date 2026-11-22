@@ -14,6 +14,7 @@ from pyvpn.constants import policy_cgroup
 
 IPAddress: TypeAlias = IPv4Address | IPv6Address
 RouteKind: TypeAlias = Literal["dev", "unreachable", "main"]
+Isolation: TypeAlias = Literal["none", "netns"]
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,9 @@ class PolicyPlan:
     leak: LeakSettings
     dns_stub_port: int | None
     target: str | None = None  # config name of the active target, for status
+    # "netns": the backend also keeps a network namespace for the policy whose
+    # only way out is its veth, forwarded like the policy's apps (PLAN.md §3.6).
+    isolation: Isolation = "none"
 
 
 @dataclass(frozen=True)

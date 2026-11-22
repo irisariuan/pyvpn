@@ -5,9 +5,13 @@ from pyvpn.state import DestSet, RoutingPlan
 
 
 class FakeBackend:
-    """Records every call. Set ``fail_apply`` to make the next applies raise."""
+    """Records every call. Set ``fail_apply`` to make the next applies raise.
 
-    def __init__(self) -> None:
+    ``netns=True`` reports the ``netns`` capability (``isolation: netns``).
+    """
+
+    def __init__(self, *, netns: bool = False) -> None:
+        self.netns = netns
         self.plans: list[RoutingPlan] = []
         self.sets: list[DestSet] = []
         self.teardowns = 0
@@ -17,7 +21,7 @@ class FakeBackend:
 
     @property
     def capabilities(self) -> Capabilities:
-        return Capabilities(transparent=True, user=True, per_app_dns=True)
+        return Capabilities(transparent=True, user=True, per_app_dns=True, netns=self.netns)
 
     async def apply(self, plan: RoutingPlan) -> None:
         if self.fail_apply:

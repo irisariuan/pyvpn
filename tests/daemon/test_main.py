@@ -395,7 +395,7 @@ def test_process_watcher_is_rejected_with_dry_run(
     assert "cannot be used with --backend dry-run" in capsys.readouterr().err
 
 
-async def test_netns_isolation_is_refused_until_enforced(tmp_path: Path) -> None:
+async def test_netns_isolation_is_refused_by_the_dry_run_backend(tmp_path: Path) -> None:
     policy = {
         "name": "Strict",
         "targets": ["jp"],

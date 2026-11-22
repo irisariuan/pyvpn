@@ -9,6 +9,7 @@ guessed.
 
 from __future__ import annotations
 
+from ipaddress import ip_address
 from typing import Any
 
 from pyvpn.netfilter.ruleset import Json
@@ -125,4 +126,8 @@ def _value(v: Any, quoted: bool) -> str:
         return v
     if isinstance(v, dict) and "set" in v:
         return "{ " + ", ".join(_value(x, quoted) for x in v["set"]) + " }"
+    if isinstance(v, dict) and "prefix" in v:
+        prefix = v["prefix"]
+        addr = ip_address(prefix["addr"])  # refuses anything but an address
+        return f"{addr}/{int(prefix['len'])}"
     raise ValueError(f"unsupported nft value {v!r}")

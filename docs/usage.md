@@ -91,6 +91,7 @@ netlink; it doesn't poll.
 | `apps` | | App selectors (below) or `"group:<name>"`. |
 | `exclude_apps` | `[]` | Selectors for apps that should never match this policy. **Not enforced yet**; see [Not supported yet](#not-supported-yet). |
 | `domains` | `[]` | Destination filters (see [below](#destination-filters)). |
+| `isolation` | `"none"` | `"netns"` runs apps started with `pyvpn run` in the policy's own network namespace; see [Isolated apps](#isolated-apps-network-namespaces). |
 | `leak` | see [DNS and leak protection](#dns-and-leak-protection) | DNS and leak options. |
 
 A policy needs `apps`, `domains`, or both:
@@ -144,6 +145,57 @@ their own process this way.
 
 `pyvpn run` refuses to start the app if the policy's rules aren't installed
 yet, so an app never starts unprotected.
+
+### Isolated apps (network namespaces)
+
+With `"isolation": "netns"`, `pyvpn run` starts the app inside a network
+namespace that belongs to the policy. Its only way out is a veth link to the
+host, and the host forwards that link **only** through the policy's target.
+The rules live in the kernel, so they keep working if the daemon stops.
+
+```json
+{"name": "Torrents", "targets": ["nl"], "on_down": "block", "isolation": "netns",
+ "apps": [{"exe": "/usr/bin/qbittorrent"}]}
+```
+
+```bash
+pyvpn run -p Torrents -- qbittorrent
+```
+
+- The daemon starts the command for you: inside the namespace, as your user
+  and groups, with your environment, working directory, umask and terminal.
+  `pyvpn run` waits for it, passes on Ctrl-C and other signals, and exits
+  with its exit status. It never becomes root.
+- `on_down: "block"`: while every target is down, nothing leaves the
+  namespace. Nothing leaves while rules are being changed either, or after
+  `pyvpn disable`.
+- `on_down: "default"`: while every target is down, the namespace uses the
+  host's default route.
+- DNS: every query in the namespace (also to `127.0.0.53` or a hard-coded
+  server) goes to the policy's DNS stub, so the policy needs
+  `dns_via_target: true` (the default).
+- The namespace has no IPv6, whatever `leak.ipv6` says. Programs fall back to
+  IPv4.
+- Only `pyvpn run` starts apps in the namespace. Apps that a selector in
+  `apps` matches still get the policy's normal routing and kill switch,
+  without the namespace. `--isolation none` is refused for such a policy.
+- Not allowed with `isolation: "netns"`: `domains` (the whole app goes
+  through the target) and `dns_via_target: false`.
+
+Limits:
+
+- The app has no controlling terminal, so a shell started this way has no
+  job control (Ctrl-Z).
+- The app can't reach services on the host's loopback (`localhost` is the
+  namespace's own). Unix sockets still work, so programs that resolve names
+  through systemd-resolved's `nss-resolve` module (`hosts: resolve` in
+  `/etc/nsswitch.conf`, the default on Fedora) bypass the stub.
+- To let replies in, pyvpn turns on IPv4 forwarding on the active target
+  interface (or, for `on_down: "default"`, on the default-route interface) if
+  it was off, and drops new connections forwarded from that interface. It
+  turns it off again when no namespace needs it.
+- A firewall whose forward policy drops traffic (Docker sets one) also drops
+  the namespace's traffic.
 
 ### Desktop launchers
 
@@ -297,7 +349,8 @@ sudo pyvpn disable
 ```
 
 This removes every pyvpn rule and route. Apps go back to the normal route
-immediately, and kill switches stop blocking. The daemon remembers it's
+immediately, and kill switches stop blocking. Isolated apps (`isolation:
+"netns"`) are the exception: they are cut off until routing is enabled again. The daemon remembers it's
 disabled, even across restarts.
 
 There's no `pyvpn enable` command yet. To turn routing back on, call the
@@ -317,7 +370,6 @@ The daemon refuses these, or they have no effect yet. Don't rely on them:
 | Feature | What happens |
 |---|---|
 | `"probe": true` on a target | The target stays **unusable**, with a warning in the log. Leave it out. |
-| `"isolation": "netns"` on a policy | The daemon refuses the config (`isolation 'netns' is not supported by the daemon yet`). |
 | `asn:` rules in `domains` | Refused: nothing fetches the ASN prefix cache yet. Use `cidr:` rules instead. |
 | `drop:` rules and snake's per-device rules | Refused by the daemon; `pyvpn rules check` reports them. |
 | `settings.probe_targets`, `settings.probe_interval` | Accepted, but unused until probes work. |
@@ -333,5 +385,7 @@ The daemon refuses these, or they have no effect yet. Don't rely on them:
 | A policy shows `unreachable` although the VPN is up | The interface name doesn't match `interface` (try a pattern like `tun*`), or the target has `"probe": true`, or `"gateway": "auto"` found no gateway. Check `ip -br addr`. |
 | An app isn't routed | Check that `pyvpn apps` lists its policy, and that the process is in the cgroup: `cat /proc/<pid>/cgroup` should show `pyvpn.slice/p-<id>`. Connections opened before it was placed keep their old route; restart the app or use `pyvpn run`. |
 | DNS fails inside a policy | `pyvpn audit` shows the DNS state. The stub answers `SERVFAIL` when the target is down, by design. |
+| `pyvpn run` says `namespace is not installed yet` | The policy uses `isolation: "netns"` and the daemon's apply failed or it's disabled. `pyvpn status` shows `last error:`. |
+| An isolated app has no network | Check `pyvpn status`: with `on_down: "block"` and every target down this is the kill switch. `sudo ip netns exec pyvpn-p<id> ip addr` shows the namespace side; `ip link show pyvpn-h<id>` the host side. |
 | `last error: process watcher failed` | The daemon can't subscribe to process events. It needs root, in the host's network namespace. `pyvpn run` still works. |
 | Everything is blocked after uninstalling | Rules stay after the daemon stops. Run `sudo pyvpn disable` with the daemon running, or remove them by hand: `sudo nft delete table inet pyvpn`, then delete the `ip rule`s with fwmark `0x5059…`. |

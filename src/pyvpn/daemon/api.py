@@ -13,9 +13,29 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Final, Literal, TypeAlias
 
-Method: TypeAlias = Literal["status", "apps", "reload", "place_pid", "disable", "enable", "audit"]
+Method: TypeAlias = Literal[
+    "status",
+    "apps",
+    "reload",
+    "place_pid",
+    "disable",
+    "enable",
+    "audit",
+    "run_isolated",
+    "wait_isolated",
+]
 METHODS: Final[frozenset[str]] = frozenset(
-    {"status", "apps", "reload", "place_pid", "disable", "enable", "audit"}
+    {
+        "status",
+        "apps",
+        "reload",
+        "place_pid",
+        "disable",
+        "enable",
+        "audit",
+        "run_isolated",
+        "wait_isolated",
+    }
 )
 
 ErrorCode: TypeAlias = Literal[
@@ -83,6 +103,35 @@ class PlacePidParams:
 
 
 @dataclass(frozen=True)
+class RunIsolatedParams:
+    """``pyvpn run`` for an ``isolation: netns`` policy (PLAN.md §3.6).
+
+    The daemon starts ``argv`` inside the policy's network namespace as the
+    caller (its uid, gid and groups), with this environment, working
+    directory and umask, and the caller's standard descriptors 0, 1 and 2.
+    The result is ``{"pid": <pid>, "policy_id": <id>}``; the caller then
+    sends ``wait_isolated`` on the same connection.
+    """
+
+    policy: str | int
+    argv: list[str]
+    env: dict[str, str]
+    cwd: str
+    umask: int = 0o022
+
+
+@dataclass(frozen=True)
+class WaitIsolatedParams:
+    """Wait for a command started by ``run_isolated``.
+
+    The result is ``{"returncode": <int>}``, negative when a signal ended it.
+    Only the user who started it (or root) may wait.
+    """
+
+    pid: int
+
+
+@dataclass(frozen=True)
 class PolicyStatus:
     id: int
     name: str
@@ -90,6 +139,7 @@ class PolicyStatus:
     target: str | None
     interface: str | None
     on_down: str
+    isolation: str = "none"  # "none" | "netns"
 
 
 @dataclass(frozen=True)

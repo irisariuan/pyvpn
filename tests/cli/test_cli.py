@@ -221,7 +221,7 @@ def test_run_wires_stream_e_launcher(monkeypatch: pytest.MonkeyPatch) -> None:
         )
         == 0
     )
-    assert calls == [("Japan", ["firefox", "--private"], "/tmp/test.sock", "none")]
+    assert calls == [("Japan", ["firefox", "--private"], "/tmp/test.sock", "auto")]
 
 
 def test_run_uses_the_top_level_socket(monkeypatch: pytest.MonkeyPatch) -> None:

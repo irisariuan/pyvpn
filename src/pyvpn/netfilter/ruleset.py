@@ -34,6 +34,27 @@ Packet path (PLAN.md §3)::
     hook prerouting, prio -150        chain restore
         conntrack mark P -> mark P (replies keep the mark, e.g. for rp_filter)
 
+Policies with ``isolation: netns`` (PLAN.md §3.6) are forwarded, not
+classified by socket::
+
+    hook prerouting, prio -150        chain restore
+        iifname pyvpn-h<P> -> mark P (and conntrack mark P)
+
+    hook forward, prio 0 (filter)     chain forward
+        iifname pyvpn-h<P> -> jump n<P>
+        oifname pyvpn-h<P>, established/related -> accept (replies)
+        anything else from or to a namespace subnet -> drop
+        new connections arriving on a target pyvpn enabled forwarding on -> drop
+
+    chain n<P>        IPv6, port 53 (DNS goes to the in-namespace relay),
+                      DoT / DoH / QUIC as configured, then
+                      route unreachable -> reject (kill switch)
+                      route dev -> drop unless leaving via P's interface
+                      otherwise accept
+
+    egress: replies to pyvpn-h<P> are accepted before the interface check;
+    masq: the namespace subnet is masqueraded on any interface but a veth.
+
 The dns chain runs before the route chain so a mark set by the route chain
 never hides an app's query from the redirect; only socket marks exempt.
 
@@ -54,7 +75,10 @@ from pyvpn.constants import (
     CGROUP_ROOT,
     FWMARK_BASE,
     FWMARK_MASK,
+    NETNS_RANGE,
     NFT_TABLE,
+    netns_host_veth,
+    netns_subnet,
     parse_excluded_cgroup,
 )
 from pyvpn.netfilter.doh import DOH_V4, DOH_V6
@@ -66,6 +90,8 @@ Expr = list[Json]
 
 FAMILY = "inet"
 ROUTE_GUARD_TABLE = f"{NFT_TABLE}_guard"
+NETNS_TABLE = f"{NFT_TABLE}_ns"  # inside each policy namespace
+FORWARD_PRIORITY = 0  # NF_IP_PRI_FILTER
 DNS_PRIORITY = -100  # NF_IP_PRI_NAT_DST
 ROUTE_PRIORITY = -90  # after dns, so app marks never exempt a query
 GUARD_PRIORITY = -80  # after the route chain has classified outgoing packets
@@ -102,8 +128,18 @@ def set_name(policy_id: int, version: int) -> str:
     return f"p{policy_id}_v{version}"
 
 
-def build_ruleset(plan: RoutingPlan, *, idle_exclusions: Iterable[str] = ()) -> Json:
+def build_ruleset(
+    plan: RoutingPlan,
+    *,
+    idle_exclusions: Iterable[str] = (),
+    forwarding_guard: Iterable[str] = (),
+) -> Json:
     """Replace ``table inet pyvpn`` with the state described by ``plan``.
+
+    ``forwarding_guard`` names the target interfaces on which pyvpn turned
+    IPv4 forwarding on so namespace replies can pass. New connections that
+    arrive on them and would be forwarded are dropped, so the host does not
+    become a router for that link.
 
     ``idle_exclusions`` are existing top-level exclusion cgroups
     (``pyvpn.slice/x-<hex>``) that no binding lists yet, for example while
@@ -120,6 +156,11 @@ def build_ruleset(plan: RoutingPlan, *, idle_exclusions: Iterable[str] = ()) -> 
     cmds += _sets(plan)
     stale_checks = _stale_cgroup_rules(plan, idle_exclusions)
     cmds += _chains()
+    isolated = [p for p in plan.policies if p.isolation == "netns"]
+    guard = sorted(set(forwarding_guard))
+    if isolated or guard:
+        cmds.append(_base_chain("forward", "filter", "forward", FORWARD_PRIORITY))
+        cmds += [{"add": {"chain": {**_ref(), "name": f"n{p.policy_id}"}}} for p in isolated]
     if stale_checks:
         cmds.append({"add": {"chain": {**_ref(), "name": "check_cgroup"}}})
     for policy in plan.policies:
@@ -131,9 +172,12 @@ def build_ruleset(plan: RoutingPlan, *, idle_exclusions: Iterable[str] = ()) -> 
     rules += _output_rules(plan)
     for policy in plan.policies:
         rules += _policy_rules(policy)
+    rules += _netns_egress_rules(isolated)
     rules += _egress_rules(routes)
     rules += _masq_rules(plan)
     rules += _restore_rules(plan)
+    if isolated or guard:
+        rules += _forward_rules(isolated, guard)
     cmds += [{"add": {"rule": {**_ref(), "chain": chain, "expr": expr}}} for chain, expr in rules]
     return {"nftables": cmds}
 
@@ -155,25 +199,18 @@ def build_teardown() -> Json:
 
 
 def build_route_guard(*, enabled: bool) -> Json:
-    """Keep marked packets from egress while kernel routes are being replaced."""
+    """Keep marked packets from egress while kernel routes are being replaced.
+
+    Packets forwarded from a policy namespace are dropped as well, so nothing
+    leaves an isolated namespace while routes and rules change.
+    """
     name = ROUTE_GUARD_TABLE
     cmds = _table_reset(name)
     if enabled:
-        chain = {**_ref(name), "name": "output"}
         cmds.extend(
             (
                 {"add": {"table": _table(name)}},
-                {
-                    "add": {
-                        "chain": {
-                            **chain,
-                            "type": "filter",
-                            "hook": "output",
-                            "prio": GUARD_PRIORITY,
-                            "policy": "accept",
-                        }
-                    }
-                },
+                _base_chain("output", "filter", "output", GUARD_PRIORITY, table=name),
                 {
                     "add": {
                         "rule": {
@@ -183,9 +220,46 @@ def build_route_guard(*, enabled: bool) -> Json:
                         }
                     }
                 },
+                _base_chain("forward", "filter", "forward", GUARD_PRIORITY, table=name),
+                {
+                    "add": {
+                        "rule": {
+                            **_ref(name),
+                            "chain": "forward",
+                            "expr": [_saddr_in_netns(), _DROP],
+                        }
+                    }
+                },
             )
         )
     return {"nftables": cmds}
+
+
+def build_netns_ruleset() -> Json:
+    """``table inet pyvpn_ns`` inside a policy namespace.
+
+    Every DNS query, including ones to hard-coded resolvers and to a
+    loopback resolver such as ``127.0.0.53``, is redirected to the
+    namespace's own port 53, where the daemon relays it to the policy's stub.
+    """
+    name = NETNS_TABLE
+    redirect = {"redirect": {"port": 53}}
+    return {
+        "nftables": [
+            *_table_reset(name),
+            {"add": {"table": _table(name)}},
+            _base_chain("dns", "nat", "output", DNS_PRIORITY, table=name),
+            {
+                "add": {
+                    "rule": {
+                        **_ref(name),
+                        "chain": "dns",
+                        "expr": [*_l4(("tcp", "udp"), 53), redirect],
+                    }
+                }
+            },
+        ]
+    }
 
 
 # --- table, sets, chains -------------------------------------------------------
@@ -228,11 +302,13 @@ def _sets(plan: RoutingPlan) -> list[Json]:
     return out
 
 
-def _chains() -> list[Json]:
-    def base(name: str, kind: str, hook: str, prio: int) -> Json:
-        chain = {**_ref(), "name": name, "type": kind, "hook": hook, "prio": prio}
-        return {"add": {"chain": {**chain, "policy": "accept"}}}
+def _base_chain(name: str, kind: str, hook: str, prio: int, *, table: str = NFT_TABLE) -> Json:
+    chain = {**_ref(table), "name": name, "type": kind, "hook": hook, "prio": prio}
+    return {"add": {"chain": {**chain, "policy": "accept"}}}
 
+
+def _chains() -> list[Json]:
+    base = _base_chain
     return [
         base("dns", "nat", "output", DNS_PRIORITY),
         base("output", "route", "output", ROUTE_PRIORITY),
@@ -286,6 +362,18 @@ def _set_mark(key: Json, mark: int) -> Json:
 
 def _any_pyvpn_mark() -> Json:
     return _match(_masked(_meta("mark"), FWMARK_MASK), FWMARK_BASE)
+
+
+def _prefix(net: IPv4Network) -> Json:
+    return {"prefix": {"addr": str(net.network_address), "len": net.prefixlen}}
+
+
+def _saddr_in_netns() -> Json:
+    return _match({"payload": {"protocol": "ip", "field": "saddr"}}, _prefix(NETNS_RANGE))
+
+
+def _daddr_in_netns() -> Json:
+    return _match({"payload": {"protocol": "ip", "field": "daddr"}}, _prefix(NETNS_RANGE))
 
 
 def _daddr_in(version: int, name: str) -> Json:
@@ -456,10 +544,84 @@ def _masq_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:
         if p.route == "dev" and p.interface:
             oif = _match(_meta("oifname"), p.interface)
             rules.append(("masq", [_mark_is(p.mark), oif, {"masquerade": None}]))
+    for p in plan.policies:
+        if p.isolation == "netns" and p.route != "unreachable":
+            # Covers the default-route fallback (route main) too; the forward
+            # chain already decided which interface may be used.
+            saddr = _match(
+                {"payload": {"protocol": "ip", "field": "saddr"}},
+                _prefix(netns_subnet(p.policy_id)),
+            )
+            veth = _match(_meta("oifname"), netns_host_veth(p.policy_id), "!=")
+            rules.append(("masq", [saddr, veth, {"masquerade": None}]))
     return rules
 
 
 def _restore_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:
-    return [
+    rules: list[tuple[str, Expr]] = [
         ("restore", [_ct_mark_is(p.mark), _set_mark(_meta("mark"), p.mark)]) for p in plan.policies
     ]
+    for p in plan.policies:
+        if p.isolation == "netns":
+            # Everything from the namespace belongs to the policy: route it
+            # through the policy table and let the egress check enforce it.
+            iif = _match(_meta("iifname"), netns_host_veth(p.policy_id))
+            ct = {"ct": {"key": "mark"}}
+            rules.append(
+                ("restore", [iif, _set_mark(_meta("mark"), p.mark), _set_mark(ct, p.mark)])
+            )
+    return rules
+
+
+def _netns_egress_rules(isolated: Sequence[PolicyPlan]) -> list[tuple[str, Expr]]:
+    """Replies to a namespace carry the restored mark but leave via its veth."""
+    return [
+        ("egress", [_match(_meta("oifname"), netns_host_veth(p.policy_id)), _ACCEPT])
+        for p in isolated
+    ]
+
+
+def _forward_rules(isolated: Sequence[PolicyPlan], guard: Sequence[str]) -> list[tuple[str, Expr]]:
+    rules: list[tuple[str, Expr]] = []
+    for p in isolated:
+        iif = _match(_meta("iifname"), netns_host_veth(p.policy_id))
+        rules.append(("forward", [iif, {"jump": {"target": f"n{p.policy_id}"}}]))
+    replies = _match({"ct": {"key": "state"}}, {"set": ["established", "related"]})
+    for p in isolated:
+        oif = _match(_meta("oifname"), netns_host_veth(p.policy_id))
+        rules.append(("forward", [oif, replies, _ACCEPT]))
+    # Unknown or stale veths, other namespaces, inbound connections.
+    rules.append(("forward", [_saddr_in_netns(), _DROP]))
+    rules.append(("forward", [_daddr_in_netns(), _DROP]))
+    if guard:
+        names: Any = guard[0] if len(guard) == 1 else {"set": list(guard)}
+        rules.append(("forward", [_match(_meta("iifname"), names), _DROP]))
+    for p in isolated:
+        rules += _netns_policy_rules(p)
+    return rules
+
+
+def _netns_policy_rules(policy: PolicyPlan) -> list[tuple[str, Expr]]:
+    chain = f"n{policy.policy_id}"
+    leak = policy.leak
+    rules: list[tuple[str, Expr]] = [
+        # The namespace has no IPv6; never forward it, whatever leak.ipv6 says.
+        (chain, [_match(_meta("nfproto"), "ipv6"), _DROP]),
+        (chain, [_daddr_in_netns(), _DROP]),
+        # DNS is redirected to the relay inside the namespace; a query that
+        # still reaches the host bypassed it.
+        (chain, [*_l4(("tcp", "udp"), 53), _DROP]),
+    ]
+    if leak.block_dot:
+        rules.append((chain, [*_l4(("tcp", "udp"), 853), _REJECT]))
+    if leak.block_doh:
+        rules.append((chain, [_daddr_in(4, "doh_v4"), *_l4(("tcp", "udp"), 443), _REJECT]))
+    if leak.block_quic:
+        rules.append((chain, [*_l4(("udp",), 443), _REJECT]))
+    if policy.route == "unreachable":
+        rules.append((chain, [_REJECT]))
+        return rules
+    if policy.route == "dev" and policy.interface:
+        rules.append((chain, [_match(_meta("oifname"), policy.interface, "!="), _DROP]))
+    rules.append((chain, [_ACCEPT]))
+    return rules
