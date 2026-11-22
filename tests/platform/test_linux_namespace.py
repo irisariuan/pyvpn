@@ -161,9 +161,13 @@ def _install_counters() -> None:
 _CHILD = """
 import os, socket, sys
 cgroup, addr, port, mark = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+uid = int(sys.argv[5])
 if cgroup:
     with open(f"/sys/fs/cgroup/{cgroup}/cgroup.procs", "w") as f:
         f.write(str(os.getpid()))
+if uid >= 0:
+    os.setgid(uid)
+    os.setuid(uid)
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(3)
 if mark:
@@ -177,8 +181,11 @@ except OSError as e:
 """
 
 
-def _send(cgroup: str | None, addr: str = REMOTE, port: int = PORT, mark: int = 0) -> str:
-    return _run(sys.executable, "-c", _CHILD, cgroup or "", addr, str(port), str(mark))
+def _send(
+    cgroup: str | None, addr: str = REMOTE, port: int = PORT, mark: int = 0, uid: int = -1
+) -> str:
+    """Send one datagram from a child process, as ``uid`` when it is set."""
+    return _run(sys.executable, "-c", _CHILD, cgroup or "", addr, str(port), str(mark), str(uid))
 
 
 _DNS_CLIENT = """
@@ -400,6 +407,42 @@ async def _worker(cgroup: str) -> None:
     before = _counters()
     _send(cgroup)
     assert _delta(before) == {"wan_data": 1}, _delta(before)
+
+    # exclude_apps by uid on a policy for every process (PLAN.md §3.3): the
+    # excluded uid skips both the route and the DNS redirect; any other uid
+    # (here root) stays governed by both.
+    excluded_uid = 65534  # nobody
+    exempting = replace(
+        active,
+        apps=AppBinding(1, any_process=True, exclude_uids=(excluded_uid,)),
+        dests=DestSet(1, frozenset({IPv4Network(f"{REMOTE}/32")})),
+    )
+    await backend.apply(RoutingPlan((exempting,)))
+    chains = _run("nft", "list", "table", "inet", "pyvpn")
+    assert f"meta skuid != {excluded_uid} jump p1" in chains, chains
+    before = _counters()
+    _send(None)
+    _send(None, uid=excluded_uid)
+    assert _delta(before) == {"target_data": 1, "wan_data": 1}, _delta(before)
+    stub = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    stub.bind(("127.0.0.1", dns_stub_port(1)))
+    stub.settimeout(5)
+    try:
+        before = _counters()
+        _send(None, DNS_REMOTE, 53)  # covered: redirected to the stub
+        assert stub.recvfrom(64)[0] == b"pyvpn"
+        _send(None, DNS_REMOTE, 53, uid=excluded_uid)  # excluded: normal route
+        assert _delta(before) == {"wan_dns": 1}, _delta(before)
+    finally:
+        stub.close()
+    # Kill switch: the covered uid's traffic to the destination is dropped,
+    # the excluded uid's still leaves through the normal route.
+    await backend.apply(RoutingPlan((replace(exempting, route="unreachable", interface=None),)))
+    before = _counters()
+    _send(None)
+    _send(None, uid=excluded_uid)
+    assert _delta(before) == {"wan_data": 1}, _delta(before)
+    await backend.teardown()
 
     # A destination policy for every process must not catch the kernel
     # tunnel's own packets to an endpoint inside its destination set.

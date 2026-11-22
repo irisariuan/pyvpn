@@ -362,8 +362,17 @@ accepting and ignoring it:
   handling of them are reserved for that change; nothing creates such a
   cgroup today.
 
-The real app manager fills only `exclude_uids`. The test fake fills both
-fields.
+The real app manager fills only `exclude_uids`, and the test fake fills
+both fields. The nft ruleset enforces `exclude_uids` by adding
+`meta skuid != <uids>` to the `any_process` selector, which both the route
+classifier and the DNS redirect use. A negated uid match is safe, unlike a
+negated `socket cgroupv2`: every packet the selector can match has a socket
+owner, so a uid outside the list stays governed. The namespace integration
+test sends from an excluded uid and from a covered one. Rendering
+`exclude_cgroup_paths` (a positive-match return) comes with the deferred
+`unit`/`flatpak`/`snap` exemptions. Until then, those paths only count as
+known cgroups for the stale-cgroup check. Ignoring them is fail-closed,
+since their processes stay governed.
 
 An `any_process` binding may also list the policy's own cgroup
 (`pyvpn.slice/p-<id>`) in `cgroup_paths`, so `pyvpn run` works for
