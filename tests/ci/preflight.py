@@ -7,7 +7,7 @@ test errors. Exit status 0 means the suite can run.
 
 from __future__ import annotations
 
-import contextlib
+import errno
 import os
 import shutil
 import subprocess
@@ -16,7 +16,8 @@ import uuid
 from pathlib import Path
 
 CGROUP_ROOT = Path("/sys/fs/cgroup")
-TOOLS = ("ip", "nft", "sysctl")
+TOOLS = ("ip", "nft", "ping", "openssl", "sysctl", "unshare")
+_WRITE_ERRORS = (errno.EACCES, errno.EPERM, errno.EROFS)
 
 
 def cgroup2_problem(root: Path = CGROUP_ROOT) -> str | None:
@@ -37,12 +38,16 @@ def cgroup_write_problem(root: Path = CGROUP_ROOT) -> str | None:
     try:
         probe.mkdir()
     except OSError as exc:
-        return (
-            f"cannot create a cgroup under {root}: {exc.strerror or exc} "
-            "(the runner must mount /sys/fs/cgroup read-write)"
-        )
-    with contextlib.suppress(OSError):
+        if exc.errno in _WRITE_ERRORS:
+            return (
+                f"cannot create a cgroup under {root}: {exc.strerror or exc} "
+                "(the runner must mount /sys/fs/cgroup read-write)"
+            )
+        return f"cannot create a cgroup under {root}: {exc.strerror or exc}"
+    try:
         probe.rmdir()
+    except OSError as exc:
+        return f"cannot remove the probe cgroup {probe}: {exc.strerror or exc}"
     return None
 
 
@@ -55,23 +60,33 @@ def netns_problem() -> str | None:
     """Create and delete a throwaway namespace; report why that failed."""
     name = f"pyvpn-preflight-{uuid.uuid4().hex[:8]}"
     try:
-        subprocess.run(
+        created = subprocess.run(
             ["ip", "netns", "add", name],
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
             timeout=20,
         )
-    except subprocess.SubprocessError as exc:
-        return f"cannot create a network namespace: {exc}"
-    with contextlib.suppress(subprocess.SubprocessError):
-        subprocess.run(
+    except FileNotFoundError as exc:
+        return f"cannot run 'ip netns add': {exc}"
+    except subprocess.TimeoutExpired:
+        return "ip netns add timed out after 20 seconds"
+    if created.returncode != 0:
+        detail = (created.stderr or created.stdout).strip() or f"exit status {created.returncode}"
+        return f"cannot create a network namespace: {detail}"
+    try:
+        removed = subprocess.run(
             ["ip", "netns", "delete", name],
             check=False,
             capture_output=True,
             text=True,
             timeout=20,
         )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"cannot delete the probe namespace {name}: {exc}"
+    if removed.returncode != 0:
+        detail = (removed.stderr or removed.stdout).strip() or f"exit status {removed.returncode}"
+        return f"cannot delete the probe namespace {name}: {detail}"
     return None
 
 
@@ -83,6 +98,10 @@ def problems() -> list[str]:
     if os.geteuid() != 0:
         found.append("the net bed needs root (run this under sudo)")
     found.extend(f"missing tool {tool!r} on PATH" for tool in missing_tools())
+    if found:
+        # Creating namespaces and cgroups needs all of the above; probing
+        # anyway would only add noise on top of these lines.
+        return found
     for problem in (cgroup2_problem(), cgroup_write_problem(), netns_problem()):
         if problem is not None:
             found.append(problem)

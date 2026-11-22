@@ -41,9 +41,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             iproute2 nftables procps iputils-ping openssl
       - name: Make the cgroup tree writable
-        run: sudo mount -o remount,rw /sys/fs/cgroup || true
+        run: sudo mount -o remount,rw /sys/fs/cgroup || echo "::warning::could not remount /sys/fs/cgroup read-write"
       - name: Preflight
         run: sudo env "PATH=$PATH" "$(command -v python)" -m tests.ci.preflight
       - run: pip install -e '.[dev]'
+      - name: Check the root interpreter
+        run: sudo env "PATH=$PATH" "$(command -v python)" -c "import pyvpn, pytest"
       - name: Run the network-namespace suite
-        run: sudo env "PATH=$PATH" "$(command -v python)" -m pytest -m integration -o addopts="" -q
+        run: sudo env "PATH=$PATH" "$(command -v python)" -m pytest -m integration -o addopts="" -q -rs
