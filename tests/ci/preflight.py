@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 
 CGROUP_ROOT = Path("/sys/fs/cgroup")
-TOOLS = ("ip", "nft", "ping", "openssl", "sysctl", "unshare")
+TOOLS = ("ip", "nft", "ping", "openssl", "unshare")
 _WRITE_ERRORS = (errno.EACCES, errno.EPERM, errno.EROFS)
 
 

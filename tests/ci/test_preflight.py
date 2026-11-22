@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,53 @@ def test_netns_problem_reports_a_missing_ip(monkeypatch: pytest.MonkeyPatch) -> 
     problem = preflight.netns_problem()
     assert problem is not None
     assert "ip netns add" in problem
+
+
+def test_netns_problem_shows_the_kernel_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def failed(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            ["ip"], 1, "", "mount --make-shared /run/netns failed: Operation not permitted"
+        )
+
+    monkeypatch.setattr(preflight.subprocess, "run", failed)
+    problem = preflight.netns_problem()
+    assert problem is not None
+    assert "Operation not permitted" in problem
+
+
+def test_cgroup_write_problem_reports_a_failed_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def busy(self: Path, *args: object, **kwargs: object) -> None:
+        raise OSError(errno.EBUSY, "Device or resource busy")
+
+    monkeypatch.setattr(Path, "rmdir", busy)
+    problem = preflight.cgroup_write_problem(tmp_path)
+    assert problem is not None
+    assert "cannot remove" in problem
+
+
+@pytest.fixture
+def linux_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(preflight.sys, "platform", "linux")
+    monkeypatch.setattr(preflight.os, "geteuid", lambda: 0)
+
+
+def test_problems_stops_after_a_prerequisite_failure(
+    linux_root: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(preflight, "missing_tools", lambda tools=preflight.TOOLS: ["nft"])
+    for probe in ("cgroup2_problem", "cgroup_write_problem", "netns_problem"):
+        monkeypatch.setattr(preflight, probe, lambda *a, **k: pytest.fail("probe ran"))
+
+    assert preflight.problems() == ["missing tool 'nft' on PATH"]
+
+
+def test_problems_reports_a_missing_root(linux_root: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(preflight.os, "geteuid", lambda: 501)
+    monkeypatch.setattr(preflight, "missing_tools", lambda tools=preflight.TOOLS: [])
+    problems = preflight.problems()
+    assert any("needs root" in problem for problem in problems)
 
 
 def test_missing_tools_lists_only_absent_binaries() -> None:
