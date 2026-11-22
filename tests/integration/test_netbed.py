@@ -1,8 +1,9 @@
 """Self-tests for the network test bed itself (PLAN.md §8).
 
 These prove the bed before any stream builds a policy test on top of it: both
-namespaces and links exist, the WAN is the only default path, one destination
-is reachable over either link, and teardown removes everything.
+namespaces and links exist and are up, the WAN is the only default path, one
+destination is reachable over either link, teardown removes everything, and
+the host's own namespace is untouched.
 """
 
 from __future__ import annotations
@@ -10,10 +11,14 @@ from __future__ import annotations
 import pytest
 
 from tests.integration.netbed import (
+    PREFIX,
     SERVICE_ADDRESS,
     VPN_IFACE,
     VPN_NETWORK,
+    VPN_PEER,
+    WAN_IFACE,
     WAN_NETWORK,
+    WAN_PEER,
     Netbed,
 )
 
@@ -21,12 +26,15 @@ pytestmark = pytest.mark.integration
 
 
 def test_builds_two_namespaces_with_both_links(netbed: Netbed) -> None:
-    namespaces = netbed.namespaces()
-    assert netbed.host in namespaces
-    assert netbed.internet in namespaces
-    links = netbed.ip("link", "show", ns=netbed.host).stdout
-    assert "wan0" in links
-    assert "vpn0" in links
+    assert {netbed.host, netbed.internet} <= netbed.namespaces()
+    for iface, peer, network in (
+        (WAN_IFACE, WAN_PEER, WAN_NETWORK),
+        (VPN_IFACE, VPN_PEER, VPN_NETWORK),
+    ):
+        link = netbed.ip("-o", "link", "show", "dev", iface, ns=netbed.host).stdout
+        assert "state UP" in link
+        addrs = netbed.ip("-o", "addr", "show", "dev", peer, ns=netbed.internet).stdout
+        assert f"{network}.1/30" in addrs
 
 
 def test_wan_is_the_only_default_route(netbed: Netbed) -> None:
@@ -64,15 +72,28 @@ def test_same_destination_reachable_over_the_vpn_link(netbed: Netbed) -> None:
         assert f"dev {VPN_IFACE}" in route
         netbed.run(["ping", "-c", "1", "-W", "1", SERVICE_ADDRESS], ns=netbed.host)
     finally:
-        netbed.ip("route", "del", f"{SERVICE_ADDRESS}/32", ns=netbed.host)
+        netbed.ip("route", "del", f"{SERVICE_ADDRESS}/32", ns=netbed.host, check=False)
 
 
-def test_destroy_removes_its_namespaces() -> None:
-    bed = Netbed.build()
+def test_destroy_removes_its_namespaces(netbed: Netbed) -> None:
+    assert {netbed.host, netbed.internet} <= netbed.namespaces()
+
+    netbed.destroy()
+    assert not {netbed.host, netbed.internet} & netbed.namespaces()
+
+
+def test_the_bed_leaves_the_root_namespace_alone(netbed: Netbed) -> None:
+    namespaces, links = netbed.namespaces(), netbed.ip("-o", "link", "show").stdout
+
+    other = Netbed.build()
     try:
-        assert bed.host in bed.namespaces()
-        bed.destroy()
-        assert bed.host not in bed.namespaces()
-        assert bed.internet not in bed.namespaces()
+        assert other.host in netbed.namespaces()
     finally:
-        bed.destroy()  # idempotent
+        other.destroy()
+
+    assert netbed.namespaces() == namespaces
+    assert netbed.ip("-o", "link", "show").stdout == links
+    assert {name for name in namespaces if name.startswith(PREFIX)} == {
+        netbed.host,
+        netbed.internet,
+    }

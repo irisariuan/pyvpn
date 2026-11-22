@@ -72,10 +72,12 @@ def _accept(listener: socket.socket, log: TextIO) -> None:
     while True:
         try:
             conn, peer = listener.accept()
-        except BlockingIOError:
+        except OSError:
             return
         with conn:
-            conn.settimeout(2.0)
+            # A client that connects and sends nothing must not stall the
+            # loop that also serves UDP and DNS.
+            conn.settimeout(0.25)
             _record(log, "tcp", peer[0])
             with contextlib.suppress(OSError):
                 conn.recv(64)
@@ -87,10 +89,11 @@ def _reply_udp(sock: socket.socket, log: TextIO) -> None:
     while True:
         try:
             _, peer = sock.recvfrom(2048)
-        except BlockingIOError:
+        except OSError:
             return
         _record(log, "udp", peer[0])
-        sock.sendto(f"peer={peer[0]}\n".encode(), peer)
+        with contextlib.suppress(OSError):
+            sock.sendto(f"peer={peer[0]}\n".encode(), peer)
 
 
 def _reply_dns(sock: socket.socket, log: TextIO) -> None:
@@ -141,7 +144,9 @@ def probe(kind: str, address: str, port: int, timeout: float = 5.0) -> str:
     if kind == "udp":
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.settimeout(timeout)
-            sock.sendto(b"ping", (address, port))
+            # Connecting makes the kernel drop datagrams from anyone else.
+            sock.connect((address, port))
+            sock.send(b"ping")
             return _peer(sock.recv(256))
     raise ValueError(f"unknown probe kind {kind!r}")
 
@@ -200,14 +205,15 @@ def main(argv: list[str] | None = None) -> int:
         timeout = float(args[4]) if len(args) == 5 else 5.0
         print(probe(args[1], args[2], int(args[3]), timeout))
         return 0
-    if len(args) in (4, 5) and args[0] == "query":
+    if len(args) in (3, 4, 5) and args[0] == "query":
+        port = int(args[3]) if len(args) >= 4 else 53
         timeout = float(args[4]) if len(args) == 5 else 5.0
-        print(query(args[2], args[1], 53, timeout))
+        print(query(args[2], args[1], port, timeout))
         return 0
     print(
         "usage: services serve READY LOG ADDRESS TCP_PORT UDP_PORT DNS_PORT | "
         "services probe tcp|udp ADDRESS PORT [TIMEOUT] | "
-        "services query ADDRESS NAME [TIMEOUT]",
+        "services query ADDRESS NAME [PORT] [TIMEOUT]",
         file=sys.stderr,
     )
     return 2

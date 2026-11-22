@@ -51,9 +51,6 @@ class Netbed:
     """
 
     tag: str
-    # Whether this bed could turn off rp_filter for asymmetric replies.
-    # /proc/sys is read-only in Docker, and some tests do not need it.
-    rp_filter_off: bool = False
 
     @property
     def host(self) -> str:
@@ -66,14 +63,15 @@ class Netbed:
     @classmethod
     def build(cls) -> Netbed:
         """Create the namespaces and links; raise ``NetbedError`` on failure."""
-        for tool in ("ip", "sysctl"):
+        for tool in ("ip", "ping"):
             if shutil.which(tool) is None:
                 raise NetbedError(f"the test bed needs {tool!r} on PATH")
         bed = cls(uuid.uuid4().hex[:8])
         try:
             bed._create()
         except BaseException:
-            bed.destroy()
+            with contextlib.suppress(Exception):
+                bed.destroy()
             raise
         return bed
 
@@ -115,27 +113,6 @@ class Netbed:
             WAN_IFACE,
             ns=self.host,
         )
-        # Replies to the service address arrive on the link the request left,
-        # which is asymmetric for the per-link subnets; keep rp_filter out of
-        # the way. Containers mount /proc/sys read-only: record whether it
-        # worked and let tests that need it skip.
-        self.rp_filter_off = self._disable_rp_filter()
-
-    def _disable_rp_filter(self) -> bool:
-        ok = True
-        for ns in (self.host, self.internet):
-            result = self.run(
-                [
-                    "sysctl",
-                    "-qw",
-                    "net.ipv4.conf.all.rp_filter=0",
-                    "net.ipv4.conf.default.rp_filter=0",
-                ],
-                ns=ns,
-                check=False,
-            )
-            ok = ok and result.returncode == 0
-        return ok
 
     def ip(
         self, *args: str, ns: str | None = None, check: bool = True
@@ -161,49 +138,51 @@ class Netbed:
     def services(self) -> Iterator[Services]:
         """Start the internet-side echo servers; stop them on exit."""
         work = Path(tempfile.mkdtemp(prefix="pyvpn-tb-svc-"))
-        ready, log, diagnostics = work / "ready", work / "log.jsonl", work / "worker.log"
-        log.touch()
-        with diagnostics.open("w", encoding="utf-8") as output:
-            process = subprocess.Popen(
-                [
-                    "ip",
-                    "netns",
-                    "exec",
-                    self.internet,
-                    sys.executable,
-                    "-m",
-                    "tests.integration.services",
-                    "serve",
-                    str(ready),
-                    str(log),
-                    SERVICE_ADDRESS,
-                    str(TCP_PORT),
-                    str(UDP_PORT),
-                    str(DNS_PORT),
-                ],
-                cwd=ROOT,
-                stdout=output,
-                stderr=subprocess.STDOUT,
-            )
-            try:
-                deadline = time.monotonic() + 10.0
-                while not ready.exists():
-                    if process.poll() is not None:
-                        detail = diagnostics.read_text(encoding="utf-8").strip()
-                        raise NetbedError(f"the internet services exited early: {detail}")
-                    if time.monotonic() > deadline:
-                        raise NetbedError("the internet services did not become ready")
-                    time.sleep(0.05)
-                yield Services(log)
-            finally:
-                if process.poll() is None:
-                    process.terminate()
+        try:
+            ready, log, diagnostics = work / "ready", work / "log.jsonl", work / "worker.log"
+            log.touch()
+            with diagnostics.open("w", encoding="utf-8") as output:
+                process = subprocess.Popen(
+                    [
+                        "ip",
+                        "netns",
+                        "exec",
+                        self.internet,
+                        sys.executable,
+                        "-m",
+                        "tests.integration.services",
+                        "serve",
+                        str(ready),
+                        str(log),
+                        SERVICE_ADDRESS,
+                        str(TCP_PORT),
+                        str(UDP_PORT),
+                        str(DNS_PORT),
+                    ],
+                    cwd=ROOT,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                )
                 try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
-        shutil.rmtree(work, ignore_errors=True)
+                    deadline = time.monotonic() + 10.0
+                    while not ready.exists():
+                        if process.poll() is not None:
+                            detail = diagnostics.read_text(encoding="utf-8").strip()
+                            raise NetbedError(f"the internet services exited early: {detail}")
+                        if time.monotonic() > deadline:
+                            raise NetbedError("the internet services did not become ready")
+                        time.sleep(0.05)
+                    yield Services(log, process.pid)
+                finally:
+                    if process.poll() is None:
+                        process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
     def tcp_echo(self, *, timeout: float = 5.0) -> str:
         """Source address the echo server saw for a TCP connection."""
@@ -213,7 +192,9 @@ class Netbed:
         """Source address the echo server saw for a UDP datagram."""
         return self._probe("udp", UDP_PORT, timeout)
 
-    def dns_query(self, name: str = "example.test", *, timeout: float = 5.0) -> str:
+    def dns_query(
+        self, name: str = "example.test", *, port: int = DNS_PORT, timeout: float = 5.0
+    ) -> str:
         """Address in the A record the responder returns for ``name``."""
         result = self.run(
             [
@@ -223,6 +204,7 @@ class Netbed:
                 "query",
                 SERVICE_ADDRESS,
                 name,
+                str(port),
                 str(timeout),
             ],
             ns=self.host,
@@ -273,12 +255,27 @@ class Netbed:
 
     def namespaces(self) -> set[str]:
         """Names currently registered in ``/run/netns``."""
-        return {line.split()[0] for line in self._ip("netns", "list").stdout.splitlines() if line}
+        names = set()
+        for line in self._ip("netns", "list").stdout.splitlines():
+            fields = line.split()
+            if fields:
+                names.add(fields[0])
+        return names
 
     def destroy(self) -> None:
-        """Delete both namespaces; safe to call twice."""
+        """Delete both namespaces; raise if either survives.
+
+        Safe to call twice: deleting an absent namespace is not an error.
+        """
+        errors, remaining = [], set()
         for ns in (self.host, self.internet):
-            self._ip("netns", "delete", ns, check=False)
+            result = self._ip("netns", "delete", ns, check=False)
+            if result.returncode != 0:
+                errors.append(result.stderr.strip() or f"ip netns delete {ns} failed")
+        remaining = {self.host, self.internet} & self.namespaces()
+        if remaining:
+            detail = "; ".join(errors) or "still registered"
+            raise NetbedError(f"could not remove {sorted(remaining)}: {detail}")
 
     def _ip(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return self._call(["ip", *args], check=check)
@@ -304,6 +301,12 @@ class Services:
     """The echo servers running in the internet namespace."""
 
     log_path: Path
+    pid: int
+
+    @property
+    def directory(self) -> Path:
+        """The throwaway directory holding the log and the worker output."""
+        return self.log_path.parent
 
     def observed(self) -> list[dict[str, object]]:
         """Every echo the servers answered, oldest first."""
