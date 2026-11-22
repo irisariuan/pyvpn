@@ -23,7 +23,7 @@ from ipaddress import IPv4Network, IPv6Network, ip_network
 from typing import Literal
 
 from pyvpn.config.models import Config, Policy
-from pyvpn.match.asn import AsnCache
+from pyvpn.match.asn import AsnCache, AsnError
 from pyvpn.match.pattern import RuleError, parse_asn, parse_cidr, regex_engine
 from pyvpn.match.route import group
 from pyvpn.match.ruleset import LineError, Result, RuleSet
@@ -31,7 +31,9 @@ from pyvpn.services import RuleMatcherFactory
 from pyvpn.state import DestSet
 
 AsnResolver = Callable[[int], Iterable[str]]
-"""ASN -> announced prefixes, e.g. ``AsnCache.cached`` (must not block long)."""
+"""ASN -> announced prefixes, e.g. ``AsnCache.usable`` (must not block long).
+It raises ``AsnError`` when the ASN cannot be routed by (missing or stale
+cache); the matcher then reports the error and refuses activation."""
 
 Action = Literal["route", "drop", "none"]
 
@@ -118,7 +120,10 @@ class PolicyRules:
         nets = list(self.cidrs)
         if asn_prefixes is not None:
             for a in self.asns:
-                nets.extend(asn_prefixes(a))
+                try:
+                    nets.extend(asn_prefixes(a))
+                except AsnError:
+                    continue  # problems() reports it; build_matcher refuses
         for c in nets:
             try:
                 net = ip_network(c, strict=False)
@@ -248,10 +253,7 @@ class PolicyMatcher:
                 else:
                     out.append(f"{where}: per-device rules are not supported yet: {raw}")
             for a in pr.asns:
-                if self._asn_prefixes is None:
-                    out.append(f"{where}: asn:{a} needs the ASN cache")
-                else:
-                    out += asn_problems(where, a, self._asn_prefixes(a))
+                out += resolve_problems(where, a, self._asn_prefixes)
         return out
 
     def bases(self, policy_id: int) -> list[str]:
@@ -277,15 +279,52 @@ def asn_problems(where: str, asn: int, prefixes: Iterable[str]) -> list[str]:
     return out
 
 
+def resolve_problems(where: str, asn: int, resolver: AsnResolver | None) -> list[str]:
+    """Why ``asn`` cannot be routed by through ``resolver``; empty when it can."""
+    if resolver is None:
+        return [f"{where}: asn:{asn} needs the ASN cache"]
+    try:
+        prefixes = resolver(asn)
+    except AsnError as e:
+        return [f"{where}: {e}"]
+    return asn_problems(where, asn, prefixes)
+
+
+def snapshot(asn_cache: AsnCache, asns: Iterable[int]) -> AsnResolver:
+    """Read ``asns`` from the cache once (``AsnCache.usable``): the matcher
+    checks and installs the same prefixes even if the cache changes or goes
+    stale in between."""
+    found: dict[int, list[str] | AsnError] = {}
+    for a in asns:
+        try:
+            found[a] = asn_cache.usable(a)
+        except AsnError as e:
+            found[a] = e
+
+    def resolve(a: int) -> list[str]:
+        got = found.get(a)
+        if got is None:
+            raise AsnError(f"asn:{a} was not read from the ASN cache")
+        if isinstance(got, AsnError):
+            raise got
+        return got
+
+    return resolve
+
+
 def build_matcher(config: Config, asn_cache: AsnCache | None = None) -> PolicyMatcher:
     """``RuleMatcherFactory``: the matcher the daemon activates.
 
-    ASN prefixes come from ``asn_cache`` (cached only, never fetched). Raises
-    ``RuleConfigError`` listing every rule that cannot be activated, so a
-    config load or reload fails instead of routing less than configured.
-    ``pyvpn rules check`` uses the lenient ``PolicyMatcher.from_config``.
+    ASN prefixes come from ``asn_cache`` (read once, never fetched; missing,
+    untrusted or stale entries are refused). Raises ``RuleConfigError``
+    listing every rule that cannot be activated, so a config load or reload
+    fails instead of routing less than configured. ``pyvpn rules check``
+    uses the lenient ``PolicyMatcher.from_config``.
     """
-    matcher = PolicyMatcher.from_config(config, asn_cache.cached if asn_cache else None)
+    resolver = None
+    if asn_cache is not None:
+        resolver = snapshot(asn_cache, PolicyMatcher.from_config(config).asns())
+    matcher = PolicyMatcher.from_config(config, resolver)
     problems = matcher.problems()
     if problems:
         raise RuleConfigError("cannot activate destination rules:\n  " + "\n  ".join(problems))

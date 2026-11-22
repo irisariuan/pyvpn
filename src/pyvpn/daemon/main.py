@@ -9,7 +9,8 @@ Wires the real parts of every workstream into one :class:`Daemon`:
   :class:`ProcessWatcher` that places matching processes as they start;
 - F: :class:`PolicyDnsService` with upstream sockets bound by
   :func:`bound_dns_socket`, and :func:`audit_dns` for ``pyvpn audit``;
-- G: :func:`matcher_factory` with an on-disk ASN cache;
+- G: :func:`matcher_factory` with the on-disk ASN cache (read on start and
+  reload; :func:`watch_asn_cache` reports entries that go stale meanwhile);
 - A: configuration loading.
 
 If the Linux backend is not part of the installed package, the daemon refuses
@@ -22,6 +23,7 @@ import argparse
 import asyncio
 import importlib
 import logging
+import os
 import signal
 import sys
 from collections.abc import Callable, Sequence
@@ -44,8 +46,8 @@ from pyvpn.daemon.persistence import StateError, StateStore
 from pyvpn.daemon.server import ApiError
 from pyvpn.dns.service import PolicyDnsService
 from pyvpn.dns.upstream import BoundUpstream
-from pyvpn.match.asn import AsnCache
-from pyvpn.match.policy import matcher_factory
+from pyvpn.match.asn import REFRESH_HINT, AsnCache
+from pyvpn.match.policy import PolicyMatcher, matcher_factory
 from pyvpn.platform.base import Backend
 from pyvpn.platform.linux.dns import bound_dns_socket
 from pyvpn.platform.linux.netlink import NetlinkEventSource, NetlinkTargetWatcher
@@ -56,6 +58,7 @@ BACKENDS = ("linux", "dry-run")
 LINUX_BACKEND_MODULE = "pyvpn.platform.linux.backend"
 LINUX_BACKEND_CLASS = "LinuxBackend"
 SYSTEM_CGROUP_ROOT = Path("/sys/fs/cgroup")
+ASN_CHECK_INTERVAL = 3600.0
 
 
 class BackendUnavailable(RuntimeError):
@@ -211,6 +214,7 @@ class Assembly:
     dns: PolicyDnsService
     apps: AppManager
     process_watcher: ProcessWatcherRunner | None
+    asn_cache: AsnCache | None = None
 
     async def close(self) -> None:
         if self.process_watcher is not None:
@@ -240,6 +244,9 @@ def build_daemon(
     targets = NetlinkTargetWatcher(config.targets, netlink)
 
     daemon: Daemon | None = None
+    # Only the daemon's own uid may have written the cache it routes by
+    # (root in production), so other users cannot plant prefixes.
+    asn_cache = AsnCache(state_dir / "asn", trusted_uids={os.geteuid()})
 
     def active_matcher() -> Any:
         # Late-bound: the DNS service is built before the daemon.
@@ -264,7 +271,7 @@ def build_daemon(
         targets=targets,
         apps=apps,
         dns=dns,
-        matcher_factory=matcher_factory(AsnCache(state_dir / "asn")),
+        matcher_factory=matcher_factory(asn_cache),
         audit=audit,
         place_policy_pid=(
             partial(route_and_place, apps.cgroups) if route_and_place is not None else None
@@ -283,7 +290,53 @@ def build_daemon(
         )
         daemon.on_config = runner.update
         daemon.reconciler.on_applied = runner.on_applied
-    return Assembly(daemon=daemon, backend=backend, dns=dns, apps=apps, process_watcher=runner)
+    return Assembly(
+        daemon=daemon,
+        backend=backend,
+        dns=dns,
+        apps=apps,
+        process_watcher=runner,
+        asn_cache=asn_cache,
+    )
+
+
+def asn_cache_problem(daemon: Daemon, cache: AsnCache) -> str:
+    """Why the committed config's ``asn:`` prefixes are no longer backed by a
+    usable cache entry; empty when they are.
+
+    The prefixes already installed stay in force: dropping them would send
+    those destinations out the default route. A reload refuses the stale
+    entries (fail closed) until ``pyvpn asn refresh`` renews them.
+    """
+    config = daemon.reconciler.config
+    if config is None:
+        return ""
+    errors = [
+        e.error or f"asn:{e.asn} is {e.state}"
+        for e in (cache.entry(a) for a in PolicyMatcher.from_config(config).asns())
+        if not e.usable
+    ]
+    if not errors:
+        return ""
+    return (
+        "ASN cache: " + "; ".join(errors) + "; the installed prefixes stay in force, "
+        f"but a reload will refuse them: {REFRESH_HINT}"
+    )
+
+
+async def watch_asn_cache(
+    daemon: Daemon, cache: AsnCache, interval: float = ASN_CHECK_INTERVAL
+) -> None:
+    """Report stale ASN cache entries in ``pyvpn status`` (``last error``)."""
+    while True:
+        try:
+            problem = await asyncio.to_thread(asn_cache_problem, daemon, cache)
+        except Exception as exc:
+            problem = f"ASN cache check failed: {exc}"
+        if problem:
+            log.warning("%s", problem)
+        daemon.report_watcher_error("asn", problem)  # "" clears it
+        await asyncio.sleep(interval)
 
 
 def audit_report(daemon: Daemon, dns: PolicyDnsService, backend_name: str) -> dict[str, Any]:
@@ -392,6 +445,8 @@ async def serve(assembly: Assembly) -> int:
             return 1
         # Only now: a reload must not run concurrently with startup's install.
         loop.add_signal_handler(signal.SIGHUP, lambda: later(reload()))
+        if assembly.asn_cache is not None:
+            later(watch_asn_cache(daemon, assembly.asn_cache))
         await daemon.wait_stopped()
         return 0
     finally:

@@ -12,6 +12,7 @@ from pyvpn import __version__
 from pyvpn.apps.launcher import DaemonUnavailable as LauncherUnavailable
 from pyvpn.apps.launcher import run as run_app
 from pyvpn.apps.netns import NetworkNamespaceUnavailable
+from pyvpn.cli.asn import add_asn_parser, add_cache_dir_argument, resolver_from_args, run_asn
 from pyvpn.cli.install import (
     InstallError,
     InstallFile,
@@ -69,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     test = commands.add_parser("test", help="validate configuration and policy rules")
     test.add_argument("config", nargs="?", default=None, help="configuration JSON path")
+    add_cache_dir_argument(test)
 
     commands.add_parser("reload", help="reload the daemon configuration")
     commands.add_parser("disable", help="remove pyvpn routing and rules")
@@ -104,6 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     rules_check = rules_commands.add_parser("check", help="check a rule file")
     rules_check.add_argument("file", help="rule file")
     rules_check.add_argument("--convert", action="store_true", help="accept foreign list formats")
+    add_cache_dir_argument(rules_check)
 
     rules_test = rules_commands.add_parser("test", help="test rule matching")
     rules_test.add_argument("source", help="rule file or config policy/name")
@@ -116,6 +119,8 @@ def build_parser() -> argparse.ArgumentParser:
     rules_export = rules_commands.add_parser("export", help="export a config policy")
     rules_export.add_argument("policy", help="policy name")
     rules_export.add_argument("--config", default=None, help="configuration JSON path")
+
+    add_asn_parser(commands)
     return parser
 
 
@@ -184,7 +189,7 @@ def _run_policy(args: argparse.Namespace, as_json: bool) -> int:
 
 def _run_test(args: argparse.Namespace, as_json: bool) -> int:
     config = load_config(args.config)
-    result = check_config(config)
+    result = check_config(config, resolver_from_args(args))
     if as_json:
         print_json({"ok": result.code == 0, "output": result.output})
     else:
@@ -321,7 +326,7 @@ def _read_text_file(path: str) -> str:
 def _run_rules(args: argparse.Namespace, as_json: bool) -> int:
     if args.rules_command == "check":
         text = _read_text_file(args.file)
-        result = check(text, args.file, convert=args.convert)
+        result = check(text, args.file, convert=args.convert, asn_prefixes=resolver_from_args(args))
         if as_json:
             print_json({"ok": result.code == 0, "output": result.output})
         else:
@@ -405,6 +410,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_desktop(args, args.json)
         if args.command == "rules":
             return _run_rules(args, args.json)
+        if args.command == "asn":
+            return run_asn(args, args.json)
     except (ConfigError, DaemonClientError, InstallError) as exc:
         print(f"pyvpn: {exc}", file=sys.stderr)
         return 1

@@ -1,0 +1,11 @@
+{
+"version": 1,
+"asn": 2906,
+"source": "https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS2906&sourceapp=pyvpn",
+"fetched": 1790000000.0,
+"prefixes": [
+"198.45.48.0/24",
+"2a00:86c0:2014::/48",
+"23.246.0.0/18"
+]
+}
