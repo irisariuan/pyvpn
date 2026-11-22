@@ -13,6 +13,7 @@ add chain inet pyvpn p1
 add chain inet pyvpn p1_route
 add rule inet pyvpn dns meta mark & 0xffff0000 0x50590000 return
 add rule inet pyvpn dns socket cgroupv2 level 2 "pyvpn.slice/p-1" meta l4proto { tcp, udp } th dport 53 redirect to :5301
+add rule inet pyvpn output socket cgroupv2 level 1 "pyvpn.slice" socket cgroupv2 level 2 != "pyvpn.slice/p-1" reject with icmpx type admin-prohibited
 add rule inet pyvpn output ip daddr @lan_v4 accept
 add rule inet pyvpn output ip6 daddr @lan_v6 accept
 add rule inet pyvpn output meta mark & 0xffff0000 0x50590000 accept

@@ -11,6 +11,8 @@ Packet path (PLAN.md §3)::
         <policy apps> port 53 udp/tcp -> redirect to 127.0.0.1:<stub port>
 
     hook output, prio -90 (route)   chain output
+        socket in a pyvpn.slice/<child> cgroup that is not one of the
+        loaded ones (re-created, so its id changed) -> reject
         LAN / loopback / multicast destination -> accept unchanged
         socket already carries a pyvpn mark -> accept unchanged
         conntrack mark of policy P -> enforce P's current leak rules and route
@@ -45,7 +47,7 @@ from collections.abc import Iterable, Sequence
 from ipaddress import IPv4Network, IPv6Network
 from typing import Any
 
-from pyvpn.constants import FWMARK_BASE, FWMARK_MASK, NFT_TABLE
+from pyvpn.constants import CGROUP_ROOT, FWMARK_BASE, FWMARK_MASK, NFT_TABLE
 from pyvpn.netfilter.doh import DOH_V4, DOH_V6
 from pyvpn.routing.plan import POLICY_MARK_MASK, validate_policy
 from pyvpn.state import DestSet, PolicyPlan, RoutingPlan
@@ -316,8 +318,35 @@ def _dns_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:
     return rules
 
 
+def _stale_cgroup_rule(plan: RoutingPlan) -> list[tuple[str, Expr]]:
+    """Reject sockets in a ``pyvpn.slice`` child the ruleset does not know.
+
+    ``socket cgroupv2`` compares cgroup ids resolved when the ruleset was
+    loaded. A policy cgroup removed and created again has a new id, so its
+    processes would match no policy and leave by the default route until the
+    backend re-applies. Rejecting every ``pyvpn.slice`` child other than the
+    loaded ones closes that window (fail closed), including for loopback
+    services such as a local resolver, which would forward their DNS.
+    """
+    prefix = CGROUP_ROOT + "/"
+    known = sorted(
+        {
+            c.strip("/")
+            for p in plan.policies
+            for c in p.apps.cgroup_paths
+            if c.strip("/").startswith(prefix) and c.strip("/").count("/") == 1
+        }
+    )
+    if not known:
+        return []
+    slice_match = _match({"socket": {"key": "cgroupv2", "level": 1}}, CGROUP_ROOT)
+    others = [_match({"socket": {"key": "cgroupv2", "level": 2}}, c, "!=") for c in known]
+    return [("output", [slice_match, *others, _REJECT])]
+
+
 def _output_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:
     rules: list[tuple[str, Expr]] = [
+        *_stale_cgroup_rule(plan),
         ("output", [_daddr_in(4, "lan_v4"), _ACCEPT]),
         ("output", [_daddr_in(6, "lan_v6"), _ACCEPT]),
         ("output", [_any_pyvpn_mark(), _ACCEPT]),

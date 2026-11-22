@@ -55,12 +55,15 @@ def test_linux_backend_in_namespace() -> None:
 
     tag = uuid.uuid4().hex[:8]
     ns, peer = f"pyvpn-c-{tag}", f"pyvpn-p-{tag}"
-    cgroup = f"pyvpn-it-{tag}.slice"
+    # A child of pyvpn.slice, like a policy cgroup (p-<id>), so the stale
+    # cgroup reject applies to it; the slice is removed if the test made it.
+    made_slice = not (CGROUP_FS / "pyvpn.slice").exists()
+    cgroup = f"pyvpn.slice/it-{tag}"
     echo: subprocess.Popen[bytes] | None = None
     _run("ip", "netns", "add", ns)
     try:
         _run("ip", "netns", "add", peer)
-        (CGROUP_FS / cgroup).mkdir()
+        (CGROUP_FS / cgroup).mkdir(parents=True)
         for args in (
             ("link", "set", "lo", "up"),
             ("link", "add", "wan0", "type", "dummy"),
@@ -104,6 +107,8 @@ def test_linux_backend_in_namespace() -> None:
             subprocess.run(["ip", "netns", "delete", name], capture_output=True, timeout=20)
         if (CGROUP_FS / cgroup).exists():
             (CGROUP_FS / cgroup).rmdir()
+        if made_slice and (CGROUP_FS / "pyvpn.slice").exists():
+            (CGROUP_FS / "pyvpn.slice").rmdir()
 
 
 _ECHO = """
@@ -230,7 +235,7 @@ async def _worker(cgroup: str) -> None:
     assert "default dev d0 table 1001 proto static metric 100" in routes, routes
     assert "unreachable default table 1001 proto static metric 32760" in routes, routes
     chains = _run("nft", "list", "table", "inet", "pyvpn")
-    assert f'socket cgroupv2 level 1 "{cgroup}" jump p1' in chains, chains
+    assert f'socket cgroupv2 level 2 "{cgroup}" jump p1' in chains, chains
 
     # The policy's process leaves via the target, every other process via wan0.
     before = _counters()
@@ -275,11 +280,16 @@ async def _worker(cgroup: str) -> None:
     assert _delta(before) == {}, _delta(before)
     _run("ip", "link", "set", "d0", "up")
 
-    # A cgroup removed and created again gets a new id; the backend notices
-    # and re-applies, so its processes are matched again.
+    # A cgroup removed and created again gets a new id. Until the backend
+    # re-applies, its processes are rejected (never sent via wan0); then
+    # they are matched again.
     await backend.apply(RoutingPlan((active,)))
     (CGROUP_FS / cgroup).rmdir()
     (CGROUP_FS / cgroup).mkdir()
+    before = _counters()
+    _send(cgroup)  # blocks the event loop, so the watcher cannot run first
+    _send(cgroup, DNS_REMOTE, 53)
+    assert _delta(before) == {}, _delta(before)
     await asyncio.sleep(2)  # the watcher polls every 0.5 s
     before = _counters()
     _send(cgroup)

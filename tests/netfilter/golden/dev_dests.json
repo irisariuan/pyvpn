@@ -328,6 +328,47 @@
             {
               "match": {
                 "left": {
+                  "socket": {
+                    "key": "cgroupv2",
+                    "level": 1
+                  }
+                },
+                "op": "==",
+                "right": "pyvpn.slice"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "socket": {
+                    "key": "cgroupv2",
+                    "level": 2
+                  }
+                },
+                "op": "!=",
+                "right": "pyvpn.slice/p-1"
+              }
+            },
+            {
+              "reject": {
+                "expr": "admin-prohibited",
+                "type": "icmpx"
+              }
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "output",
+          "expr": [
+            {
+              "match": {
+                "left": {
                   "payload": {
                     "field": "daddr",
                     "protocol": "ip"

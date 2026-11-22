@@ -225,7 +225,10 @@ Linux backend details (stream C, `netfilter/`, `routing/`,
   backend records each cgroup's id (inode) and re-applies the last plan,
   with destinations added since, once every cgroup it names exists and
   one was re-created (`place_pid` re-creates a missing policy cgroup
-  without a daemon apply).
+  without a daemon apply). Until then, sockets in a `pyvpn.slice` child
+  that is not one of the loaded cgroups are rejected, so the window cannot
+  leak. Cgroups outside `pyvpn.slice` (none are bound today) are only
+  covered by the re-apply.
 * Policies for every process (`any_process`) also require `meta skuid`, so
   kernel sockets are never marked: a WireGuard endpoint inside a
   destination set cannot loop the tunnel's own packets into it. A

@@ -224,13 +224,42 @@ def test_socket_marked_dns_is_never_redirected(name: str) -> None:
 
 def test_lan_exemption_comes_before_any_mark() -> None:
     out = _rules(build_ruleset(VARIANTS["multi"]), "output")
-    assert [r[-1] for r in out[:2]] == [{"accept": None}, {"accept": None}]
-    assert [r[0]["match"]["right"] for r in out[:2]] == ["@lan_v4", "@lan_v6"]
+    lan = [i for i, r in enumerate(out) if r[0]["match"]["right"] in ("@lan_v4", "@lan_v6")]
+    marks = [i for i, r in enumerate(out) if any("mangle" in e or "jump" in e for e in r)]
+    assert len(lan) == 2 and max(lan) < min(marks)
+    assert all(out[i][-1] == {"accept": None} for i in lan)
+
+
+def test_unknown_policy_cgroups_are_rejected_before_anything_else() -> None:
+    out = _rules(build_ruleset(VARIANTS["multi"]), "output")
+    socket = {"socket": {"key": "cgroupv2", "level": 2}}
+    assert out[0] == [
+        {
+            "match": {
+                "op": "==",
+                "left": {"socket": {"key": "cgroupv2", "level": 1}},
+                "right": "pyvpn.slice",
+            }
+        },
+        {"match": {"op": "!=", "left": socket, "right": "pyvpn.slice/p-1"}},
+        {"match": {"op": "!=", "left": socket, "right": "pyvpn.slice/p-2"}},
+        {"reject": {"type": "icmpx", "expr": "admin-prohibited"}},
+    ]
+    # Without a policy cgroup in the plan there is nothing to compare with.
+    assert not any(
+        e.get("match", {}).get("op") == "!="
+        for r in _rules(build_ruleset(VARIANTS["dev_uids"]), "output")
+        for e in r
+    )
 
 
 def test_tracked_flows_go_through_current_leak_rules() -> None:
     doc = build_ruleset(VARIANTS["all_leaks_dests"])
-    tracked = _rules(doc, "output")[3]
+    (tracked,) = [
+        r
+        for r in _rules(doc, "output")
+        if r[0]["match"]["left"] == {"&": [{"ct": {"key": "mark"}}, POLICY_MARK_MASK]}
+    ]
     assert tracked[0]["match"]["right"] == policy_mark(1)
     assert tracked[-1] == {"jump": {"target": "p1"}}
     policy_rules = _rules(doc, "p1")
