@@ -86,7 +86,7 @@ It is the client-side counterpart of
 | systemd unit | `{"unit": "transmission-daemon.service"}` | The process watcher moves the unit's processes into the policy's cgroup. |
 | user | `{"uid": 1001}`, `{"user": "torrent"}` | nft `meta skuid`. |
 | Flatpak / Snap | `{"flatpak": "org.mozilla.firefox"}` | Its `app-flatpak-…scope` cgroup. |
-| exclusions | `"exclude_apps": [...]` | Same selectors; an excluded app never matches. |
+| exclusions | `"exclude_apps": [...]` | Same selectors; an excluded app never matches. Not enforced yet. |
 
 Sockets that are already open keep their route. New connections follow the
 new policy.
@@ -214,8 +214,7 @@ process ── in cgroup pyvpn.slice/p-<id>, or matched by uid / unit cgroup
 ## Limitations and risks
 
 - **Linux only.** macOS, Windows and a proxy mode are deferred.
-- **cgroup v2 is required.** On cgroup v1 or hybrid systems, only uid-based
-  policies will work.
+- **cgroup v2 is required.** There is no cgroup v1 or hybrid fallback yet.
 - **Moving running processes** between cgroups can conflict with systemd
   scopes. Prefer `pyvpn run` or systemd units.
 - **VPN apps with their own kill switch** can override pyvpn's rules. pyvpn

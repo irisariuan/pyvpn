@@ -89,7 +89,7 @@ netlink; it doesn't poll.
 | `targets` | required | Target names in priority order. The first usable one carries the traffic. |
 | `on_down` | `"default"` | When **every** target is down: `"default"` falls back to the normal route; `"block"` drops the traffic (kill switch). |
 | `apps` | | App selectors (below) or `"group:<name>"`. |
-| `exclude_apps` | `[]` | Selectors for apps that never match this policy. |
+| `exclude_apps` | `[]` | Selectors for apps that should never match this policy. **Not enforced yet**; see [Not supported yet](#not-supported-yet). |
 | `domains` | `[]` | Destination filters (see [below](#destination-filters)). |
 | `leak` | see [DNS and leak protection](#dns-and-leak-protection) | DNS and leak options. |
 
@@ -121,7 +121,7 @@ Reusable lists go in `app_groups` and are referenced as `"group:<name>"`.
 The daemon's process watcher moves matching processes into the policy's cgroup
 (`pyvpn.slice/p-<id>`) as they start, and scans running processes at startup
 and after each reload. `uid`/`user` selectors are matched in nftables
-directly, so nothing is moved (unless the policy also has `exclude_apps`).
+directly, so nothing is moved.
 Connections that are already open keep their old route; new ones follow the
 policy.
 
@@ -322,7 +322,8 @@ The daemon refuses these, or they have no effect yet. Don't rely on them:
 | `drop:` rules and snake's per-device rules | Refused by the daemon; `pyvpn rules check` reports them. |
 | `settings.probe_targets`, `settings.probe_interval` | Accepted, but unused until probes work. |
 | `pyvpn enable` | Missing; see [Turning pyvpn off](#turning-pyvpn-off). |
-| Problem list from `pyvpn test` | It prints only `configuration validation failed`. |
+| `exclude_apps` | Accepted, but the daemon doesn't enforce it: excluded apps are still routed by the policy. |
+| Problem list from `pyvpn test` | For JSON or schema errors it prints only `configuration validation failed`. Destination rule errors are listed per rule, followed by `errors found`. |
 
 ## Troubleshooting
 

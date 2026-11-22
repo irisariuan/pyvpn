@@ -19,7 +19,7 @@ done, continue with the [usage guide](usage.md) to write your first policy.
 | Requirement | Check | Notes |
 |---|---|---|
 | Linux | `uname -s` prints `Linux` | macOS and Windows aren't supported. |
-| cgroup v2 | `stat -fc %T /sys/fs/cgroup` prints `cgroup2fs` | The default on current distributions (Ubuntu 22.04+, Debian 11+, Fedora 31+, Arch). On cgroup v1 or hybrid systems, only `uid`/`user` selectors can work. |
+| cgroup v2 | `stat -fc %T /sys/fs/cgroup` prints `cgroup2fs` | The default on current distributions (Ubuntu 22.04+, Debian 11+, Fedora 31+, Arch). Required: there is no cgroup v1 or hybrid fallback yet. |
 | nftables | `nft --version` | Install the `nftables` package if it's missing. The daemon runs the `nft` command. |
 | Python 3.11+ | `python3 --version` | |
 | root | `sudo -v` | Only the daemon needs root. The CLI, including `pyvpn run`, works as a normal user. |
@@ -87,9 +87,10 @@ EOF
 pyvpn test /etc/pyvpn/config.json
 ```
 
-`pyvpn test` prints `ok`. On a mistake it exits 1 with
-`configuration validation failed`; it doesn't yet list the individual
-problems. The [usage guide](usage.md#writing-a-configuration) explains every
+`pyvpn test` prints `ok`. On a mistake it exits 1. A file that isn't valid
+JSON or breaks the schema prints `configuration validation failed`, without
+the individual problems yet. A bad destination rule prints one line per rule
+(`policy 'x' rule 2: error: …`) and ends with `errors found`. The [usage guide](usage.md#writing-a-configuration) explains every
 field.
 
 ## 4. Run the daemon

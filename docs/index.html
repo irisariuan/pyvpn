@@ -178,7 +178,7 @@ footer { margin-top: 56px; padding-top: 16px; border-top: 1px solid var(--border
 <tr><th scope="row">systemd unit</th><td><code>{"unit": "transmission-daemon.service"}</code></td><td>The process watcher moves the unit's processes into the policy's cgroup.</td></tr>
 <tr><th scope="row">user</th><td><code>{"uid": 1001}</code>, <code>{"user": "torrent"}</code></td><td>nft <code>meta skuid</code>.</td></tr>
 <tr><th scope="row">Flatpak / Snap</th><td><code>{"flatpak": "org.mozilla.firefox"}</code></td><td>Its <code>app-flatpak-…scope</code> cgroup.</td></tr>
-<tr><th scope="row">exclusions</th><td><code>"exclude_apps": [...]</code></td><td>Same selectors; an excluded app never matches.</td></tr>
+<tr><th scope="row">exclusions</th><td><code>"exclude_apps": [...]</code></td><td>Same selectors; an excluded app never matches. Not enforced yet.</td></tr>
 </tbody>
 </table></div>
 <p>Sockets that are already open keep their route. New connections follow the new policy.</p>
@@ -287,7 +287,7 @@ pyvpn desktop --policy NAME                # print or install a menu launcher</c
 <h2 id="limitations-and-risks">Limitations and risks</h2>
 <ul>
   <li><strong>Linux only.</strong> macOS, Windows and a proxy mode are deferred.</li>
-  <li><strong>cgroup v2 is required.</strong> On cgroup v1 or hybrid systems, only uid-based policies will work.</li>
+  <li><strong>cgroup v2 is required.</strong> There is no cgroup v1 or hybrid fallback yet.</li>
   <li><strong>Moving running processes</strong> between cgroups can conflict with systemd scopes. Prefer <code>pyvpn run</code> or systemd units.</li>
   <li><strong>VPN apps with their own kill switch</strong> can override pyvpn's rules. pyvpn drops marked traffic that would leave through the wrong interface, but <code>pyvpn audit</code> doesn't report competing rules yet.</li>
   <li>The daemon needs root; everything else runs as a normal user.</li>
