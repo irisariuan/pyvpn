@@ -31,8 +31,11 @@ route, or blocks (kill switch).
   sock_diag, process-event connector), `dnspython` (DNS message parsing and
   serialization), and `pydantic` v2 (config). The `snakevpn[doh]` extra
   installs `aiohttp` for DNS over HTTPS.
-* Release: on a `v*` tag, GitHub Actions runs the tests, builds sdist and
-  wheel, and publishes with **PyPI Trusted Publishing** (no stored token).
+* Release: on a published `v*` GitHub Release, GitHub Actions runs the
+  tests, builds sdist and wheel, uploads them to TestPyPI, installs that
+  version back from TestPyPI, and only then publishes to PyPI, all with
+  **Trusted Publishing** (no stored token). A manual run of the workflow
+  stops after the TestPyPI check.
 
 ## 2. Platforms: Linux, macOS, Windows
 
