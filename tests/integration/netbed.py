@@ -67,7 +67,7 @@ class Netbed:
     @classmethod
     def build(cls) -> Netbed:
         """Create the namespaces and links; raise ``NetbedError`` on failure."""
-        for tool in ("ip", "ping"):
+        for tool in ("ip", "ping", "nsenter"):
             if shutil.which(tool) is None:
                 raise NetbedError(f"the test bed needs {tool!r} on PATH")
         bed = cls(uuid.uuid4().hex[:8])
@@ -134,9 +134,20 @@ class Netbed:
         timeout: float = 20.0,
         cwd: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        """Run a program, optionally inside ``ns`` via ``ip netns exec``."""
-        command = ["ip", "netns", "exec", ns, *argv] if ns else list(argv)
+        """Run a program, optionally inside ``ns`` with ``nsenter --net``."""
+        command = [*self._enter(ns), *argv] if ns else list(argv)
         return self._call(command, check=check, timeout=timeout, cwd=cwd)
+
+    @staticmethod
+    def _enter(ns: str) -> list[str]:
+        """Enter ``ns`` without ``ip netns exec``'s ``/sys`` remount.
+
+        ``ip netns exec`` unshares the mount namespace and remounts ``/sys``,
+        which drops the cgroup2 mount; commands that place PIDs or load
+        ``socket cgroupv2`` rules would not see ``/sys/fs/cgroup``.
+        ``nsenter --net`` changes only the network namespace.
+        """
+        return ["nsenter", f"--net=/run/netns/{ns}"]
 
     @contextlib.contextmanager
     def services(self, *, dns_port: int = DNS_PORT) -> Iterator[Services]:
@@ -148,10 +159,7 @@ class Netbed:
             with diagnostics.open("w", encoding="utf-8") as output:
                 process = subprocess.Popen(
                     [
-                        "ip",
-                        "netns",
-                        "exec",
-                        self.internet,
+                        *self._enter(self.internet),
                         sys.executable,
                         "-m",
                         "tests.integration.services",
