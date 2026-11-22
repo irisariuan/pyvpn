@@ -26,6 +26,26 @@ def cgroup2_problem(root: Path = CGROUP_ROOT) -> str | None:
     return None
 
 
+def cgroup_write_problem(root: Path = CGROUP_ROOT) -> str | None:
+    """Why a cgroup cannot be created under ``root``, or None when it can.
+
+    The backend creates ``pyvpn.slice`` and a cgroup per policy, so a runner
+    that mounts cgroups v2 read-only fails later with a traceback inside a
+    test; fail here instead.
+    """
+    probe = root / f"pyvpn-preflight-{uuid.uuid4().hex[:8]}"
+    try:
+        probe.mkdir()
+    except OSError as exc:
+        return (
+            f"cannot create a cgroup under {root}: {exc.strerror or exc} "
+            "(the runner must mount /sys/fs/cgroup read-write)"
+        )
+    with contextlib.suppress(OSError):
+        probe.rmdir()
+    return None
+
+
 def missing_tools(tools: tuple[str, ...] = TOOLS) -> list[str]:
     """The tools from ``tools`` that are not on PATH."""
     return [tool for tool in tools if shutil.which(tool) is None]
@@ -63,7 +83,7 @@ def problems() -> list[str]:
     if os.geteuid() != 0:
         found.append("the net bed needs root (run this under sudo)")
     found.extend(f"missing tool {tool!r} on PATH" for tool in missing_tools())
-    for problem in (cgroup2_problem(), netns_problem()):
+    for problem in (cgroup2_problem(), cgroup_write_problem(), netns_problem()):
         if problem is not None:
             found.append(problem)
     return found

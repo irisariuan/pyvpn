@@ -18,6 +18,19 @@ def test_cgroup2_problem_accepts_a_v2_mount(tmp_path: Path) -> None:
     assert preflight.cgroup2_problem(tmp_path) is None
 
 
+def test_cgroup_write_problem_accepts_a_writable_root(tmp_path: Path) -> None:
+    assert preflight.cgroup_write_problem(tmp_path) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cgroup_write_problem_reports_an_unwritable_root(tmp_path: Path) -> None:
+    missing = tmp_path / "not-mounted"
+    problem = preflight.cgroup_write_problem(missing)
+    assert problem is not None
+    assert str(missing) in problem
+    assert "read-write" in problem
+
+
 def test_missing_tools_lists_only_absent_binaries() -> None:
     assert preflight.missing_tools(("pyvpn-definitely-not-a-tool",)) == [
         "pyvpn-definitely-not-a-tool"

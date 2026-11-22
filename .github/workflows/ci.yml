@@ -1,4 +1,7 @@
 # Unit matrix (3.11-3.14) plus the root network-namespace integration job.
+# The integration job remounts cgroups v2 read-write and then lets the
+# preflight fail loudly if that did not work, so a runner that cannot create
+# cgroups stops the job before the tests do.
 name: CI
 
 on:
@@ -37,6 +40,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             iproute2 nftables procps iputils-ping openssl
+      - name: Make the cgroup tree writable
+        run: sudo mount -o remount,rw /sys/fs/cgroup || true
       - name: Preflight
         run: sudo env "PATH=$PATH" "$(command -v python)" -m tests.ci.preflight
       - run: pip install -e '.[dev]'
