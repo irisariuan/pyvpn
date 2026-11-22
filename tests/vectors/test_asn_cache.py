@@ -109,6 +109,11 @@ def test_missing_entry(tmp_path: Path) -> None:
         ({"version": 9, "fetched": FETCHED, "prefixes": ["1.0.0.0/24"]}, "version"),
         ({"version": 1, "prefixes": ["1.0.0.0/24"]}, "not a valid cache file"),
         (["1.0.0.0/24"], "not a valid cache file"),
+        ({"version": 1, "fetched": float("nan"), "prefixes": ["1.0.0.0/24"]}, "not finite"),
+        ({"version": 1, "fetched": float("inf"), "prefixes": ["1.0.0.0/24"]}, "not finite"),
+        ({"version": 1, "fetched": float("-inf"), "prefixes": ["1.0.0.0/24"]}, "not finite"),
+        ({"version": 1, "fetched": "nan", "prefixes": ["1.0.0.0/24"]}, "not a number"),
+        ({"version": 1, "fetched": True, "prefixes": ["1.0.0.0/24"]}, "not a number"),
     ],
 )
 def test_invalid_entries_are_refused(tmp_path: Path, doc: object, reason: str) -> None:

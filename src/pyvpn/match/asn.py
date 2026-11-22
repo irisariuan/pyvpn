@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import stat
 import tempfile
@@ -223,7 +224,13 @@ class AsnCache:
                 raise AsnError(f"unknown cache version {version!r}")
             if "asn" in doc and doc["asn"] != n:
                 raise AsnError(f"holds AS{doc['asn']}, not AS{n}")
-            fetched = float(doc["fetched"])
+            raw = doc["fetched"]
+            # NaN would compare false against every limit and never expire.
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                raise AsnError(f"fetched time {raw!r} is not a number")
+            fetched = float(raw)
+            if not math.isfinite(fetched):
+                raise AsnError(f"fetched time {raw!r} is not finite")
             prefixes = validate_prefixes(doc["prefixes"])
         except AsnError as e:
             raise AsnError(f"{path}: {e}") from None
