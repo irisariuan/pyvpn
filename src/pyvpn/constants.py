@@ -5,6 +5,7 @@ Policy ids are 1-based and follow the order of ``Config.policies``.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Final
 
 MAX_POLICIES: Final = 99
@@ -48,3 +49,22 @@ def dns_stub_port(policy_id: int) -> int:
 
 def policy_cgroup(policy_id: int) -> str:
     return f"{CGROUP_ROOT}/p-{_check(policy_id)}"
+
+
+def excluded_cgroup(policy_ids: Iterable[int], app_policy_id: int | None = None) -> str:
+    """Cgroup for processes the watcher moves to exempt them (PLAN.md §3.3).
+
+    ``policy_ids`` are the destination-only policies whose ``exclude_apps``
+    match the process; one cgroup per distinct set, so each policy can list
+    exactly the cgroups whose processes it excludes. A process that is also
+    an app of policy ``app_policy_id`` stays below that policy's cgroup, so
+    the policy still matches it.
+    """
+    ids = sorted({_check(i) for i in policy_ids})
+    if not ids:
+        raise ValueError("excluded_cgroup needs at least one policy id")
+    if app_policy_id is not None and app_policy_id in ids:
+        raise ValueError(f"policy {app_policy_id} cannot exclude its own app")
+    leaf = "x-" + "-".join(str(i) for i in ids)
+    parent = CGROUP_ROOT if app_policy_id is None else policy_cgroup(app_policy_id)
+    return f"{parent}/{leaf}"

@@ -34,12 +34,29 @@ class AppBinding:
     ``any_process`` is True for a policy with destination rules and no apps,
     which applies to every process (PLAN.md §3.4). An empty binding with
     ``any_process`` False matches nothing.
+
+    ``exclude_cgroup_paths`` and ``exclude_uids`` exempt processes from an
+    ``any_process`` binding: a socket in one of those cgroups (or below it),
+    or owned by one of those uids, is not matched by this policy. They come
+    from the policy's ``exclude_apps`` (PLAN.md §3.3), for example a
+    userspace VPN client whose server address is in the policy's
+    destination set. They are only valid with ``any_process``; for a policy
+    with apps, the app manager applies exclusions by not placing the
+    excluded processes in the policy's cgroup.
     """
 
     policy_id: int
     cgroup_paths: tuple[str, ...] = ()
     uids: tuple[int, ...] = ()
     any_process: bool = False
+    exclude_cgroup_paths: tuple[str, ...] = ()
+    exclude_uids: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (self.exclude_cgroup_paths or self.exclude_uids) and not self.any_process:
+            raise ValueError("exclusions are only valid on an any_process binding")
+        if any(not path.strip("/") for path in self.exclude_cgroup_paths):
+            raise ValueError("exclude_cgroup_paths must not contain an empty path")
 
 
 @dataclass(frozen=True)
