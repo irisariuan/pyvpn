@@ -18,8 +18,9 @@ which picks a tunnel per *device* on a router.
 ## Status
 
 **Alpha (0.0.x): pyvpn does not route traffic yet.** The CLI, configuration
-validation and rule tools work. The routing daemon and the Linux backend
-that installs the nft rules and routes are still being built (see
+validation and rule tools work. The daemon and the Linux backend that
+applies the nft rules and routes are not shipped in 0.0.1: there is no
+daemon entry point and nothing changes routing yet (see
 [PLAN.md §7](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md#7-milestones)
 for milestones). Do not rely on it for privacy yet.
 
@@ -38,13 +39,15 @@ The PyPI package is **`snakevpn`**; the command and the Python import are
 Optional extras:
 
 - `snakevpn[doh]`: DNS over HTTPS upstreams (`dns_protocol: "doh"`).
-- `snakevpn[re2]`: needed for regex rules in destination filters. Without
-  it, regex rules are refused.
+- `snakevpn[re2]`: needed before the daemon will accept regex rules in
+  destination filters; `pyvpn rules check` warns when it is missing. Simple
+  wildcards such as `*.example.com` work without it.
 
 ## Configuration
 
 The config is JSON, read from `/etc/pyvpn/config.json` by default. Set
-`PYVPN_CONFIG` or pass `--config` to use another file. **Targets** are
+`PYVPN_CONFIG` or pass `--config` to a command that accepts it (see
+Commands) to use another file. **Targets** are
 interfaces (exact names or patterns such as `tun*`); **policies** map apps
 to an ordered list of targets:
 
@@ -82,7 +85,7 @@ The full schema is in
 Check a config before using it:
 
 ```bash
-pyvpn test /etc/pyvpn/config.json     # prints "ok" or the validation failure
+pyvpn test /etc/pyvpn/config.json     # prints "ok" or a failure (the list of problems is still missing)
 pyvpn policy --config /etc/pyvpn/config.json
 ```
 
@@ -97,7 +100,7 @@ pyvpn rules check FILE                     # validate a destination rule file
 pyvpn rules test FILE NAME...              # show which rule matches a DNS name
 pyvpn rules import FILE                    # convert a foreign list to snake rules
 pyvpn rules export POLICY [--config FILE]  # print a policy's rules
-pyvpn install [--scope user]               # print the systemd unit (--write to install it)
+pyvpn install [--scope user]               # print the systemd unit for the coming daemon (--write needs root)
 pyvpn desktop --policy NAME                # print a .desktop launcher for a policy
 ```
 
@@ -144,6 +147,9 @@ ruff check . && ruff format --check .
 mypy src
 pytest                         # unit tests: no root, never touch the host network
 ```
+
+Network-namespace integration tests (root) land with the test bed; the unit
+suite above never touches the host network.
 
 Before contributing, read:
 
