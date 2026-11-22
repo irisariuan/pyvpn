@@ -78,6 +78,9 @@ class Daemon:
         # Failures of the target/app watchers: they do not recover, so they
         # stay in ``status`` (an apply succeeding later does not clear them).
         self._watcher_errors: dict[str, str] = {}
+        # Called with each config once it is committed (startup and reload),
+        # e.g. so the composition root can refresh its process watcher.
+        self.on_config: Callable[[Config], None] | None = None
 
     @property
     def config(self) -> Config:
@@ -222,6 +225,11 @@ class Daemon:
             for pid in range(len(config.policies) + 1, len(old.policies) + 1):
                 with contextlib.suppress(Exception):
                     await self._apps.unbind(pid)
+        if self.on_config is not None:
+            try:
+                self.on_config(config)
+            except Exception:
+                log.exception("on_config hook failed")
 
     def _check_supported(self, config: Config) -> None:
         """Refuse configs this daemon cannot enforce, before anything changes.
@@ -231,10 +239,17 @@ class Daemon:
         - hostname rules need a stub to learn addresses, which only runs with
           ``dns_via_target`` (otherwise their traffic is never matched);
         - the target watcher is fixed at startup, so reload cannot change the
-          target definitions.
+          target definitions;
+        - ``isolation: netns`` cannot be enforced yet, and placing such an app
+          in an ordinary cgroup would silently give it weaker protection.
         """
         for policy in config.policies:
             where = f"policy {policy.name!r}"
+            if policy.isolation == "netns":
+                raise ApiError(
+                    "bad_request",
+                    f"{where}: isolation 'netns' is not supported by the daemon yet",
+                )
             if policy.domains and self._matcher_factory is None:
                 raise ApiError("bad_request", f"{where}: destination rules need a rule matcher")
             if policy.leak.dns_via_target and self._dns is None:
@@ -403,25 +418,46 @@ class Daemon:
             if peer.uid != 0 and not peer.same_process_alive():
                 # The caller may have exited while waiting for the lock.
                 raise ApiError("forbidden", "cannot verify that the calling process still exists")
-            r = self.reconciler
-            if not r.enabled:
-                raise ApiError("unavailable", "routing is disabled")
-            if r.applied is None:
-                raise ApiError("unavailable", "routing rules are not installed yet")
             pid = self._resolve_policy(p.policy)
-            installed = next((x for x in r.applied.policies if x.policy_id == pid), None)
-            governed = installed is not None and (
-                installed.apps.any_process or policy_cgroup(pid) in installed.apps.cgroup_paths
-            )
-            if not governed:
-                raise ApiError(
-                    "unavailable", f"policy {pid}'s placement cgroup is not governed by its rules"
-                )
-            if pid not in self._cgroup_policy_names:
-                name = self.config.policies[pid - 1].name
-                self._save_state(enabled=True, slots=self._cgroup_policy_names | {pid: name})
-            await self._apps.place_pid(p.pid, pid)
+            await self._place_locked(p.pid, pid)
         return {"policy_id": pid}
+
+    def report_watcher_error(self, name: str, reason: str) -> None:
+        """Record a failed watcher owned by the composition root; ``status`` shows it."""
+        self._watcher_errors[name] = reason
+
+    async def place_trusted(self, pid: int, policy_id: int) -> None:
+        """Place ``pid`` for an in-process caller (the process watcher).
+
+        Applies the same checks as the ``place_pid`` API, so a process never
+        lands in a policy cgroup whose rules are not installed (fail closed);
+        raises :class:`ApiError` ("unavailable") when placement must wait.
+        """
+        async with self._config_lock:
+            self._resolve_policy(policy_id)
+            await self._place_locked(pid, policy_id)
+
+    async def _place_locked(self, pid: int, policy_id: int) -> None:
+        """Move ``pid`` into ``policy_id``'s cgroup if its rules govern it.
+
+        Caller holds ``_config_lock``."""
+        r = self.reconciler
+        if not r.enabled:
+            raise ApiError("unavailable", "routing is disabled")
+        if r.applied is None:
+            raise ApiError("unavailable", "routing rules are not installed yet")
+        installed = next((x for x in r.applied.policies if x.policy_id == policy_id), None)
+        governed = installed is not None and (
+            installed.apps.any_process or policy_cgroup(policy_id) in installed.apps.cgroup_paths
+        )
+        if not governed:
+            raise ApiError(
+                "unavailable", f"policy {policy_id}'s placement cgroup is not governed by its rules"
+            )
+        if policy_id not in self._cgroup_policy_names:
+            name = self.config.policies[policy_id - 1].name
+            self._save_state(enabled=True, slots=self._cgroup_policy_names | {policy_id: name})
+        await self._apps.place_pid(pid, policy_id)
 
     def _resolve_policy(self, ref: str | int) -> int:
         n = len(self.config.policies)

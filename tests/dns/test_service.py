@@ -576,6 +576,23 @@ def test_target_change_cancels_inflight_query_and_reuses_listener(
     asyncio.run(run())
 
 
+def test_close_waits_until_the_udp_socket_is_released() -> None:
+    """A restart must be able to bind the port again right after ``close``."""
+
+    async def run() -> None:
+        import socket
+
+        loop = asyncio.get_running_loop()
+        stub = _Stub(PolicyDnsService(AsyncMock()), _plan())
+        # A real datagram transport, without binding any network port.
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        await loop.create_datagram_endpoint(lambda: stub, sock=sock)
+        await stub.close()
+        assert sock.fileno() == -1
+
+    asyncio.run(run())
+
+
 def test_tcp_bind_failure_closes_udp_listener(monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> None:
         transport = Mock()

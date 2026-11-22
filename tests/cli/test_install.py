@@ -100,6 +100,12 @@ def test_write_install_file_rejects_symlink(tmp_path: Path) -> None:
     assert other.read_text(encoding="utf-8") == "keep"
 
 
+@pytest.fixture
+def no_daemon_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("pyvpn.cli.shutil.which", lambda name: None)
+
+
+@pytest.mark.usefixtures("no_daemon_on_path")
 def test_install_dry_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["install", "--scope", "system", "--root", str(tmp_path)]) == 0
     output = capsys.readouterr().out
@@ -107,6 +113,7 @@ def test_install_dry_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
     assert not (tmp_path / "etc/systemd/system/pyvpn.service").exists()
 
 
+@pytest.mark.usefixtures("no_daemon_on_path")
 def test_install_write(tmp_path: Path) -> None:
     assert (
         main(
@@ -123,6 +130,17 @@ def test_install_write(tmp_path: Path) -> None:
     )
     path = tmp_path / "etc/systemd/system/pyvpn.service"
     assert "ExecStart=/usr/bin/pyvpn-daemon" in path.read_text(encoding="utf-8")
+
+
+def test_install_defaults_to_the_installed_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    daemon = tmp_path / "venv" / "bin" / "pyvpn-daemon"
+    monkeypatch.setattr(
+        "pyvpn.cli.shutil.which", lambda name: str(daemon) if name == "pyvpn-daemon" else None
+    )
+    assert main(["install", "--root", str(tmp_path)]) == 0
+    assert f"ExecStart={daemon}" in capsys.readouterr().out
 
 
 def test_desktop_json_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
