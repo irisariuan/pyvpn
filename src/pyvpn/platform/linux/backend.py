@@ -54,7 +54,7 @@ from pyvpn.routing.apply import (
     ipv6_available,
 )
 from pyvpn.routing.plan import RoutePlan, build_route_plan
-from pyvpn.state import DestSet, RoutingPlan
+from pyvpn.state import DestSet, PolicyPlan, RoutingPlan
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +63,15 @@ NftTables = Callable[[], Awaitable[set[str]]]
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 _NFT_TIMEOUT = 10.0
 _NFT_EXIT_GRACE = 1.0
+
+
+def _with_set(policy: PolicyPlan, dests: DestSet) -> PolicyPlan:
+    """``policy`` with ``dests`` added to its route or drop set."""
+    if policy.policy_id != dests.policy_id:
+        return policy
+    if dests.drop:
+        return policy if policy.drops is None else replace(policy, drops=policy.drops | dests)
+    return policy if policy.dests is None else replace(policy, dests=policy.dests | dests)
 
 
 class NftError(RuntimeError):
@@ -418,12 +427,7 @@ class LinuxBackend:
                 if self._plan is not None:
                     # Keep them for a backend-initiated re-apply (cgroup change).
                     self._plan = RoutingPlan(
-                        tuple(
-                            replace(p, dests=p.dests | dests)
-                            if p.policy_id == dests.policy_id and p.dests is not None
-                            else p
-                            for p in self._plan.policies
-                        )
+                        tuple(_with_set(p, dests) for p in self._plan.policies)
                     )
 
     async def teardown(self) -> None:

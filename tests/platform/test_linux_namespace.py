@@ -188,6 +188,45 @@ def _send(
     return _run(sys.executable, "-c", _CHILD, cgroup or "", addr, str(port), str(mark), str(uid))
 
 
+_HELD = """
+import os, socket, sys
+cgroup, addr, port = sys.argv[1], sys.argv[2], int(sys.argv[3])
+if cgroup:
+    with open(f"/sys/fs/cgroup/{cgroup}/cgroup.procs", "w") as f:
+        f.write(str(os.getpid()))
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.connect((addr, port))  # one socket, one conntrack entry, for every send
+for _ in sys.stdin:
+    try:
+        s.send(b"pyvpn")
+        print("sent", flush=True)
+    except OSError as e:
+        print("send failed:", e, flush=True)
+"""
+
+
+class _Held:
+    """A process that keeps one UDP flow open and sends on request."""
+
+    def __init__(self, cgroup: str | None, addr: str = REMOTE, port: int = PORT) -> None:
+        self.proc = subprocess.Popen(
+            [sys.executable, "-c", _HELD, cgroup or "", addr, str(port)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+
+    def send(self) -> str:
+        assert self.proc.stdin is not None and self.proc.stdout is not None
+        self.proc.stdin.write("\n")
+        self.proc.stdin.flush()
+        return self.proc.stdout.readline().strip()
+
+    def close(self) -> None:
+        self.proc.kill()
+        self.proc.wait()
+
+
 _DNS_CLIENT = """
 import os, sys
 import dns.message, dns.query
@@ -396,6 +435,43 @@ async def _worker(cgroup: str) -> None:
     await backend.apply(RoutingPlan((veth,)))
     assert _send(cgroup, REMOTE, 7777).strip() == "reply"
     _run("sysctl", "-q", "net.ipv4.conf.all.rp_filter=0")
+
+    # Drop precedence for tracked flows: policy 1 (the cgroup) has drop
+    # rules but routes nothing yet; policy 2 (every process) routes REMOTE.
+    # Once policy 1 learns to drop REMOTE, its app's flow that policy 2
+    # marked earlier is cut too, while other processes keep policy 2's route.
+    dropper = replace(active, dests=DestSet(1), drops=DestSet(1, drop=True), dns_stub_port=None)
+    everyone = PolicyPlan(
+        policy_id=2,
+        mark=policy_mark(2),
+        table=policy_table(2),
+        rule_pref=policy_rule_pref(2),
+        route="dev",
+        interface="d0",
+        gateway=None,
+        apps=AppBinding(2, any_process=True),
+        dests=DestSet(2, frozenset({IPv4Network(f"{REMOTE}/32")})),
+        leak=LeakSettings(),
+        dns_stub_port=None,
+    )
+    await backend.apply(RoutingPlan((dropper, everyone)))
+    in_policy, outside = _Held(cgroup), _Held(None)
+    try:
+        before = _counters()
+        assert in_policy.send() == "sent" and outside.send() == "sent"
+        assert _delta(before) == {"target_data": 2}, _delta(before)
+        await backend.add_to_set(DestSet(1, frozenset({IPv4Network(f"{REMOTE}/32")}), drop=True))
+        before = _counters()
+        in_policy.send()
+        in_policy.send()  # the first reject may surface as this send's error
+        assert outside.send() == "sent"
+        assert _delta(before) == {"target_data": 1}, _delta(before)
+        before = _counters()
+        _send(cgroup)  # a new flow from policy 1's app
+        assert _delta(before) == {}, _delta(before)
+    finally:
+        in_policy.close()
+        outside.close()
 
     # teardown -> nothing pyvpn owns is left.
     await backend.teardown()

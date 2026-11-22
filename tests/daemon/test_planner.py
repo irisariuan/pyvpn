@@ -105,3 +105,15 @@ def test_gateway_from_status_then_config(config: Config) -> None:
 
 def test_plan_is_deterministic(config: Config) -> None:
     assert plan_of(config, JP, NL) == plan_of(config, JP, NL)
+
+
+def test_drop_set_only_for_policies_with_drop_rules(config: Config) -> None:
+    office = config.policies[2].model_copy(
+        update={"domains": ("corp.example", "  DROP:ads.example")}
+    )
+    cfg = config.model_copy(update={"policies": (*config.policies[:2], office)})
+    plan = plan_of(cfg)
+    assert [p.drops for p in plan.policies] == [None, None, DestSet(3, drop=True)]
+    d = DestSet(3, frozenset({IPv4Network("192.0.2.0/24")}), drop=True)
+    assert build_plan(cfg, {}, {}, {}, {3: d}).policies[2].drops == d
+    assert plan_of(config).policies[2].drops is None

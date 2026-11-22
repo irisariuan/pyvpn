@@ -1,0 +1,39 @@
+{
+  "nftables": [
+    {
+      "add": {
+        "element": {
+          "elem": [
+            {
+              "prefix": {
+                "addr": "192.0.2.0",
+                "len": 24
+              }
+            },
+            "198.18.0.9"
+          ],
+          "family": "inet",
+          "name": "p2_drop_v4",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "element": {
+          "elem": [
+            {
+              "prefix": {
+                "addr": "2001:db8:dead::",
+                "len": 48
+              }
+            }
+          ],
+          "family": "inet",
+          "name": "p2_drop_v6",
+          "table": "pyvpn"
+        }
+      }
+    }
+  ]
+}

@@ -69,7 +69,7 @@ def check_config(config: Config, asn_prefixes: AsnResolver | None = None) -> Com
                 f"the daemon refuses to activate it: {u}"
             )
         where = f"policy {p.name!r}"
-        for a in pr.asns:
+        for a in pr.all_asns():
             found = (
                 [f"{where}: asn:{a} needs the ASN cache"]
                 if asn_prefixes is None
@@ -131,7 +131,7 @@ def explain_config(config: Config, names: Sequence[str]) -> CommandResult:
     if d.action == "route":
         lines.append(f"{chain}: policy {d.policy!r} ({describe(d.result)})")
     elif d.action == "drop":
-        lines.append(f"{chain}: claimed by policy {d.policy!r} ({describe(d.result)})")
+        lines.append(f"{chain}: blocked by policy {d.policy!r} ({describe(d.result)})")
     else:
         lines.append(f"{chain}: no policy (default route)")
     return CommandResult(0 if d.action == "route" else 1, "\n".join(lines) + "\n")
