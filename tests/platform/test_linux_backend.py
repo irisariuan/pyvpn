@@ -12,7 +12,14 @@ import pytest
 
 from pyvpn.apps.cgroups import CgroupError, CgroupManager
 from pyvpn.config.models import LeakSettings
-from pyvpn.constants import NFT_TABLE, policy_cgroup, policy_mark, policy_rule_pref, policy_table
+from pyvpn.constants import (
+    NFT_TABLE,
+    excluded_cgroup,
+    policy_cgroup,
+    policy_mark,
+    policy_rule_pref,
+    policy_table,
+)
 from pyvpn.netfilter.ruleset import ROUTE_GUARD_TABLE
 from pyvpn.platform.base import Backend, Capabilities
 from pyvpn.platform.linux import backend as linux_backend
@@ -517,6 +524,50 @@ def test_placement_refuses_cgroup_replaced_after_rules_commit(cgroups: Path) -> 
         with pytest.raises(CgroupError, match=r"routing rules .* are stale"):
             await backend.place_policy_pid(groups, 123, 1, replace_cgroup)
         assert (groups.path_for(1) / "cgroup.procs").read_text() == ""
+        await backend.teardown()
+
+    asyncio.run(scenario())
+
+
+def _dest_only(pid: int, *excluded: str) -> PolicyPlan:
+    apps = AppBinding(pid, any_process=True, exclude_cgroup_paths=excluded)
+    return policy(pid, apps=apps, dests=DestSet(pid))
+
+
+def test_missing_exclusion_cgroup_rejects_the_plan(cgroups: Path) -> None:
+    backend, nft, _, log = make(cgroups)
+    plan = RoutingPlan((_dest_only(2, excluded_cgroup([2])),))
+    with pytest.raises(ValueError, match=r"x-2"):
+        asyncio.run(backend.apply(plan))
+    assert log == [] and nft.scripts == []
+
+
+def test_listed_and_idle_exclusion_cgroups_are_known(cgroups: Path) -> None:
+    listed, idle = excluded_cgroup([2]), excluded_cgroup([1, 2])
+    for path in (listed, idle, "pyvpn.slice/not-an-exclusion"):
+        (cgroups / path).mkdir()
+    backend, nft, _, _ = make(cgroups)
+    asyncio.run(backend.apply(RoutingPlan((policy(1), _dest_only(2, listed)))))
+    script = nft.scripts[-1]
+    for path in (listed, idle):
+        assert f'socket cgroupv2 level 2 "{path}" return' in script
+    assert "not-an-exclusion" not in script
+
+
+def test_idle_exclusion_cgroup_appearing_or_leaving_is_reapplied(cgroups: Path) -> None:
+    backend, nft, _, _ = make(cgroups)
+    idle = cgroups / excluded_cgroup([2])
+
+    async def scenario() -> None:
+        await backend.apply(RoutingPlan((policy(1),)))
+        assert not await backend.recheck_cgroups()
+        idle.mkdir()  # app manager withholds it while revalidating members
+        assert await backend.recheck_cgroups()
+        assert excluded_cgroup([2]) in nft.scripts[-1]
+        assert not await backend.recheck_cgroups()
+        idle.rmdir()
+        assert await backend.recheck_cgroups()
+        assert excluded_cgroup([2]) not in nft.scripts[-1]
         await backend.teardown()
 
     asyncio.run(scenario())

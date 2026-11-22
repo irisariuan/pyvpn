@@ -20,6 +20,7 @@ from pyvpn.constants import (
     FWMARK_MASK,
     MAX_POLICIES,
     dns_stub_port,
+    excluded_cgroup,
     policy_cgroup,
     policy_mark,
     policy_rule_pref,
@@ -307,3 +308,35 @@ def test_rejects_inconsistent_plans() -> None:
         build_ruleset(RoutingPlan((replace(policy(), mark=1),)))
     with pytest.raises(ValueError, match="duplicate policy 1"):
         build_ruleset(RoutingPlan((policy(), policy())))
+
+
+def _dest_only(pid: int, *excluded: str) -> PolicyPlan:
+    apps = AppBinding(pid, any_process=True, exclude_cgroup_paths=excluded)
+    return policy(pid, apps=apps, dests=dests(pid))
+
+
+def test_exclusion_cgroups_are_known_to_the_stale_cgroup_check() -> None:
+    top, nested = excluded_cgroup([2]), excluded_cgroup([2], app_policy_id=1)
+    plan = RoutingPlan((policy(1), _dest_only(2, top, nested, "system.slice/openvpn.service")))
+    allowed = [r[0]["match"]["right"] for r in _rules(build_ruleset(plan), "check_cgroup")[:-1]]
+    # Top-level x-<hex> is its own child; nested x-<hex> passes through p-1;
+    # cgroups outside the slice never reach the check.
+    assert allowed == ["pyvpn.slice/p-1", top]
+
+
+def test_nested_exclusion_under_an_unknown_policy_cgroup_stays_rejected() -> None:
+    nested = excluded_cgroup([2], app_policy_id=3)
+    plan = RoutingPlan((policy(1), _dest_only(2, nested)))
+    allowed = [r[0]["match"]["right"] for r in _rules(build_ruleset(plan), "check_cgroup")[:-1]]
+    assert allowed == ["pyvpn.slice/p-1"]
+
+
+def test_idle_exclusion_cgroups_are_governed_not_rejected() -> None:
+    idle = excluded_cgroup([1, 2])
+    doc = build_ruleset(
+        RoutingPlan((policy(1),)),
+        idle_exclusions=[idle, "pyvpn.slice/p-7", excluded_cgroup([2], app_policy_id=1)],
+    )
+    allowed = [r[0]["match"]["right"] for r in _rules(doc, "check_cgroup")[:-1]]
+    assert allowed == ["pyvpn.slice/p-1", idle]
+    assert idle not in render(build_ruleset(RoutingPlan((policy(1),))))

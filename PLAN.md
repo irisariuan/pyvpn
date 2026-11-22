@@ -359,7 +359,12 @@ Two rules keep exclusions fail-closed:
   those members are governed by the policy like any other process.
   Exclusion cgroups (top-level `pyvpn.slice/x-*` and nested
   `pyvpn.slice/p-Q/x-*`) are known paths for the backend's stale-cgroup
-  check and cgroup-id reapplication, not stale policy cgroups.
+  check and cgroup-id reapplication, not stale policy cgroups. Listed
+  exclusion cgroups must exist when a plan is applied. The backend also
+  knows existing top-level `x-*` cgroups that no binding lists yet
+  (withheld during revalidation), so their members are governed instead of
+  rejected, and re-applies when one appears or disappears. A nested
+  `p-Q/x-*` passes the check only while `p-Q` is known.
 
 Policy names are unique. Reload, and a daemon restart, keep each policy
 that has used an app cgroup at the same position in the config (the

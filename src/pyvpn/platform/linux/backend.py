@@ -34,7 +34,8 @@ from dataclasses import replace
 from pathlib import Path
 
 from pyvpn.apps.cgroups import CgroupError, CgroupManager
-from pyvpn.constants import NFT_TABLE, policy_cgroup
+from pyvpn.constants import CGROUP_ROOT as CGROUP_SLICE
+from pyvpn.constants import NFT_TABLE, parse_excluded_cgroup, policy_cgroup
 from pyvpn.netfilter.render import render
 from pyvpn.netfilter.ruleset import (
     FAMILY,
@@ -190,7 +191,7 @@ class LinuxBackend:
 
     def _require_cgroups(self, plan: RoutingPlan) -> None:
         for policy in plan.policies:
-            for path in policy.apps.cgroup_paths:
+            for path in (*policy.apps.cgroup_paths, *policy.apps.exclude_cgroup_paths):
                 if not (self._cgroup_root / path.strip("/")).is_dir():
                     raise ValueError(f"policy {policy.policy_id}: cgroup {path!r} does not exist")
 
@@ -202,7 +203,32 @@ class LinuxBackend:
             return None
 
     def _plan_cgroups(self, plan: RoutingPlan) -> dict[str, int | None]:
-        return {c: self._cgroup_id(c) for p in plan.policies for c in p.apps.cgroup_paths}
+        paths = [
+            c for p in plan.policies for c in (*p.apps.cgroup_paths, *p.apps.exclude_cgroup_paths)
+        ]
+        return {c: self._cgroup_id(c) for c in [*paths, *self._idle_exclusions(paths)]}
+
+    def _idle_exclusions(self, listed: list[str]) -> list[str]:
+        """Existing top-level ``x-<hex>`` cgroups that no binding lists.
+
+        The app manager withholds them while it revalidates their members
+        (PLAN.md §3.3). They must be known to the stale-cgroup check, or
+        their members would be rejected instead of governed normally.
+        """
+        try:
+            names = sorted(
+                e.name for e in os.scandir(self._cgroup_root / CGROUP_SLICE) if e.is_dir()
+            )
+        except OSError:
+            return []
+        found = (f"{CGROUP_SLICE}/{name}" for name in names)
+        return [
+            path
+            for path in found
+            if path not in listed
+            and (decoded := parse_excluded_cgroup(path)) is not None
+            and decoded.app_policy_id is None
+        ]
 
     def _enable_src_valid_mark(self) -> None:
         knob = self._proc_sys / "net/ipv4/conf/all/src_valid_mark"
@@ -223,13 +249,15 @@ class LinuxBackend:
         # between then shows up as changed and is re-applied.
         ids = self._plan_cgroups(plan)
         self._require_cgroups(plan)
+        listed = {c for p in plan.policies for c in p.apps.exclude_cgroup_paths}
+        idle = [c for c in ids if c not in listed and parse_excluded_cgroup(c) is not None]
         routes = build_route_plan(plan)
         if not ipv6_available(self._proc_sys):
             routes = RoutePlan(
                 tuple(r for r in routes.rules if r.version == 4),
                 tuple(r for r in routes.routes if r.version == 4),
             )
-        script = render(build_ruleset(plan))
+        script = render(build_ruleset(plan, idle_exclusions=idle))
         self._enable_src_valid_mark()
         await _finish_transaction(self._replace(routes, script))
         self._plan, self._cgroup_ids = plan, ids

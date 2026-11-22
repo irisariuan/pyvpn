@@ -47,7 +47,13 @@ from collections.abc import Iterable, Sequence
 from ipaddress import IPv4Network, IPv6Network
 from typing import Any
 
-from pyvpn.constants import CGROUP_ROOT, FWMARK_BASE, FWMARK_MASK, NFT_TABLE
+from pyvpn.constants import (
+    CGROUP_ROOT,
+    FWMARK_BASE,
+    FWMARK_MASK,
+    NFT_TABLE,
+    parse_excluded_cgroup,
+)
 from pyvpn.netfilter.doh import DOH_V4, DOH_V6
 from pyvpn.routing.plan import POLICY_MARK_MASK, validate_policy
 from pyvpn.state import DestSet, PolicyPlan, RoutingPlan
@@ -91,8 +97,14 @@ def set_name(policy_id: int, version: int) -> str:
     return f"p{policy_id}_v{version}"
 
 
-def build_ruleset(plan: RoutingPlan) -> Json:
+def build_ruleset(plan: RoutingPlan, *, idle_exclusions: Iterable[str] = ()) -> Json:
     """Replace ``table inet pyvpn`` with the state described by ``plan``.
+
+    ``idle_exclusions`` are existing top-level exclusion cgroups
+    (``pyvpn.slice/x-<hex>``) that no binding lists yet, for example while
+    the app manager revalidates them after a reload. They are known to the
+    stale-cgroup check, so their members are governed like any other
+    process instead of rejected; they are not exempt from any policy.
 
     The ``add`` / ``delete`` / ``add`` prologue makes one nft transaction
     that works whether or not the table exists, and either installs the
@@ -107,7 +119,7 @@ def build_ruleset(plan: RoutingPlan) -> Json:
 
     cmds: list[Json] = [*_table_reset(), {"add": {"table": _table()}}]
     cmds += _sets(plan)
-    stale_checks = _stale_cgroup_rules(plan)
+    stale_checks = _stale_cgroup_rules(plan, idle_exclusions)
     cmds += _chains()
     if stale_checks:
         cmds.append({"add": {"chain": {**_ref(), "name": "check_cgroup"}}})
@@ -323,7 +335,9 @@ def _dns_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:
     return rules
 
 
-def _stale_cgroup_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:
+def _stale_cgroup_rules(
+    plan: RoutingPlan, idle_exclusions: Iterable[str] = ()
+) -> list[tuple[str, Expr]]:
     """Reject sockets in a ``pyvpn.slice`` child the ruleset does not know.
 
     ``socket cgroupv2`` compares cgroup ids resolved when the ruleset was
@@ -332,16 +346,25 @@ def _stale_cgroup_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:
     unknown children of the installed slice before the loopback exemption,
     so they cannot reach a local DNS forwarder either. Keep each comparison
     in its own rule so all policy slots fit within nft's per-rule limit.
+
+    Exclusion cgroups (PLAN.md §3.3) are known too. A top-level
+    ``pyvpn.slice/x-<hex>`` is its own level-2 child. A nested
+    ``pyvpn.slice/p-Q/x-<hex>`` sits below policy Q's cgroup, so it passes
+    only while ``pyvpn.slice/p-Q`` is known; otherwise it stays rejected.
     """
     prefix = CGROUP_ROOT + "/"
-    known = sorted(
-        {
-            c.strip("/")
-            for p in plan.policies
-            for c in p.apps.cgroup_paths
-            if c.strip("/").startswith(prefix) and c.strip("/").count("/") == 1
-        }
-    )
+    children = {
+        c.strip("/")
+        for p in plan.policies
+        for c in p.apps.cgroup_paths
+        if c.strip("/").startswith(prefix) and c.strip("/").count("/") == 1
+    }
+    exclusions = [c for p in plan.policies for c in p.apps.exclude_cgroup_paths]
+    for path in [*exclusions, *idle_exclusions]:
+        decoded = parse_excluded_cgroup(path)
+        if decoded is not None and decoded.app_policy_id is None:
+            children.add(path)
+    known = sorted(children)
     if not known:
         return []
     slice_match = _match({"socket": {"key": "cgroupv2", "level": 1}}, CGROUP_ROOT)
