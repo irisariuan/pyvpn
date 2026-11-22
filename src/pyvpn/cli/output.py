@@ -72,7 +72,7 @@ def format_apps(value: Any) -> str:
 
 
 def format_mutation(value: Any, action: str) -> str:
-    """format a reload or disable daemon result."""
+    """format a reload, disable or enable daemon result."""
     if isinstance(value, dict):
         message = value.get("message")
         if isinstance(message, str) and message:

@@ -43,6 +43,15 @@ The configuration is one JSON file: `/etc/pyvpn/config.json` by default, or
 pyvpn test /etc/pyvpn/config.json
 ```
 
+It prints `ok`, or one line per problem followed by `errors found` (exit
+status 1):
+
+```text
+/etc/pyvpn/config.json: error: targets.0.interface: Field required
+/etc/pyvpn/config.json: error: policies.0.on_down: Input should be 'default' or 'block'
+errors found
+```
+
 A complete example:
 
 ```json
@@ -300,15 +309,14 @@ This removes every pyvpn rule and route. Apps go back to the normal route
 immediately, and kill switches stop blocking. The daemon remembers it's
 disabled, even across restarts.
 
-There's no `pyvpn enable` command yet. To turn routing back on, call the
-daemon's `enable` method directly:
+To turn routing back on:
 
 ```bash
-sudo python3 -c '
-import json, socket
-s = socket.socket(socket.AF_UNIX); s.connect("/run/pyvpn/pyvpn.sock")
-s.sendall(b"{\"id\": 1, \"method\": \"enable\", \"params\": {}}\n"); print(s.recv(4096).decode())'
+sudo pyvpn enable
 ```
+
+The daemon reinstalls the current configuration's rules. If that fails,
+`pyvpn status` shows `last error:` and the daemon keeps retrying.
 
 ## Not supported yet
 
@@ -321,9 +329,7 @@ The daemon refuses these, or they have no effect yet. Don't rely on them:
 | `asn:` rules in `domains` | Refused: nothing fetches the ASN prefix cache yet. Use `cidr:` rules instead. |
 | `drop:` rules and snake's per-device rules | Refused by the daemon; `pyvpn rules check` reports them. |
 | `settings.probe_targets`, `settings.probe_interval` | Accepted, but unused until probes work. |
-| `pyvpn enable` | Missing; see [Turning pyvpn off](#turning-pyvpn-off). |
 | `exclude_apps` | Accepted, but the daemon doesn't enforce it: excluded apps are still routed by the policy. |
-| Problem list from `pyvpn test` | For JSON or schema errors it prints only `configuration validation failed`. Destination rule errors are listed per rule, followed by `errors found`. |
 
 ## Troubleshooting
 
