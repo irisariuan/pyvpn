@@ -594,12 +594,29 @@ policy as `not_installed`.
 * **Unit (no root):** nft ruleset generation (golden JSON), route/rule plans,
   target selection with fake netlink events, selector matching against fake
   `/proc` trees, rule engine (snake's vectors), config migrations.
-* **Integration (root, GitHub ubuntu-24.04 runners with sudo):** a pytest
-  fixture builds namespaces: "host" with a veth "WAN" to an "internet" ns,
-  and a second veth or WireGuard link that stands in for a VPN interface
-  (the fixture creates it, pyvpn does not). Tests launch processes through
-  `pyvpn run`, delete and re-create interfaces, and assert by capture which
-  interface the traffic and DNS left through.
+* **Network test bed (root on Linux):** `tests/conftest.py` provides the
+  `netbed` fixture (stream I): a "host" namespace with a veth WAN to an
+  "internet" namespace, a second veth standing in for a VPN interface, and
+  one service address reachable over either link, so a source address
+  identifies the egress interface. The fixture creates every part of it and
+  removes both namespaces on teardown; nothing outside them is touched.
+  Tests launch processes inside "host" with `netbed.run`, which enters with
+  `nsenter --net` so `/sys/fs/cgroup` stays visible (`ip netns exec` remounts
+  `/sys`). They take links down and up with `netbed.down("vpn")` /
+  `netbed.up("vpn")` (an admin-down drops the device's routes; `up` restores
+  the ones the bed saw), and read the egress interface from the source
+  address the internet-side services recorded:
+  `netbed.tcp_echo()` and `netbed.udp_echo()` return it directly, and
+  `netbed.dns_query()` returns the A record, so DNS egress comes from
+  `services.peers("dns")`.
+  Run the root suite with `sudo .venv/bin/python -m pytest -m integration`;
+  CI runs the same suite on every pull request in the `integration` job
+  (ubuntu-24.04, Python 3.12), which remounts cgroups v2 read-write and runs
+  `tests.ci.preflight` first: one clear message instead of test errors when
+  the runner has no cgroup v2, no writable cgroup tree, no root or is missing
+  one of the test-bed tools (`ip`, `nft`, `nsenter`, `ping`, `openssl`,
+  `unshare`). The unit suite stays root-free because the marker is deselected
+  by default.
 * **Linux backend integration (root on Linux):**
   `sudo .venv/bin/python -m pytest -m integration tests/platform/test_linux_namespace.py`
   applies real plans in a disposable namespace with dummy interfaces and

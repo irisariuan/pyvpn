@@ -1,5 +1,13 @@
-# Phase 0 CI skeleton. Stream I adds the root netns job and the release workflow.
+# Unit matrix (3.11-3.14) plus the root network-namespace integration job.
+# The integration job runs pull-request code as uid 0 on an ephemeral
+# github-hosted VM: keep it on `pull_request` (never pull_request_target),
+# on a hosted runner, and free of secrets and env. It remounts cgroups v2
+# read-write and lets the preflight fail loudly if that did not work, so a
+# runner that cannot create cgroups stops the job before the tests do.
 name: CI
+
+permissions:
+  contents: read
 
 on:
   push:
@@ -15,6 +23,8 @@ jobs:
         python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
@@ -23,3 +33,28 @@ jobs:
       - run: ruff format --check .
       - run: mypy src
       - run: pytest
+
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install test-bed tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            iproute2 nftables iputils-ping openssl
+      - name: Make the cgroup tree writable
+        run: sudo mount -o remount,rw /sys/fs/cgroup || echo "::warning::could not remount /sys/fs/cgroup read-write"
+      - name: Preflight
+        run: sudo env "PATH=$(dirname "$(command -v python)"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" "$(command -v python)" -m tests.ci.preflight
+      - run: pip install -e '.[dev]'
+      - name: Check the root interpreter
+        run: sudo env "PATH=$(dirname "$(command -v python)"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" "$(command -v python)" -c "import pyvpn, pytest"
+      - name: Run the network-namespace suite
+        run: sudo env "PATH=$(dirname "$(command -v python)"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" "$(command -v python)" -m pytest -m integration -o addopts="" -q -rs

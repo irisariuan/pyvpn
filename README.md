@@ -185,8 +185,14 @@ mypy src
 pytest                         # unit tests: no root, never touch the host network
 ```
 
-Network-namespace integration tests (root) land with the test bed; the unit
-suite above never touches the host network.
+Network-namespace integration tests run as root on Linux:
+
+```bash
+sudo .venv/bin/python -m pytest -m integration
+```
+
+CI runs the same command on every pull request; the unit suite above never
+touches the host network.
 
 Before contributing, read:
 
