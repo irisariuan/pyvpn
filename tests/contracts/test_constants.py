@@ -51,8 +51,19 @@ def test_excluded_cgroup_rejects_bad_ids(ids: list[int], app: int | None) -> Non
 @pytest.mark.parametrize(
     ("ids", "app"), [({1}, None), ({1, 4, 99}, None), ({5}, 2), (set(range(1, 100)), None)]
 )
-def test_excluded_policy_ids_round_trip(ids: set[int], app: int | None) -> None:
-    assert c.excluded_policy_ids(c.excluded_cgroup(ids, app_policy_id=app)) == ids
+def test_parse_excluded_cgroup_round_trip(ids: set[int], app: int | None) -> None:
+    parsed = c.parse_excluded_cgroup(c.excluded_cgroup(ids, app_policy_id=app))
+    assert parsed == c.ExcludedCgroup(
+        policy_ids=frozenset(ids), app_policy_id=app, level=2 if app is None else 3
+    )
+
+
+def test_parse_excluded_cgroup_levels() -> None:
+    top = c.parse_excluded_cgroup("pyvpn.slice/x-9")
+    nested = c.parse_excluded_cgroup("pyvpn.slice/p-2/x-9")
+    assert top is not None and (top.level, top.app_policy_id) == (2, None)
+    assert nested is not None and (nested.level, nested.app_policy_id) == (3, 2)
+    assert top.policy_ids == nested.policy_ids == {1, 4}
 
 
 @pytest.mark.parametrize(
@@ -73,5 +84,5 @@ def test_excluded_policy_ids_round_trip(ids: set[int], app: int | None) -> None:
         "pyvpn.slice/p-2/x-1/child",
     ],
 )
-def test_excluded_policy_ids_rejects_other_paths(path: str) -> None:
-    assert c.excluded_policy_ids(path) is None
+def test_parse_excluded_cgroup_rejects_other_paths(path: str) -> None:
+    assert c.parse_excluded_cgroup(path) is None

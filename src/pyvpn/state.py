@@ -58,8 +58,9 @@ class AppBinding:
 
     Exclusion paths are canonical cgroup paths relative to the cgroup2 root:
     no leading or trailing ``/``, no empty, ``.`` or ``..`` components, no
-    whitespace, no duplicates. ``exclude_uids`` are distinct uids in
-    ``0..4294967294``.
+    whitespace, no ``"``, ``\\`` or ``;``, no non-printable characters (the
+    nft renderer refuses them), no duplicates. ``exclude_uids`` are distinct
+    uids in ``0..4294967294``.
     """
 
     policy_id: int
@@ -89,6 +90,7 @@ class AppBinding:
 
 
 _UID_MAX = 4294967294  # (uid_t)-1 is reserved
+_NFT_UNSAFE = frozenset('"\\;')
 
 
 def _check_cgroup_path(path: str) -> None:
@@ -96,6 +98,12 @@ def _check_cgroup_path(path: str) -> None:
         raise ValueError("exclude_cgroup_paths must not contain an empty path")
     if any(ch.isspace() for ch in path):
         raise ValueError(f"exclude_cgroup_paths entry {path!r} contains whitespace")
+    # Paths are rendered into ``socket cgroupv2 level N "<path>"``; reject what
+    # the nft renderer refuses, so a bad binding fails where it is created.
+    if any(ch in _NFT_UNSAFE or not ch.isprintable() for ch in path):
+        raise ValueError(
+            f"exclude_cgroup_paths entry {path!r} contains a character nft cannot quote"
+        )
     if path.startswith("/") or path.endswith("/"):
         raise ValueError(f"exclude_cgroup_paths entry {path!r} must not start or end with '/'")
     if any(part in ("", ".", "..") for part in path.split("/")):

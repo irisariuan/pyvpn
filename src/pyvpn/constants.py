@@ -6,6 +6,7 @@ Policy ids are 1-based and follow the order of ``Config.policies``.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Final
 
 MAX_POLICIES: Final = 99
@@ -79,13 +80,24 @@ def excluded_cgroup(policy_ids: Iterable[int], app_policy_id: int | None = None)
     return f"{parent}/{leaf}"
 
 
-def excluded_policy_ids(path: str) -> frozenset[int] | None:
-    """Policy ids encoded in an exclusion cgroup path, or None if it is not one.
+@dataclass(frozen=True)
+class ExcludedCgroup:
+    """A decoded exclusion cgroup path (see ``excluded_cgroup``)."""
+
+    policy_ids: frozenset[int]  # destination-only policies that exclude its members
+    app_policy_id: int | None  # set for ``pyvpn.slice/p-<id>/x-<hex>``
+    level: int  # path depth for ``socket cgroupv2 level <level>``: 2, or 3 when nested
+
+
+def parse_excluded_cgroup(path: str) -> ExcludedCgroup | None:
+    """Decode an exclusion cgroup path, or None if it is not one.
 
     Accepts exactly what ``excluded_cgroup`` produces, so backends and the app
-    manager can recognize exclusion cgroups as known (not stale) paths.
+    manager can recognize exclusion cgroups as known (not stale) paths and
+    render their positive match without splitting the path again.
     """
     parts = path.split("/")
+    app_policy_id: int | None
     if len(parts) == 2 and parts[0] == CGROUP_ROOT:
         app_policy_id = None
     elif (
@@ -109,4 +121,4 @@ def excluded_policy_ids(path: str) -> frozenset[int] | None:
             return None
     except ValueError:
         return None
-    return ids
+    return ExcludedCgroup(policy_ids=ids, app_policy_id=app_policy_id, level=len(parts))

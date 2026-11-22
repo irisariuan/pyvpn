@@ -269,12 +269,14 @@ below it) or owned by one of those uids:
   each of those policies lists it. `<hex>` is the policy-id bitmask (bit
   `id - 1`) in lowercase hex, so names are collision-free and at most
   `EXCLUDED_NAME_MAX` (27) bytes: `x-9` for policies 1 and 4.
-  `constants.excluded_policy_ids` decodes a path back to its policy ids. A
+  `constants.parse_excluded_cgroup` decodes a path back to its policy ids,
+  the app policy it is nested under, and its `socket cgroupv2` level. A
   process that is also an app of policy Q goes to `pyvpn.slice/p-Q/x-<hex>`
-  instead, so policy Q still matches it. The backend loads the cgroup
-  before the process is moved; until then the process is not exempt, which
-  can loop its traffic but never sends a policy's traffic out the default
-  route.
+  instead, so policy Q still matches it. The backend only matches paths:
+  the app manager creates the cgroup, and moves a process into it only
+  after a binding that lists the path has been applied. Until then the
+  process is not exempt, which can loop its traffic but never sends a
+  policy's traffic out the default route.
 
 An `any_process` binding may also list the policy's own cgroup
 (`pyvpn.slice/p-<id>`) in `cgroup_paths`, so `pyvpn run` works for

@@ -79,6 +79,22 @@ def test_malformed_exclusion_path_rejected(path: str) -> None:
         AppBinding(1, any_process=True, exclude_cgroup_paths=(path,))
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        'system.slice/a"b.service',  # double quote
+        "system.slice/a\\b.service",  # backslash
+        "system.slice/a;b.service",  # semicolon
+        "system.slice/a\x00b.service",  # non-printable (control)
+        "system.slice/a\u200bb.service",  # non-printable (zero-width space)
+    ],
+    ids=["quote", "backslash", "semicolon", "control", "format"],
+)
+def test_exclusion_path_rejects_what_nft_cannot_quote(path: str) -> None:
+    with pytest.raises(ValueError, match="nft cannot quote"):
+        AppBinding(1, any_process=True, exclude_cgroup_paths=(path,))
+
+
 def test_duplicate_exclusion_path_rejected() -> None:
     with pytest.raises(ValueError, match="duplicates"):
         AppBinding(1, any_process=True, exclude_cgroup_paths=("pyvpn.slice/x-1",) * 2)
