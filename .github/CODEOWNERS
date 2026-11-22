@@ -7,9 +7,9 @@
 /src/pyvpn/daemon/client.py @cpu-catten
 
 # Stream C - Linux routing & netfilter
-/src/pyvpn/netfilter/ @Daydreaming-Mr
-/src/pyvpn/routing/ @Daydreaming-Mr
-/src/pyvpn/platform/linux/backend.py @Daydreaming-Mr
+/src/pyvpn/netfilter/ @MrDaydreaming
+/src/pyvpn/routing/ @MrDaydreaming
+/src/pyvpn/platform/linux/backend.py @MrDaydreaming
 
 # Stream D - Targets
 /src/pyvpn/targets/ @JackyCheng0006
@@ -19,9 +19,9 @@
 /src/pyvpn/apps/ @JovoJ-c
 
 # Stream F - DNS & leak protection
-/src/pyvpn/dns/ @Daydreaming-Mr
-/src/pyvpn/audit/ @Daydreaming-Mr
-/src/pyvpn/platform/linux/dns.py @Daydreaming-Mr
+/src/pyvpn/dns/ @MrDaydreaming
+/src/pyvpn/audit/ @MrDaydreaming
+/src/pyvpn/platform/linux/dns.py @MrDaydreaming
 
 # Stream G - Rule engine
 /src/pyvpn/match/ @irisariuan
@@ -36,10 +36,10 @@
 /.github/ @cpu-catten
 
 # Shared Phase 0 contracts
-/src/pyvpn/constants.py @cpu-catten @irisariuan @Daydreaming-Mr @JackyCheng0006 @JovoJ-c
-/src/pyvpn/config/models.py @cpu-catten @irisariuan @Daydreaming-Mr @JackyCheng0006 @JovoJ-c
-/src/pyvpn/state.py @cpu-catten @irisariuan @Daydreaming-Mr @JackyCheng0006 @JovoJ-c
-/src/pyvpn/platform/base.py @cpu-catten @irisariuan @Daydreaming-Mr @JackyCheng0006 @JovoJ-c
-/src/pyvpn/daemon/api.py @cpu-catten @irisariuan @Daydreaming-Mr @JackyCheng0006 @JovoJ-c
-/src/pyvpn/services.py @cpu-catten @irisariuan @Daydreaming-Mr @JackyCheng0006 @JovoJ-c
-/tests/fakes/ @cpu-catten @irisariuan @Daydreaming-Mr @JackyCheng0006 @JovoJ-c
+/src/pyvpn/constants.py @cpu-catten @irisariuan @MrDaydreaming @JackyCheng0006 @JovoJ-c
+/src/pyvpn/config/models.py @cpu-catten @irisariuan @MrDaydreaming @JackyCheng0006 @JovoJ-c
+/src/pyvpn/state.py @cpu-catten @irisariuan @MrDaydreaming @JackyCheng0006 @JovoJ-c
+/src/pyvpn/platform/base.py @cpu-catten @irisariuan @MrDaydreaming @JackyCheng0006 @JovoJ-c
+/src/pyvpn/daemon/api.py @cpu-catten @irisariuan @MrDaydreaming @JackyCheng0006 @JovoJ-c
+/src/pyvpn/services.py @cpu-catten @irisariuan @MrDaydreaming @JackyCheng0006 @JovoJ-c
+/tests/fakes/ @cpu-catten @irisariuan @MrDaydreaming @JackyCheng0006 @JovoJ-c
