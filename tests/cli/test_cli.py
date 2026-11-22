@@ -7,6 +7,7 @@ import pytest
 
 from pyvpn.cli import main
 from pyvpn.cli.output import format_audit, format_status, print_json
+from pyvpn.constants import SOCKET_PATH
 
 VALID_CONFIG = """
 {
@@ -221,6 +222,61 @@ def test_run_wires_stream_e_launcher(monkeypatch: pytest.MonkeyPatch) -> None:
         == 0
     )
     assert calls == [("Japan", ["firefox", "--private"], "/tmp/test.sock", "none")]
+
+
+def test_run_uses_the_top_level_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[object] = []
+
+    def fake_run(
+        policy: str | int, command: list[str], *, socket_path: object, isolation: str
+    ) -> None:
+        seen.append(socket_path)
+
+    monkeypatch.setattr("pyvpn.cli.run_app", fake_run)
+
+    assert main(["--socket", "/tmp/top.sock", "run", "-p", "Japan", "--", "true"]) == 0
+    assert seen == ["/tmp/top.sock"]
+
+
+def test_run_subcommand_socket_overrides_the_top_level_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+
+    def fake_run(
+        policy: str | int, command: list[str], *, socket_path: object, isolation: str
+    ) -> None:
+        seen.append(socket_path)
+
+    monkeypatch.setattr("pyvpn.cli.run_app", fake_run)
+
+    argv = [
+        "--socket",
+        "/tmp/top.sock",
+        "run",
+        "-p",
+        "Japan",
+        "--socket",
+        "/tmp/run.sock",
+        "--",
+        "true",
+    ]
+    assert main(argv) == 0
+    assert seen == ["/tmp/run.sock"]
+
+
+def test_run_without_socket_uses_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[object] = []
+
+    def fake_run(
+        policy: str | int, command: list[str], *, socket_path: object, isolation: str
+    ) -> None:
+        seen.append(socket_path)
+
+    monkeypatch.setattr("pyvpn.cli.run_app", fake_run)
+
+    assert main(["run", "-p", "Japan", "--", "true"]) == 0
+    assert seen == [SOCKET_PATH]
 
 
 def test_run_numeric_policy(monkeypatch: pytest.MonkeyPatch) -> None:
