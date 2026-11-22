@@ -200,8 +200,9 @@ Linux backend details (stream C, `netfilter/`, `routing/`,
   set later never hides an app's query; only packets whose *socket* already
   carries a pyvpn mark (the stubs' upstream sockets, `SO_MARK`) skip it.
   `output` (route, prio -90) exempts LAN/loopback/multicast, leaves
-  socket-marked packets alone, restores the conntrack mark (or rejects, for
-  a kill-switch policy), then jumps to the first matching policy's chain.
+  socket-marked packets alone, enforces the current leak and routing rules
+  of the policy recorded in conntrack, then classifies unmarked connections
+  by their app and destination.
   `masq` (postrouting) masquerades mark P out of P's interface; `restore`
   (prerouting) copies the conntrack mark back onto replies.
 * Marks are written as `mark & ~POLICY_MARK_MASK | P`, so bits other
@@ -213,10 +214,13 @@ Linux backend details (stream C, `netfilter/`, `routing/`,
 * The ruleset is built as nft JSON (golden-tested) and loaded as rendered
   nft script text in one `nft -f -` transaction (`add`/`delete`/`add table`):
   nft 1.0.9 (Ubuntu 24.04) cannot parse `socket cgroupv2` in JSON.
-* `apply` order: guard routes, device routes and new `ip rule`s first, then
-  the nft transaction, then removal of stale routes and rules. A failed nft
-  load restores the previously applied routes. Cgroup paths that do not
-  exist are left out of the ruleset (nft refuses to load them).
+* Apply and teardown temporarily reject marked output in a separate nft
+  table, update the policy routes and rules, then replace the classifier and
+  remove the guard in one nft transaction. A failed update restores the
+  previous routes and rules before lifting the guard, provided this daemon
+  previously installed a plan successfully. If recovery fails or startup
+  cannot install its first plan, the guard remains until a successful apply.
+  A plan referring to a missing cgroup is rejected before changing rules.
 
 ### 3.1 Interfaces (targets)
 

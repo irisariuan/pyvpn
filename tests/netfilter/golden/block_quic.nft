@@ -14,7 +14,7 @@ add rule inet pyvpn dns socket cgroupv2 level 2 "pyvpn.slice/p-1" meta l4proto {
 add rule inet pyvpn output ip daddr @lan_v4 accept
 add rule inet pyvpn output ip6 daddr @lan_v6 accept
 add rule inet pyvpn output meta mark & 0xffff0000 0x50590000 accept
-add rule inet pyvpn output ct mark & 0xffff007f 0x50590001 meta mark set meta mark & 0xff80 | 0x50590001 accept
+add rule inet pyvpn output ct mark & 0xffff007f 0x50590001 jump p1
 add rule inet pyvpn output socket cgroupv2 level 2 "pyvpn.slice/p-1" jump p1
 add rule inet pyvpn p1 goto p1_route
 add rule inet pyvpn p1_route meta l4proto udp th dport 443 reject with icmpx type admin-prohibited

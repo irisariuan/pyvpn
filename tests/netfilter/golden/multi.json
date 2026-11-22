@@ -577,31 +577,9 @@
               }
             },
             {
-              "mangle": {
-                "key": {
-                  "meta": {
-                    "key": "mark"
-                  }
-                },
-                "value": {
-                  "|": [
-                    {
-                      "&": [
-                        {
-                          "meta": {
-                            "key": "mark"
-                          }
-                        },
-                        65408
-                      ]
-                    },
-                    1348009985
-                  ]
-                }
+              "jump": {
+                "target": "p1"
               }
-            },
-            {
-              "accept": null
             }
           ],
           "family": "inet",
@@ -664,31 +642,9 @@
               }
             },
             {
-              "mangle": {
-                "key": {
-                  "meta": {
-                    "key": "mark"
-                  }
-                },
-                "value": {
-                  "|": [
-                    {
-                      "&": [
-                        {
-                          "meta": {
-                            "key": "mark"
-                          }
-                        },
-                        65408
-                      ]
-                    },
-                    1348009987
-                  ]
-                }
+              "jump": {
+                "target": "p3"
               }
-            },
-            {
-              "accept": null
             }
           ],
           "family": "inet",
@@ -718,31 +674,9 @@
               }
             },
             {
-              "mangle": {
-                "key": {
-                  "meta": {
-                    "key": "mark"
-                  }
-                },
-                "value": {
-                  "|": [
-                    {
-                      "&": [
-                        {
-                          "meta": {
-                            "key": "mark"
-                          }
-                        },
-                        65408
-                      ]
-                    },
-                    1348009988
-                  ]
-                }
+              "jump": {
+                "target": "p4"
               }
-            },
-            {
-              "accept": null
             }
           ],
           "family": "inet",
@@ -1031,6 +965,38 @@
             },
             {
               "accept": null
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "p4",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "&": [
+                    {
+                      "ct": {
+                        "key": "mark"
+                      }
+                    },
+                    4294901887
+                  ]
+                },
+                "op": "==",
+                "right": 1348009988
+              }
+            },
+            {
+              "goto": {
+                "target": "p4_route"
+              }
             }
           ],
           "family": "inet",

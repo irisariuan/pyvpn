@@ -149,12 +149,26 @@ def _pyvpn_state() -> tuple[str, str, str]:
 async def _worker(cgroup: str) -> None:
     from pyvpn.config.models import LeakSettings
     from pyvpn.constants import dns_stub_port, policy_mark, policy_rule_pref, policy_table
-    from pyvpn.platform.linux.backend import LinuxBackend
+    from pyvpn.platform.linux.backend import LinuxBackend, NftError, run_nft
     from pyvpn.state import AppBinding, PolicyPlan, RoutingPlan
     from tests.netfilter.test_ruleset import VARIANTS
 
     _install_counters()
-    backend = LinuxBackend()
+    fail_commit = False
+
+    async def commit_with_probe(script: str) -> None:
+        if fail_commit and script.startswith("add table inet pyvpn\n"):
+            # The new plan removed all routes, but the previous classifier is
+            # still installed. Only the unmarked process may reach wan0.
+            before = _counters()
+            _send(cgroup)
+            _send(None)
+            delta = _delta(before)
+            assert delta == {"wan_data": 1}, delta
+            raise NftError("simulated commit failure")
+        await run_nft(script)
+
+    backend = LinuxBackend(nft=commit_with_probe)
     active = PolicyPlan(
         policy_id=1,
         mark=policy_mark(1),
@@ -174,6 +188,7 @@ async def _worker(cgroup: str) -> None:
     await backend.apply(RoutingPlan((active,)))
     tables, rules, routes = _pyvpn_state()
     assert "table inet pyvpn" in tables, tables
+    assert "pyvpn_guard" not in tables, tables
     assert rules.count("5201:\tfrom all fwmark 0x50590001/0xffff007f lookup 1001") == 2, rules
     assert "default dev d0 table 1001 proto static metric 100" in routes, routes
     assert "unreachable default table 1001 proto static metric 32760" in routes, routes
@@ -185,6 +200,14 @@ async def _worker(cgroup: str) -> None:
     _send(cgroup)
     _send(None)
     assert _delta(before) == {"target_data": 1, "wan_data": 1}, _delta(before)
+
+    fail_commit = True
+    with pytest.raises(NftError, match="simulated commit failure"):
+        await backend.apply(RoutingPlan())
+    fail_commit = False
+    before = _counters()
+    _send(cgroup)
+    assert _delta(before) == {"target_data": 1}, _delta(before)
 
     # Port 53 from the policy's process goes to the stub on 127.0.0.1:5301...
     stub = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -219,6 +242,7 @@ async def _worker(cgroup: str) -> None:
     await backend.teardown()
     tables, rules, routes = _pyvpn_state()
     assert "pyvpn " not in tables.replace("pyvpntest", ""), tables
+    assert "pyvpn_guard" not in tables, tables
     assert "5201" not in rules, rules
     assert "table 1001" not in routes, routes
     before = _counters()

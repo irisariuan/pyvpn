@@ -106,11 +106,12 @@ def test_foreign_rules_and_routes_survive() -> None:
     nl = FakeNetlink()
     foreign_pref = Rule(4, 5201, 0x1, 0xFF, 200)  # our priority, someone else's table
     foreign_table = Rule(4, 100, 0xCA6C, 0xFFFFFFFF, 1001)  # our table, other priority
-    nl._rules += [foreign_pref, foreign_table]
+    foreign_mark = Rule(4, 5201, 0xCA6C, 0xFFFFFFFF, 1001)  # our table and priority, other mark
+    nl._rules += [foreign_pref, foreign_table, foreign_mark]
     mgr = RouteManager(nl)
     mgr.sync(plan(policy()))
     mgr.teardown()
-    assert nl.rules() == [foreign_pref, foreign_table]
+    assert nl.rules() == [foreign_pref, foreign_table, foreign_mark]
     assert nl.routes() == []
 
 

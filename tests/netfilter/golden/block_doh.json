@@ -450,31 +450,9 @@
               }
             },
             {
-              "mangle": {
-                "key": {
-                  "meta": {
-                    "key": "mark"
-                  }
-                },
-                "value": {
-                  "|": [
-                    {
-                      "&": [
-                        {
-                          "meta": {
-                            "key": "mark"
-                          }
-                        },
-                        65408
-                      ]
-                    },
-                    1348009985
-                  ]
-                }
+              "jump": {
+                "target": "p1"
               }
-            },
-            {
-              "accept": null
             }
           ],
           "family": "inet",

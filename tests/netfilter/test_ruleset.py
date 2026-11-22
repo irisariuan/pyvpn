@@ -26,6 +26,7 @@ from pyvpn.constants import (
 )
 from pyvpn.netfilter import build_ruleset, build_set_update, build_teardown
 from pyvpn.netfilter.render import render
+from pyvpn.netfilter.ruleset import build_route_guard
 from pyvpn.routing.plan import POLICY_MARK_MASK
 from pyvpn.state import AppBinding, DestSet, PolicyPlan, RoutingPlan
 
@@ -225,6 +226,32 @@ def test_lan_exemption_comes_before_any_mark() -> None:
     out = _rules(build_ruleset(VARIANTS["multi"]), "output")
     assert [r[-1] for r in out[:2]] == [{"accept": None}, {"accept": None}]
     assert [r[0]["match"]["right"] for r in out[:2]] == ["@lan_v4", "@lan_v6"]
+
+
+def test_tracked_flows_go_through_current_leak_rules() -> None:
+    doc = build_ruleset(VARIANTS["all_leaks_dests"])
+    tracked = _rules(doc, "output")[3]
+    assert tracked[0]["match"]["right"] == policy_mark(1)
+    assert tracked[-1] == {"jump": {"target": "p1"}}
+    policy_rules = _rules(doc, "p1")
+    to_route = {"goto": {"target": "p1_route"}}
+    assert all("reject" in rule[-1] for rule in policy_rules[:3])
+    assert policy_rules[3] == [tracked[0], to_route]
+    route_rules = _rules(doc, "p1_route")
+    assert all("reject" in rule[-1] for rule in route_rules[:2])
+    assert all("mangle" in expr for expr in route_rules[-1][:-1])
+
+
+def test_temporary_route_guard_only_rejects_pyvpn_marks_after_classification() -> None:
+    script = render(build_route_guard(enabled=True))
+    assert "type filter hook output priority -80; policy accept;" in script
+    assert (
+        "add rule inet pyvpn_guard output meta mark & 0xffff0000 0x50590000 "
+        "reject with icmpx type admin-prohibited\n"
+    ) in script
+    assert render(build_route_guard(enabled=False)) == (
+        "add table inet pyvpn_guard\ndelete table inet pyvpn_guard\n"
+    )
 
 
 def test_masquerade_only_for_device_routes() -> None:

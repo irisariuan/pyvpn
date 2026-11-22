@@ -13,8 +13,8 @@ Packet path (PLAN.md §3)::
     hook output, prio -90 (route)   chain output
         LAN / loopback / multicast destination -> accept unchanged
         socket already carries a pyvpn mark -> accept unchanged
-        conntrack mark of policy P -> restore mark P, accept
-            (reject instead while P is a kill switch)
+        conntrack mark of policy P -> enforce P's current leak rules and route
+            (reject while P is a kill switch)
         <policy P apps> -> jump p<P>
 
     chain p<P>        DoT / DoH rejects (anything that bypasses the stub)
@@ -56,6 +56,7 @@ Expr = list[Json]
 FAMILY = "inet"
 DNS_PRIORITY = -100  # NF_IP_PRI_NAT_DST
 ROUTE_PRIORITY = -90  # after dns, so app marks never exempt a query
+GUARD_PRIORITY = -80  # after the route chain has classified outgoing packets
 MASQ_PRIORITY = 100  # NF_IP_PRI_NAT_SRC
 RESTORE_PRIORITY = -150  # NF_IP_PRI_MANGLE
 
@@ -134,19 +135,53 @@ def build_teardown() -> Json:
     return {"nftables": _table_reset()}
 
 
+def build_route_guard(*, enabled: bool) -> Json:
+    """Keep marked packets from egress while kernel routes are being replaced."""
+    name = f"{NFT_TABLE}_guard"
+    cmds = _table_reset(name)
+    if enabled:
+        chain = {**_ref(name), "name": "output"}
+        cmds.extend(
+            (
+                {"add": {"table": _table(name)}},
+                {
+                    "add": {
+                        "chain": {
+                            **chain,
+                            "type": "filter",
+                            "hook": "output",
+                            "prio": GUARD_PRIORITY,
+                            "policy": "accept",
+                        }
+                    }
+                },
+                {
+                    "add": {
+                        "rule": {
+                            **_ref(name),
+                            "chain": "output",
+                            "expr": [_any_pyvpn_mark(), _REJECT],
+                        }
+                    }
+                },
+            )
+        )
+    return {"nftables": cmds}
+
+
 # --- table, sets, chains -------------------------------------------------------
 
 
-def _table() -> Json:
-    return {"family": FAMILY, "name": NFT_TABLE}
+def _table(name: str = NFT_TABLE) -> Json:
+    return {"family": FAMILY, "name": name}
 
 
-def _ref() -> Json:
-    return {"family": FAMILY, "table": NFT_TABLE}
+def _ref(name: str = NFT_TABLE) -> Json:
+    return {"family": FAMILY, "table": name}
 
 
-def _table_reset() -> list[Json]:
-    return [{"add": {"table": _table()}}, {"delete": {"table": _table()}}]
+def _table_reset(name: str = NFT_TABLE) -> list[Json]:
+    return [{"add": {"table": _table(name)}}, {"delete": {"table": _table(name)}}]
 
 
 def _set(name: str, version: int, nets: Iterable[IPv4Network | IPv6Network]) -> Json:
@@ -287,9 +322,7 @@ def _output_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:
         if p.route == "unreachable":
             rules.append(("output", [_ct_mark_is(p.mark), _REJECT]))
         else:
-            rules.append(
-                ("output", [_ct_mark_is(p.mark), _set_mark(_meta("mark"), p.mark), _ACCEPT])
-            )
+            rules.append(("output", [_ct_mark_is(p.mark), {"jump": {"target": f"p{p.policy_id}"}}]))
     for p in plan.policies:
         for sel in _selectors(p):
             rules.append(("output", [*sel, {"jump": {"target": f"p{p.policy_id}"}}]))
@@ -313,6 +346,9 @@ def _policy_rules(policy: PolicyPlan) -> list[tuple[str, Expr]]:
     if policy.dests is None:
         rules.append((head, [goto]))
     else:
+        # Keep the policy selected when the connection was first marked,
+        # while applying the current leak rules before restoring that mark.
+        rules.append((head, [_ct_mark_is(policy.mark), goto]))
         for version in (4, 6):
             rules.append((head, [_daddr_in(version, set_name(pid, version)), goto]))
 

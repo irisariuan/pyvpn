@@ -24,10 +24,10 @@ add rule inet pyvpn dns meta l4proto { tcp, udp } th dport 53 redirect to :5304
 add rule inet pyvpn output ip daddr @lan_v4 accept
 add rule inet pyvpn output ip6 daddr @lan_v6 accept
 add rule inet pyvpn output meta mark & 0xffff0000 0x50590000 accept
-add rule inet pyvpn output ct mark & 0xffff007f 0x50590001 meta mark set meta mark & 0xff80 | 0x50590001 accept
+add rule inet pyvpn output ct mark & 0xffff007f 0x50590001 jump p1
 add rule inet pyvpn output ct mark & 0xffff007f 0x50590002 reject with icmpx type admin-prohibited
-add rule inet pyvpn output ct mark & 0xffff007f 0x50590003 meta mark set meta mark & 0xff80 | 0x50590003 accept
-add rule inet pyvpn output ct mark & 0xffff007f 0x50590004 meta mark set meta mark & 0xff80 | 0x50590004 accept
+add rule inet pyvpn output ct mark & 0xffff007f 0x50590003 jump p3
+add rule inet pyvpn output ct mark & 0xffff007f 0x50590004 jump p4
 add rule inet pyvpn output socket cgroupv2 level 2 "pyvpn.slice/p-1" jump p1
 add rule inet pyvpn output socket cgroupv2 level 2 "pyvpn.slice/p-2" jump p2
 add rule inet pyvpn output meta skuid 1003 jump p3
@@ -38,6 +38,7 @@ add rule inet pyvpn p2 goto p2_route
 add rule inet pyvpn p2_route reject with icmpx type admin-prohibited
 add rule inet pyvpn p3 goto p3_route
 add rule inet pyvpn p3_route meta mark set meta mark & 0xff80 | 0x50590003 ct mark set ct mark & 0xff80 | 0x50590003 accept
+add rule inet pyvpn p4 ct mark & 0xffff007f 0x50590004 goto p4_route
 add rule inet pyvpn p4 ip daddr @p4_v4 goto p4_route
 add rule inet pyvpn p4 ip6 daddr @p4_v6 goto p4_route
 add rule inet pyvpn p4_route meta mark set meta mark & 0xff80 | 0x50590004 ct mark set ct mark & 0xff80 | 0x50590004 accept

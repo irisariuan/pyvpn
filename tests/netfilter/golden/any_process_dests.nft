@@ -16,8 +16,9 @@ add rule inet pyvpn dns meta l4proto { tcp, udp } th dport 53 redirect to :5301
 add rule inet pyvpn output ip daddr @lan_v4 accept
 add rule inet pyvpn output ip6 daddr @lan_v6 accept
 add rule inet pyvpn output meta mark & 0xffff0000 0x50590000 accept
-add rule inet pyvpn output ct mark & 0xffff007f 0x50590001 meta mark set meta mark & 0xff80 | 0x50590001 accept
+add rule inet pyvpn output ct mark & 0xffff007f 0x50590001 jump p1
 add rule inet pyvpn output jump p1
+add rule inet pyvpn p1 ct mark & 0xffff007f 0x50590001 goto p1_route
 add rule inet pyvpn p1 ip daddr @p1_v4 goto p1_route
 add rule inet pyvpn p1 ip6 daddr @p1_v6 goto p1_route
 add rule inet pyvpn p1_route meta mark set meta mark & 0xff80 | 0x50590001 ct mark set ct mark & 0xff80 | 0x50590001 accept

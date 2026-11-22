@@ -1,19 +1,10 @@
 """Linux ``Backend``: nftables (``table inet pyvpn``) + policy routing tables.
 
-``apply`` order, chosen so marked traffic never falls through to the host's
-default route (fail closed):
-
-1. Build everything (pure). An invalid plan raises before anything changes.
-2. ``RouteManager.install``: every desired table gets its unreachable guard,
-   then its device route, then the ``ip rule`` pointing at it. Nothing is
-   removed yet, so the old nft table still works against these tables.
-3. One ``nft -f -`` transaction deletes and re-creates ``table inet pyvpn``.
-   nft either installs all of it or none of it. If it fails, the routes are
-   put back to the previously applied plan and the error is raised.
-4. ``RouteManager.prune`` removes routes and rules the plan no longer wants.
-   Kill-switch policies are already rejected by the new nft rules at this
-   point, so the order of removals cannot leak. If this step fails the
-   error is raised; the daemon retries and every step is idempotent.
+Route and nft changes are separate kernel transactions. Keep the old nft
+classifier and reject marked output while preparing routes. The final nft
+transaction replaces the classifier and removes the guard together. If route
+preparation or the final nft transaction fails, restore the prior routes while
+marked output is still guarded.
 
 The ruleset is loaded as nft script text rendered from the JSON builder:
 nft 1.0.9 cannot parse ``socket cgroupv2`` in JSON (see ``netfilter.render``).
@@ -24,11 +15,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
 from pathlib import Path
 
 from pyvpn.netfilter.render import render
-from pyvpn.netfilter.ruleset import Json, build_ruleset, build_set_update, build_teardown
+from pyvpn.netfilter.ruleset import (
+    build_route_guard,
+    build_ruleset,
+    build_set_update,
+    build_teardown,
+)
 from pyvpn.platform.base import Capabilities
 from pyvpn.routing.apply import Pyroute2Netlink, RouteManager, RouteNetlink
 from pyvpn.routing.plan import RoutePlan, build_route_plan
@@ -59,6 +54,25 @@ async def run_nft(script: str) -> None:
         raise NftError(f"nft failed ({proc.returncode}): {err.decode(errors='replace').strip()}")
 
 
+async def _finish_transaction(operation: Awaitable[None]) -> None:
+    """Wait for a transaction to settle before delivering caller cancellation."""
+    transaction = asyncio.ensure_future(operation)
+    cancelled = False
+    try:
+        while not transaction.done():
+            try:
+                await asyncio.shield(transaction)
+            except asyncio.CancelledError:
+                cancelled = True
+        transaction.result()
+    finally:
+        if cancelled and not transaction.cancelled():
+            caller = asyncio.current_task()
+            assert caller is not None
+            # Let the caller record a successful commit before its next await.
+            asyncio.get_running_loop().call_soon(caller.cancel)
+
+
 class LinuxBackend:
     def __init__(
         self,
@@ -70,65 +84,55 @@ class LinuxBackend:
         self._nft = nft or run_nft
         self._routes = RouteManager(netlink or Pyroute2Netlink())
         self._cgroup_root = cgroup_root
-        self._installed: RoutePlan | None = None
+        self._known_state = False
         self._lock = asyncio.Lock()
 
     @property
     def capabilities(self) -> Capabilities:
         return Capabilities(transparent=True, per_app_dns=True)
 
-    def _existing_cgroups(self, plan: RoutingPlan) -> RoutingPlan:
-        """Drop cgroup paths that do not exist: nft refuses to load a rule
-        naming one, and an absent cgroup holds no process to match."""
-        policies = []
-        for p in plan.policies:
-            paths = tuple(
-                c for c in p.apps.cgroup_paths if (self._cgroup_root / c.strip("/")).is_dir()
-            )
-            if paths != p.apps.cgroup_paths:
-                missing = sorted(set(p.apps.cgroup_paths) - set(paths))
-                log.warning("policy %d: skipping missing cgroups %s", p.policy_id, missing)
-                p = replace(p, apps=replace(p.apps, cgroup_paths=paths))
-            policies.append(p)
-        return RoutingPlan(tuple(policies))
+    def _require_cgroups(self, plan: RoutingPlan) -> None:
+        for policy in plan.policies:
+            for path in policy.apps.cgroup_paths:
+                if not (self._cgroup_root / path.strip("/")).is_dir():
+                    raise ValueError(f"policy {policy.policy_id}: cgroup {path!r} does not exist")
 
     async def apply(self, plan: RoutingPlan) -> None:
         async with self._lock:
-            plan = self._existing_cgroups(plan)
+            self._require_cgroups(plan)
             routes = build_route_plan(plan)
             script = render(build_ruleset(plan))
+            await _finish_transaction(self._replace(routes, script))
 
-            await asyncio.to_thread(self._routes.install, routes)
-            try:
-                await self._nft(script)
-            except BaseException:
-                await self._rollback()
-                raise
-            await asyncio.to_thread(self._routes.prune, routes)
-            self._installed = routes
-
-    async def _rollback(self) -> None:
-        """Put routes back to the last applied plan after a failed nft load.
-
-        With no plan applied by this process, the rules ``install`` added are
-        left in place: removing rules a previous daemon installed would let
-        its still-loaded nft marks fall through to the default route.
-        """
-        if self._installed is None:
-            return
+    async def _replace(self, routes: RoutePlan, script: str) -> None:
+        previous = await asyncio.to_thread(self._routes.snapshot)
+        guard = render(build_route_guard(enabled=True))
+        release = render(build_route_guard(enabled=False))
+        await self._nft(guard)
         try:
-            await asyncio.to_thread(self._routes.sync, self._installed)
-        except Exception:
-            log.exception("could not restore the previous routes")
+            await asyncio.to_thread(self._routes.sync, routes)
+            await self._nft(script + release)
+        except (Exception, asyncio.CancelledError):
+            try:
+                await asyncio.to_thread(self._routes.sync, previous)
+                # On restart we may have inherited a guard from a failed apply.
+                # Only a successful commit can establish that it is safe to lift.
+                if self._known_state:
+                    await self._nft(release)
+                else:
+                    log.warning("leaving the routing guard active until a plan is installed")
+            except Exception:
+                self._known_state = False
+                log.exception("routing rollback failed; leaving the routing guard active")
+            raise
+        self._known_state = True
 
     async def add_to_set(self, dests: DestSet) -> None:
-        doc: Json = build_set_update(dests)
-        if doc["nftables"]:
-            await self._nft(render(doc))
+        script = render(build_set_update(dests))
+        if script:
+            async with self._lock:
+                await _finish_transaction(self._nft(script))
 
     async def teardown(self) -> None:
         async with self._lock:
-            # Stop marking first, then drop the rules and tables.
-            await self._nft(render(build_teardown()))
-            await asyncio.to_thread(self._routes.teardown)
-            self._installed = None
+            await _finish_transaction(self._replace(RoutePlan((), ()), render(build_teardown())))

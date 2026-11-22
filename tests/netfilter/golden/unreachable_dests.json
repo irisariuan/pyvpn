@@ -447,6 +447,38 @@
             {
               "match": {
                 "left": {
+                  "&": [
+                    {
+                      "ct": {
+                        "key": "mark"
+                      }
+                    },
+                    4294901887
+                  ]
+                },
+                "op": "==",
+                "right": 1348009985
+              }
+            },
+            {
+              "goto": {
+                "target": "p1_route"
+              }
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "p1",
+          "expr": [
+            {
+              "match": {
+                "left": {
                   "payload": {
                     "field": "daddr",
                     "protocol": "ip"

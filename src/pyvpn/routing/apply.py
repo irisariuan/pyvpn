@@ -1,9 +1,8 @@
 """Install ``build_route_plan`` output with netlink, idempotently.
 
-pyvpn owns ``ip rule``s whose priority is in ``RULE_PREF_BASE + 1..MAX_POLICIES``
-*and* whose table is in ``TABLE_BASE + 1..MAX_POLICIES``, and the default
-routes in those tables. Nothing else is read for removal, so rules and routes
-other software put in the same ranges survive.
+pyvpn owns rules that match a reserved policy slot's priority, mark, mask and
+table, and the default routes in its reserved tables. Other rules and more
+specific routes are left alone.
 
 Applying is split so the backend can order it around the nft transaction:
 
@@ -25,17 +24,20 @@ import socket
 from ipaddress import ip_address
 from typing import Any, Protocol
 
-from pyvpn.constants import MAX_POLICIES, RULE_PREF_BASE, TABLE_BASE
-from pyvpn.routing.plan import DefaultRoute, IPVersion, RoutePlan, Rule
+from pyvpn.constants import MAX_POLICIES, TABLE_BASE, policy_mark, policy_rule_pref
+from pyvpn.routing.plan import POLICY_MARK_MASK, DefaultRoute, IPVersion, RoutePlan, Rule
 
 _RTN_UNICAST = 1
 _RTN_UNREACHABLE = 7
 
 
 def owns_rule(rule: Rule) -> bool:
+    policy_id = rule.table - TABLE_BASE
     return (
-        RULE_PREF_BASE < rule.priority <= RULE_PREF_BASE + MAX_POLICIES
-        and TABLE_BASE < rule.table <= TABLE_BASE + MAX_POLICIES
+        1 <= policy_id <= MAX_POLICIES
+        and rule.priority == policy_rule_pref(policy_id)
+        and rule.mark == policy_mark(policy_id)
+        and rule.mask == POLICY_MARK_MASK
     )
 
 
@@ -47,7 +49,7 @@ class RouteNetlink(Protocol):
     """The few netlink operations route apply needs."""
 
     def rules(self) -> list[Rule]:
-        """fwmark rules (both families) with a mark and mask set."""
+        """Fwmark rules for both address families."""
 
     def routes(self) -> list[DefaultRoute]:
         """Default routes (both families) in tables pyvpn owns."""
@@ -71,6 +73,13 @@ def _route_key(route: DefaultRoute) -> tuple[int, int, int]:
 class RouteManager:
     def __init__(self, netlink: RouteNetlink) -> None:
         self.netlink = netlink
+
+    def snapshot(self) -> RoutePlan:
+        """Read the currently installed managed entries, including after a restart."""
+        return RoutePlan(
+            tuple(rule for rule in self.netlink.rules() if owns_rule(rule)),
+            tuple(self.netlink.routes()),
+        )
 
     def install(self, plan: RoutePlan) -> None:
         nl = self.netlink
