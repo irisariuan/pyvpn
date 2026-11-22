@@ -18,6 +18,10 @@ _CN_VAL_PROC = 1
 _PROC_CN_MCAST_LISTEN = 1
 _PROC_EVENT_EXEC = 0x00000002
 
+# AF_NETLINK only exists on Linux; keep the module importable and type-checkable
+# on other hosts so the platform layer can be selected at runtime.
+_AF_NETLINK: int | None = getattr(socket, "AF_NETLINK", None)
+
 
 def _listen_message() -> bytes:
     # nlmsghdr + cn_msg + proc_cn_mcast_op
@@ -60,7 +64,9 @@ class ProcExecEvents:
     @classmethod
     async def open(cls) -> ProcExecEvents:
         """Subscribe to exec events. Requires Linux proc-connector access."""
-        sock = socket.socket(socket.AF_NETLINK, socket.SOCK_DGRAM, _NETLINK_CONNECTOR)
+        if _AF_NETLINK is None:
+            raise OSError("proc connector requires Linux (AF_NETLINK)")
+        sock = socket.socket(_AF_NETLINK, socket.SOCK_DGRAM, _NETLINK_CONNECTOR)
         try:
             sock.setblocking(False)
             sock.bind((os.getpid(), _CN_IDX_PROC))

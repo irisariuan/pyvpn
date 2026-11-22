@@ -8,10 +8,9 @@ from pathlib import Path
 from pyvpn.apps.launcher import request_place_pid
 
 
-def test_launcher_sends_place_pid_request(tmp_path: Path) -> None:
-    path = tmp_path / "daemon.sock"
+def test_launcher_sends_place_pid_request(daemon_socket_path: Path) -> None:
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(str(path))
+    server.bind(str(daemon_socket_path))
     server.listen(1)
     seen: list[dict[str, object]] = []
 
@@ -25,7 +24,7 @@ def test_launcher_sends_place_pid_request(tmp_path: Path) -> None:
 
     thread = threading.Thread(target=serve)
     thread.start()
-    request_place_pid("JP", socket_path=path)
+    request_place_pid("JP", socket_path=daemon_socket_path)
     thread.join(timeout=2)
     assert seen[0]["method"] == "place_pid"
     assert seen[0]["params"]["policy"] == "JP"  # type: ignore[index]
