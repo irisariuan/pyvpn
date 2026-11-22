@@ -73,6 +73,7 @@ class DestSet:               # produced by F (DNS answers) and G (asn:/cidr:)
     policy_id: int
     v4: frozenset[IPv4Network]
     v6: frozenset[IPv6Network]
+    drop: bool = False       # addresses of drop: rules (never merged with route sets)
 
 @dataclass(frozen=True)
 class PolicyPlan:            # computed by B, consumed by C / platform backends
@@ -86,6 +87,7 @@ class PolicyPlan:            # computed by B, consumed by C / platform backends
     dests: DestSet | None    # None = all destinations
     leak: LeakSettings
     dns_stub_port: int | None
+    drops: DestSet | None = None  # drop: destinations; None = no drop: rules
 
 @dataclass(frozen=True)
 class RoutingPlan:           # the whole desired state, applied atomically

@@ -136,7 +136,7 @@ class Daemon:
                     self._cgroup_policy_names.update(state.policy_slots)
                     # Addresses apps may still have cached: govern them from
                     # the first apply on instead of emptying their sets.
-                    self.reconciler.restore_learned(state.learned)
+                    self.reconciler.restore_learned(state.learned, state.learned_drops)
                 self._validate_policy_slots(config)
                 if self._dns is not None:
                     self._dns.on_answer(self.reconciler.add_dests)
@@ -270,11 +270,13 @@ class Daemon:
                         "bad_request",
                         f"{where}: isolation 'netns' is not supported by this backend",
                     )
-                if policy.domains:
+                routed = [d for d in policy.domains if not _is_drop_rule(d)]
+                if routed:
                     raise ApiError(
                         "bad_request",
                         f"{where}: isolation 'netns' sends all of the app's traffic through "
-                        "the target; remove 'domains' or use isolation 'none'",
+                        f"the target; only drop: rules may be listed in 'domains' "
+                        f"({routed[0]!r} is not one), or use isolation 'none'",
                     )
                 if not policy.leak.dns_via_target:
                     raise ApiError(
@@ -673,6 +675,7 @@ class Daemon:
                     enabled=enabled,
                     policy_slots=tuple(sorted(slots.items())),
                     learned=self.reconciler.learned_entries(),
+                    learned_drops=self.reconciler.learned_entries(drops=True),
                 )
             )
         self._cgroup_policy_names = slots
@@ -682,7 +685,12 @@ class Daemon:
             self._save_state(enabled=self.reconciler.enabled, slots=self._cgroup_policy_names)
 
 
+def _is_drop_rule(rule: str) -> bool:
+    return rule.strip().lower().startswith("drop:")
+
+
 def _is_address_rule(rule: str) -> bool:
-    """``asn:``/``cidr:``/``ip:`` rules need no DNS to be enforced."""
-    head = rule.strip().lower()
+    """``asn:``/``cidr:``/``ip:`` rules (and their ``drop:`` forms) need no
+    DNS to be enforced."""
+    head = rule.strip().lower().removeprefix("drop:")
     return head.startswith(("asn:", "cidr:", "ip:"))

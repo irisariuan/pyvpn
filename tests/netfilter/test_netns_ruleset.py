@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from ipaddress import IPv4Network
 from typing import Any
 
 import pytest
@@ -18,7 +19,7 @@ from pyvpn.constants import NETNS_RANGE, netns_host_veth, netns_subnet
 from pyvpn.netfilter import build_ruleset
 from pyvpn.netfilter.render import render
 from pyvpn.netfilter.ruleset import build_netns_ruleset, build_route_guard
-from pyvpn.state import PolicyPlan, RoutingPlan
+from pyvpn.state import DestSet, PolicyPlan, RoutingPlan
 from tests.netfilter.test_ruleset import _check_golden, _rules, policy
 
 
@@ -33,6 +34,16 @@ NETNS_VARIANTS: dict[str, tuple[RoutingPlan, tuple[str, ...]]] = {
     "netns_leaks": (
         RoutingPlan(
             (isolated(leak=LeakSettings(block_dot=True, block_doh=True, block_quic=True)),)
+        ),
+        ("wg-jp",),
+    ),
+    "netns_drops": (
+        RoutingPlan(
+            (
+                isolated(
+                    drops=DestSet(1, frozenset({IPv4Network("203.0.113.0/24")}), drop=True),
+                ),
+            )
         ),
         ("wg-jp",),
     ),
@@ -126,3 +137,11 @@ def test_route_guard_also_stops_namespace_forwarding() -> None:
     script = render(build_route_guard(enabled=True))
     assert "add chain inet pyvpn_guard forward { type filter hook forward priority -80;" in script
     assert f"add rule inet pyvpn_guard forward ip saddr {NETNS_RANGE} drop\n" in script
+
+
+def test_drop_rules_reject_namespace_traffic_before_it_can_be_accepted() -> None:
+    plan = RoutingPlan((isolated(drops=DestSet(1, drop=True)),))
+    chain = _rules(build_ruleset(plan), "n1")
+    drop_at = next(i for i, r in enumerate(chain) if r[0]["match"].get("right") == "@p1_drop_v4")
+    assert "reject" in chain[drop_at][-1]
+    assert drop_at < next(i for i, r in enumerate(chain) if r == [{"accept": None}])

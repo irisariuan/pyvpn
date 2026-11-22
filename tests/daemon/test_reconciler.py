@@ -428,3 +428,54 @@ async def test_dns_only_retry_clears_its_error(config: Config) -> None:
     await r.reconcile()
     assert r.last_error is None
     await r.close()
+
+
+def _with_drops(config: Config) -> Config:
+    office = config.policies[2].model_copy(
+        update={"domains": ("corp.example", "drop:ads.example", "drop:cidr:192.0.2.0/24")}
+    )
+    return config.model_copy(update={"policies": (*config.policies[:2], office)})
+
+
+async def test_static_drop_sets_are_kept_apart_from_route_sets(config: Config) -> None:
+    r, backend, _ = make()
+    static = [DestSet(3, frozenset({NET_A})), DestSet(3, frozenset({NET_B}), drop=True)]
+    await r.set_config(_with_drops(config), static)
+    office = backend.last.policies[2]
+    assert office.dests == DestSet(3, frozenset({NET_A}))
+    assert office.drops == DestSet(3, frozenset({NET_B}), drop=True)
+    assert backend.last.policies[0].drops is None
+
+
+async def test_dns_drop_answers_fill_the_drop_set(config: Config) -> None:
+    r, backend, dns = make()
+    dns.on_answer(r.add_dests)
+    await r.set_config(_with_drops(config))
+    drop = DestSet(3, frozenset({NET_B}), drop=True)
+    await dns.answer(drop)
+    assert backend.sets == [drop]
+    assert len(backend.plans) == 1  # no full apply for a set add
+    assert r.dynamic_drops == {3: drop} and r.dynamic_dests == {}
+    assert r.learned_entries(drops=True) == (
+        ("Office", r.config.policies[2].domains, (str(NET_B),)),  # type: ignore[union-attr]
+    )
+    assert r.learned_entries() == ()
+    await r.reconcile()
+    assert len(backend.plans) == 1  # recorded state matches installed state
+    await r.update_targets({"office": up("office", "wlan1")})
+    office = backend.last.policies[2]
+    assert office.drops == drop and office.dests == DestSet(3)
+    # A reload that keeps the rules keeps the learned drop addresses.
+    await r.commit_config(r.config.model_copy(), (), {})  # type: ignore[union-attr]
+    assert backend.last.policies[2].drops == drop
+
+
+async def test_drop_answer_without_a_drop_set_is_refused(config: Config) -> None:
+    r, backend, _ = make()
+    await r.set_config(config)  # Office has no drop: rules
+    with pytest.raises(DnsNotGoverned, match="no drop set"):
+        await r.add_dests(DestSet(3, frozenset({NET_B}), drop=True))
+    with pytest.raises(DnsNotGoverned, match="no drop set"):
+        # Not even for a policy that routes every destination.
+        await r.add_dests(DestSet(1, frozenset({NET_B}), drop=True))
+    assert backend.sets == []

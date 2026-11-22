@@ -5,10 +5,11 @@ A policy's ``domains`` hold snake rules (see ``pattern``) plus ``asn:N`` and
 order and the first one whose rules route a name wins.
 
 Per policy, as in snake: ``!rule`` exempts a name from that policy (later
-policies are still tried); ``drop:`` claims the name for the policy but does
-not route it (blocking needs a drop set in the backend, not built yet);
-``build_matcher`` refuses to activate ``drop:`` and per-device rules, and,
-without ``google-re2``, rules that need RE2 (``Pattern.needs_re2``);
+policies are still tried); ``drop:`` claims the name for the policy and
+blocks it: its addresses (DNS answers, ``drop:cidr:``, ``drop:asn:``) go
+into the policy's drop set (``DestSet.drop``), which the backend rejects for
+the policy's processes. ``build_matcher`` refuses to activate per-device
+rules and, without ``google-re2``, rules that need RE2 (``Pattern.needs_re2``);
 ``session:``, ``route:`` and ``drop[...]:`` sessions are per device in snake
 and not supported here yet (PLAN.md §4): they route nothing and ``check``
 reports them. The names in an ``if:`` condition are routed like plain rules,
@@ -103,21 +104,44 @@ class PolicyRules:
         return cls(policy_id, name, rules, tuple(asns), tuple(cidrs), tuple(errors), slow)
 
     def unsupported(self) -> list[str]:
-        """Rules that parse but pyvpn does not act on yet."""
+        """Per-device rules: they parse but pyvpn does not act on them."""
         r = self.rules
         out = [p.raw for p in r.session]
         out += [rt.raw for rt in r.routes]
-        out += [p.raw for p in r.drop]
-        out += [f"drop:asn:{a}" for a in r.drop_asns]
-        out += [f"drop:cidr:{c}" for c in r.drop_cidrs]
+        out += [p.raw for p in r.drop if not p.opts.is_zero()]  # drop[...]: sessions
         return out
 
+    @property
+    def has_drops(self) -> bool:
+        """The policy has ``drop:`` rules, so it needs a drop set."""
+        return self.rules.has_drops()
+
+    def all_asns(self) -> tuple[int, ...]:
+        """ASNs of ``asn:`` and ``drop:asn:`` rules."""
+        return tuple(dict.fromkeys((*self.asns, *self.rules.drop_asns)))
+
     def dest_set(self, asn_prefixes: AsnResolver | None = None) -> DestSet:
+        """``asn:`` / ``cidr:`` destinations."""
+        return self._networks(self.cidrs, self.asns, asn_prefixes, drop=False)
+
+    def drop_set(self, asn_prefixes: AsnResolver | None = None) -> DestSet:
+        """``drop:asn:`` / ``drop:cidr:`` destinations (``DestSet.drop``)."""
+        r = self.rules
+        return self._networks(r.drop_cidrs, r.drop_asns, asn_prefixes, drop=True)
+
+    def _networks(
+        self,
+        cidrs: Iterable[str],
+        asns: Iterable[int],
+        asn_prefixes: AsnResolver | None,
+        *,
+        drop: bool,
+    ) -> DestSet:
         v4: set[IPv4Network] = set()
         v6: set[IPv6Network] = set()
-        nets = list(self.cidrs)
+        nets = list(cidrs)
         if asn_prefixes is not None:
-            for a in self.asns:
+            for a in asns:
                 nets.extend(asn_prefixes(a))
         for c in nets:
             try:
@@ -125,7 +149,7 @@ class PolicyRules:
             except ValueError:
                 continue
             (v4 if isinstance(net, IPv4Network) else v6).add(net)  # type: ignore[arg-type]
-        return DestSet(self.policy_id, frozenset(v4), frozenset(v6))
+        return DestSet(self.policy_id, frozenset(v4), frozenset(v6), drop)
 
 
 @dataclass(frozen=True)
@@ -206,28 +230,43 @@ class PolicyMatcher:
         d = self.explain(*names)
         return d.policy_id if d.action == "route" else None
 
+    def decide_chain(self, *names: str) -> tuple[int, bool] | None:
+        """``(policy id, drop)`` for a name and its CNAME chain, or None.
+
+        ``drop`` is True when a ``drop:`` rule claimed the name: its
+        addresses belong in the policy's drop set, not its route set.
+        """
+        d = self.explain(*names)
+        if d.policy_id is None or d.action == "none":
+            return None
+        return d.policy_id, d.action == "drop"
+
     def match(self, domain: str) -> int | None:
         return self.match_chain(domain)
 
     def static_sets(self) -> list[DestSet]:
-        """asn:/cidr: destinations per policy (ASNs via the resolver, if any)."""
+        """asn:/cidr: destinations per policy (ASNs via the resolver, if any),
+        then the drop:asn: / drop:cidr: ones (``DestSet.drop``)."""
         out = []
         for pr in self.policies:
             ds = pr.dest_set(self._asn_prefixes)
+            if ds:
+                out.append(ds)
+        for pr in self.policies:
+            ds = pr.drop_set(self._asn_prefixes)
             if ds:
                 out.append(ds)
         return out
 
     def asns(self) -> list[int]:
         """Every ASN the config refers to (for refreshing the cache)."""
-        return list(dict.fromkeys(a for pr in self.policies for a in pr.asns))
+        return list(dict.fromkeys(a for pr in self.policies for a in pr.all_asns()))
 
     def problems(self) -> list[str]:
         """Why these rules cannot be activated; empty when they can.
 
         Rejected: rules that do not parse (a typo would leave traffic
-        outside its policy), ``drop:`` rules (they claim a name but nothing
-        blocks it yet, so it would take the host route), per-device rules
+        outside its policy), per-device rules
         (``session:``, ``route:``, ``if:`` with ``then:``/``else:``: they
         route nothing and are checked before plain rules, so they would hide
         them), ASNs with no prefixes (the policy would silently match
@@ -243,11 +282,8 @@ class PolicyMatcher:
             if not re2:
                 out += [f"{where} rule {i + 1}: {NEEDS_RE2}: {raw}" for i, raw in pr.needs_re2]
             for raw in pr.unsupported():
-                if raw.lower().startswith("drop:"):
-                    out.append(f"{where}: drop: rules are not enforced yet: {raw}")
-                else:
-                    out.append(f"{where}: per-device rules are not supported yet: {raw}")
-            for a in pr.asns:
+                out.append(f"{where}: per-device rules are not supported yet: {raw}")
+            for a in pr.all_asns():
                 if self._asn_prefixes is None:
                     out.append(f"{where}: asn:{a} needs the ASN cache")
                 else:

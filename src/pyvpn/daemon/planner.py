@@ -11,6 +11,9 @@ Fail-closed rules:
   ``on_down: default`` gives ``main``.
 * A policy with destination rules whose set is still empty routes nothing
   through the target (empty set, never ``None`` = "all destinations").
+* A policy with ``drop:`` rules always gets a drop set (empty until DNS
+  answers or ``drop:cidr:`` / ``drop:asn:`` fill it), so DNS-learned drop
+  addresses always have somewhere to go.
 """
 
 from __future__ import annotations
@@ -38,6 +41,11 @@ def default_binding(policy_id: int, policy: Policy) -> AppBinding:
     return AppBinding(policy_id=policy_id, any_process=not policy.apps)
 
 
+def has_drop_rules(policy: Policy) -> bool:
+    """Whether the policy's destination rules include ``drop:`` rules."""
+    return any(d.lstrip().lower().startswith("drop:") for d in policy.domains)
+
+
 def plan_policy(
     policy_id: int,
     policy: Policy,
@@ -45,6 +53,7 @@ def plan_policy(
     statuses: Mapping[str, TargetStatus],
     binding: AppBinding | None,
     dests: DestSet | None,
+    drops: DestSet | None = None,
 ) -> PolicyPlan:
     chosen = choose_target(policy, statuses)
     if chosen is not None:
@@ -59,10 +68,16 @@ def plan_policy(
         gateway, interface, target = None, None, None
         route = "unreachable" if policy.on_down == "block" else "main"
 
-    if policy.domains:
+    if policy.domains and policy.isolation != "netns":
+        # An isolated policy's domains are only drop: rules (the daemon
+        # refuses others): it governs every destination.
         plan_dests: DestSet | None = dests if dests is not None else DestSet(policy_id)
     else:
         plan_dests = None
+    if has_drop_rules(policy):
+        plan_drops: DestSet | None = drops if drops is not None else DestSet(policy_id, drop=True)
+    else:
+        plan_drops = None
 
     return PolicyPlan(
         policy_id=policy_id,
@@ -77,6 +92,7 @@ def plan_policy(
         leak=policy.leak,
         dns_stub_port=dns_stub_port(policy_id) if policy.leak.dns_via_target else None,
         target=target,
+        drops=plan_drops,
         isolation=policy.isolation,
     )
 
@@ -86,10 +102,12 @@ def build_plan(
     statuses: Mapping[str, TargetStatus],
     bindings: Mapping[int, AppBinding],
     dests: Mapping[int, DestSet],
+    drops: Mapping[int, DestSet] | None = None,
 ) -> RoutingPlan:
+    drops = drops or {}
     return RoutingPlan(
         tuple(
-            plan_policy(pid, p, config, statuses, bindings.get(pid), dests.get(pid))
+            plan_policy(pid, p, config, statuses, bindings.get(pid), dests.get(pid), drops.get(pid))
             for pid, p in enumerate(config.policies, start=1)
         )
     )

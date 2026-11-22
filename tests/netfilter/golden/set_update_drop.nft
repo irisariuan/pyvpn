@@ -1,0 +1,2 @@
+add element inet pyvpn p2_drop_v4 { 192.0.2.0/24, 198.18.0.9 }
+add element inet pyvpn p2_drop_v6 { 2001:db8:dead::/48 }

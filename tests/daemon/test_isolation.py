@@ -101,7 +101,8 @@ async def test_isolation_is_refused_without_backend_support(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     ("update", "message"),
     [
-        ({"domains": ("example.com",), "leak": {"dns_via_target": True}}, "remove 'domains'"),
+        ({"domains": ("example.com",), "leak": {"dns_via_target": True}}, "only drop: rules"),
+        ({"domains": ("drop:ads.example", "cidr:10.0.0.0/8"), "leak": {}}, "only drop: rules"),
         ({"leak": {"dns_via_target": False}}, "needs dns_via_target"),
     ],
 )
@@ -263,5 +264,22 @@ async def test_kill_switch_policy_still_launches_into_its_namespace(tmp_path: Pa
         assert backend.last.policies[1].route == "unreachable"
         await d.handle("run_isolated", RUN, USER)
         assert len(launcher.commands) == 1
+    finally:
+        await d.stop()
+
+
+async def test_drop_rules_apply_to_isolated_policies(tmp_path: Path) -> None:
+    config = isolated_config()
+    torrents = config.policies[1].model_copy(update={"domains": ("drop:ads.example",)})
+    config = config.model_copy(
+        update={"policies": (config.policies[0], torrents, config.policies[2])}
+    )
+    d, backend, _ = daemon(tmp_path, config, launcher=FakeLauncher())
+    await d.start()
+    try:
+        plan = backend.last.policies[1]
+        assert plan.isolation == "netns"
+        assert plan.dests is None  # still every destination through the target
+        assert plan.drops is not None and plan.drops.drop
     finally:
         await d.stop()

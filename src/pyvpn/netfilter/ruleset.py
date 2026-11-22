@@ -15,11 +15,14 @@ Packet path (PLAN.md §3)::
         loaded ones (re-created, so its id changed) -> reject
         LAN / loopback / multicast destination -> accept unchanged
         socket already carries a pyvpn mark -> accept unchanged
+        conntrack mark of a later policy Q, <policy P apps>, daddr in P's
+            drop set -> reject (P comes first, so its drops win over Q)
         conntrack mark of policy P -> enforce P's current leak rules and route
             (reject while P is a kill switch)
         <policy P apps> -> jump p<P>
 
-    chain p<P>        DoT / DoH rejects (anything that bypasses the stub)
+    chain p<P>        daddr in @p<P>_drop_v4 / @p<P>_drop_v6 -> reject (drop: rules)
+                      DoT / DoH rejects (anything that bypasses the stub)
                       [daddr in @p<P>_v4 / @p<P>_v6] -> goto p<P>_route
     chain p<P>_route  IPv6 / QUIC rejects, then
                       route unreachable -> reject (kill switch)
@@ -128,6 +131,11 @@ def set_name(policy_id: int, version: int) -> str:
     return f"p{policy_id}_v{version}"
 
 
+def drop_set_name(policy_id: int, version: int) -> str:
+    """Name of a policy's drop set (``drop:`` rules), e.g. ``p3_drop_v4``."""
+    return f"p{policy_id}_drop_v{version}"
+
+
 def build_ruleset(
     plan: RoutingPlan,
     *,
@@ -183,12 +191,14 @@ def build_ruleset(
 
 
 def build_set_update(dests: DestSet) -> Json:
-    """Add ``dests`` to its policy's sets (``Backend.add_to_set``)."""
+    """Add ``dests`` to its policy's sets (``Backend.add_to_set``): the drop
+    sets when ``dests.drop`` is set, the destination sets otherwise."""
     cmds: list[Json] = []
+    naming = drop_set_name if dests.drop else set_name
     for version, nets in ((4, dests.v4), (6, dests.v6)):
         if nets:
             elem = _elements(nets)
-            name = set_name(dests.policy_id, version)
+            name = naming(dests.policy_id, version)
             cmds.append({"add": {"element": {**_ref(), "name": name, "elem": elem}}})
     return {"nftables": cmds}
 
@@ -299,6 +309,9 @@ def _sets(plan: RoutingPlan) -> list[Json]:
         if p.dests is not None:
             out.append(_set(set_name(p.policy_id, 4), 4, p.dests.v4))
             out.append(_set(set_name(p.policy_id, 6), 6, p.dests.v6))
+        if p.drops is not None:
+            out.append(_set(drop_set_name(p.policy_id, 4), 4, p.drops.v4))
+            out.append(_set(drop_set_name(p.policy_id, 6), 6, p.drops.v6))
     return out
 
 
@@ -473,6 +486,7 @@ def _output_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:
         ("output", [_daddr_in(6, "lan_v6"), _ACCEPT]),
         ("output", [_any_pyvpn_mark(), _ACCEPT]),
     ]
+    rules += _tracked_drop_rules(plan)
     for p in plan.policies:
         if p.route == "unreachable":
             rules.append(("output", [_ct_mark_is(p.mark), _REJECT]))
@@ -484,12 +498,43 @@ def _output_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:
     return rules
 
 
+def _tracked_drop_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:
+    """Apply earlier policies' drop sets to flows tracked for a later policy.
+
+    A tracked flow jumps straight to the chain of the policy that first
+    marked it, skipping the selectors of earlier policies. Policies are
+    tried in order, so a destination that an earlier policy P (whose apps
+    the packet comes from) learned to drop must also cut a flow a later
+    policy Q marked before the address was learned. P's own flows reach its
+    drop rules at the head of ``p<P>``; flows of policies before P are not
+    affected, since P never had a say for them.
+    """
+    rules: list[tuple[str, Expr]] = []
+    policies = plan.policies
+    for i, p in enumerate(policies):
+        later = sorted({q.mark for q in policies[i + 1 :]})
+        if p.drops is None or not later:
+            continue
+        marks: Any = later[0] if len(later) == 1 else {"set": later}
+        tracked = _match(_masked({"ct": {"key": "mark"}}, POLICY_MARK_MASK), marks)
+        for sel in _selectors(p):
+            for version in (4, 6):
+                dropped = _daddr_in(version, drop_set_name(p.policy_id, version))
+                rules.append(("output", [tracked, *sel, dropped, _REJECT]))
+    return rules
+
+
 def _policy_rules(policy: PolicyPlan) -> list[tuple[str, Expr]]:
     pid = policy.policy_id
     head, route = f"p{pid}", f"p{pid}_route"
     leak = policy.leak
     rules: list[tuple[str, Expr]] = []
 
+    if policy.drops is not None:
+        # First, so neither a conntrack mark from before the address was
+        # learned nor the policy's route lets the connection through.
+        for version in (4, 6):
+            rules.append((head, [_daddr_in(version, drop_set_name(pid, version)), _REJECT]))
     if leak.block_dot:
         rules.append((head, [*_l4(("tcp", "udp"), 853), _REJECT]))
     if leak.block_doh:
@@ -607,6 +652,12 @@ def _netns_policy_rules(policy: PolicyPlan) -> list[tuple[str, Expr]]:
     rules: list[tuple[str, Expr]] = [
         # The namespace has no IPv6; never forward it, whatever leak.ipv6 says.
         (chain, [_match(_meta("nfproto"), "ipv6"), _DROP]),
+    ]
+    if policy.drops is not None:
+        # drop: rules learned through the policy's stub, before anything
+        # can accept the packet (the namespace is IPv4 only).
+        rules.append((chain, [_daddr_in(4, drop_set_name(policy.policy_id, 4)), _REJECT]))
+    rules += [
         (chain, [_daddr_in_netns(), _DROP]),
         # DNS is redirected to the relay inside the namespace; a query that
         # still reaches the host bypassed it.

@@ -30,6 +30,8 @@ from pyvpn.cli.output import (
 )
 from pyvpn.config import (
     ConfigError,
+    ConfigFileError,
+    ConfigValidationError,
     load_config,
 )
 from pyvpn.constants import SOCKET_PATH
@@ -72,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("reload", help="reload the daemon configuration")
     commands.add_parser("disable", help="remove pyvpn routing and rules")
+    commands.add_parser("enable", help="reinstall pyvpn routing after disable")
     commands.add_parser("audit", help="describe routing and leak protection")
 
     run = commands.add_parser("run", help="place a launched process in a policy")
@@ -187,8 +190,30 @@ def _run_policy(args: argparse.Namespace, as_json: bool) -> int:
     return 0
 
 
+_SCHEMA_FAILED = ": configuration validation failed"
+
+
+def _config_problems(exc: ConfigFileError | ConfigValidationError) -> list[str]:
+    """one line per problem: ``source: error: location: message`` for schema errors."""
+    if not isinstance(exc, ConfigValidationError) or not exc.problems:
+        return [f"error: {exc}"]
+    if exc.message.endswith(_SCHEMA_FAILED):
+        source = exc.message.removesuffix(_SCHEMA_FAILED)
+        return [f"{source}: error: {problem}" for problem in exc.problems]
+    return [f"error: {exc.message} ({problem})" for problem in exc.problems]
+
+
 def _run_test(args: argparse.Namespace, as_json: bool) -> int:
-    config = load_config(args.config)
+    try:
+        config = load_config(args.config)
+    except (ConfigFileError, ConfigValidationError) as exc:
+        problems = _config_problems(exc)
+        output = "\n".join([*problems, "errors found"]) + "\n"
+        if as_json:
+            print_json({"ok": False, "output": output, "errors": problems})
+        else:
+            sys.stdout.write(output)
+        return 1
     result = check_config(config)
     if as_json:
         print_json({"ok": result.code == 0, "output": result.output})
@@ -198,7 +223,12 @@ def _run_test(args: argparse.Namespace, as_json: bool) -> int:
 
 
 def _run_mutation(client: DaemonClient, as_json: bool, action: str) -> int:
-    result = client.reload() if action == "reload" else client.disable()
+    if action == "reload":
+        result = client.reload()
+    elif action == "enable":
+        result = client.enable()
+    else:
+        result = client.disable()
     if as_json:
         print_json(result)
     else:
@@ -397,7 +427,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_policy(args, args.json)
         if args.command == "test":
             return _run_test(args, args.json)
-        if args.command in {"reload", "disable"}:
+        if args.command in {"reload", "disable", "enable"}:
             socket_path = args.socket if args.socket is not None else None
             client = DaemonClient(socket_path) if socket_path is not None else DaemonClient()
             return _run_mutation(client, args.json, args.command)

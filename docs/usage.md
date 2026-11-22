@@ -43,6 +43,15 @@ The configuration is one JSON file: `/etc/pyvpn/config.json` by default, or
 pyvpn test /etc/pyvpn/config.json
 ```
 
+It prints `ok`, or one line per problem followed by `errors found` (exit
+status 1):
+
+```text
+/etc/pyvpn/config.json: error: targets.0.interface: Field required
+/etc/pyvpn/config.json: error: policies.0.on_down: Input should be 'default' or 'block'
+errors found
+```
+
 A complete example:
 
 ```json
@@ -179,8 +188,9 @@ pyvpn run -p Torrents -- qbittorrent
 - Only `pyvpn run` starts apps in the namespace. Apps that a selector in
   `apps` matches still get the policy's normal routing and kill switch,
   without the namespace. `--isolation none` is refused for such a policy.
-- Not allowed with `isolation: "netns"`: `domains` (the whole app goes
-  through the target) and `dns_via_target: false`.
+- `domains` may only hold `drop:` rules: the whole app goes through the
+  target, and destinations matched by a `drop:` rule are blocked inside the
+  namespace too. `dns_via_target: false` is not allowed.
 
 Limits:
 
@@ -333,6 +343,14 @@ wildcards (`*.example.com`), and `cidr:10.20.0.0/16`. The policy's DNS stub
 learns the addresses of matching names as apps look them up, so **hostname
 rules need `dns_via_target: true`**.
 
+`drop:` blocks a destination for the policy's apps instead of routing it:
+`drop:ads.example` (its subdomains too), `drop:cidr:192.0.2.0/24` or
+`drop:ip:2001:db8::7`. Connections to a dropped address are rejected right
+away, including ones opened before the address was learned. Policies are
+checked in order, so an earlier policy that routes the same address for the
+same app wins. Local network, loopback and multicast addresses are never
+blocked.
+
 Rule files can be checked and converted:
 
 ```bash
@@ -353,15 +371,14 @@ immediately, and kill switches stop blocking. Isolated apps (`isolation:
 "netns"`) are the exception: they are cut off until routing is enabled again. The daemon remembers it's
 disabled, even across restarts.
 
-There's no `pyvpn enable` command yet. To turn routing back on, call the
-daemon's `enable` method directly:
+To turn routing back on:
 
 ```bash
-sudo python3 -c '
-import json, socket
-s = socket.socket(socket.AF_UNIX); s.connect("/run/pyvpn/pyvpn.sock")
-s.sendall(b"{\"id\": 1, \"method\": \"enable\", \"params\": {}}\n"); print(s.recv(4096).decode())'
+sudo pyvpn enable
 ```
+
+The daemon reinstalls the current configuration's rules. If that fails,
+`pyvpn status` shows `last error:` and the daemon keeps retrying.
 
 ## Not supported yet
 
@@ -371,11 +388,9 @@ The daemon refuses these, or they have no effect yet. Don't rely on them:
 |---|---|
 | `"probe": true` on a target | The target stays **unusable**, with a warning in the log. Leave it out. |
 | `asn:` rules in `domains` | Refused: nothing fetches the ASN prefix cache yet. Use `cidr:` rules instead. |
-| `drop:` rules and snake's per-device rules | Refused by the daemon; `pyvpn rules check` reports them. |
+| snake's per-device rules (`session:`, `route:`, `drop[...]:`, `if:` with `then:`/`else:`) | Refused by the daemon; `pyvpn rules check` reports them. |
 | `settings.probe_targets`, `settings.probe_interval` | Accepted, but unused until probes work. |
-| `pyvpn enable` | Missing; see [Turning pyvpn off](#turning-pyvpn-off). |
 | `exclude_apps` | Accepted, but the daemon doesn't enforce it: excluded apps are still routed by the policy. |
-| Problem list from `pyvpn test` | For JSON or schema errors it prints only `configuration validation failed`. Destination rule errors are listed per rule, followed by `errors found`. |
 
 ## Troubleshooting
 

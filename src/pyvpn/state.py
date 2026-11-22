@@ -113,16 +113,24 @@ def _check_cgroup_path(path: str) -> None:
 
 @dataclass(frozen=True)
 class DestSet:
-    """Produced by F (DNS answers) and G (asn:/cidr:)."""
+    """Produced by F (DNS answers) and G (asn:/cidr:).
+
+    ``drop`` marks the addresses of a policy's ``drop:`` rules: the policy's
+    processes must not reach them (PLAN.md §3.4). Route and drop sets of one
+    policy are kept apart and never merged.
+    """
 
     policy_id: int
     v4: frozenset[IPv4Network] = field(default_factory=frozenset)
     v6: frozenset[IPv6Network] = field(default_factory=frozenset)
+    drop: bool = False
 
     def __or__(self, other: DestSet) -> DestSet:
         if other.policy_id != self.policy_id:
             raise ValueError("cannot merge DestSets of different policies")
-        return DestSet(self.policy_id, self.v4 | other.v4, self.v6 | other.v6)
+        if other.drop != self.drop:
+            raise ValueError("cannot merge a drop set with a route set")
+        return DestSet(self.policy_id, self.v4 | other.v4, self.v6 | other.v6, self.drop)
 
     def __bool__(self) -> bool:
         return bool(self.v4 or self.v6)
@@ -144,6 +152,9 @@ class PolicyPlan:
     leak: LeakSettings
     dns_stub_port: int | None
     target: str | None = None  # config name of the active target, for status
+    # Destinations the policy's processes must not reach (``drop:`` rules,
+    # ``DestSet.drop`` set). None: the policy has no drop rules.
+    drops: DestSet | None = None
     # "netns": the backend also keeps a network namespace for the policy whose
     # only way out is its veth, forwarded like the policy's apps (PLAN.md §3.6).
     isolation: Isolation = "none"
