@@ -1,8 +1,8 @@
 """The composition root wires real parts; no root, no host network.
 
 Interfaces come from a fake netlink source, cgroups live under ``tmp_path``,
-DNS stubs are off (``dns_via_target: false``) and the backend is the dry-run
-one, so nothing here touches the host's routing, nft, cgroups or ports.
+DNS stubs are off (``dns_via_target: false``) and routing uses dry-run or
+fakes, so nothing here touches the host's routing, nft, cgroups or ports.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from typing import Any, ClassVar
 import pytest
 
 from pyvpn.config.models import Config
+from pyvpn.constants import policy_cgroup
 from pyvpn.daemon import main as daemon_main
 from pyvpn.daemon.dryrun import DryRunBackend
 from pyvpn.daemon.main import (
@@ -30,7 +31,10 @@ from pyvpn.daemon.main import (
     build_daemon,
     load_backend,
 )
+from pyvpn.daemon.server import PeerCred
+from pyvpn.platform.linux.backend import LinuxBackend
 from pyvpn.targets.watcher import InterfaceSnapshot
+from tests.routing._fakes import FakeNetlink as FakeRouteNetlink
 
 
 def write_config(path: Path, *, policies: list[dict[str, Any]] | None = None) -> Config:
@@ -109,6 +113,55 @@ def test_dry_run_never_touches_system_cgroups(tmp_path: Path) -> None:
     linux = Options(config_path=tmp_path / "c.json", state_dir=tmp_path)
     assert linux.resolved_cgroup_root() == Path("/sys/fs/cgroup")
     assert linux.watch_processes()
+
+
+async def test_linux_placement_accepts_domain_only_policy_alongside_app_policy(
+    tmp_path: Path,
+) -> None:
+    opts = Options(
+        config_path=tmp_path / "config.json",
+        socket_path=tmp_path / "p.sock",
+        state_dir=tmp_path / "state",
+        cgroup_root=tmp_path / "cgroups",
+        process_watcher=False,
+    )
+    config = write_config(opts.config_path)
+    domain_policy = config.policies[0].model_copy(
+        update={"name": "Office", "apps": (), "domains": ("ip:203.0.113.9",)}
+    )
+    config = config.model_copy(update={"policies": (*config.policies, domain_policy)})
+    scripts: list[str] = []
+
+    async def nft(script: str) -> None:
+        scripts.append(script)
+
+    root = opts.resolved_cgroup_root()
+    backend = LinuxBackend(
+        nft=nft, netlink=FakeRouteNetlink([]), cgroup_root=root, proc_sys=tmp_path / "proc"
+    )
+    assembly = build_daemon(opts, backend=backend, config=config, netlink=FakeNetlink())
+    # The daemon reloads configuration from disk during startup.
+    opts.config_path.write_text(config.model_dump_json())
+    await assembly.daemon.start()
+    try:
+        state = opts.state_dir / "state.json"
+        assert "Office" not in state.read_text()  # reserve the slot only when a PID is placed
+        assert any(
+            f'check_cgroup socket cgroupv2 level 2 "{policy_cgroup(2)}" return' in script
+            and "output meta skuid >= 0 jump p2" in script
+            for script in scripts
+        )
+        procs = root / policy_cgroup(2) / "cgroup.procs"
+        procs.touch()
+        await assembly.daemon.handle(
+            "place_pid", {"pid": 123, "policy": "Office"}, PeerCred(1, 0, 0)
+        )
+        assert procs.read_text() == "123\n"
+        assert "Office" in state.read_text()
+    finally:
+        await assembly.daemon.stop()
+        await assembly.close()
+        await backend.teardown()
 
 
 def build(tmp_path: Path, *, up: bool = True, **options: Any) -> Assembly:

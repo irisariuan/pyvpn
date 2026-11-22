@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import secrets
 import struct
@@ -43,12 +44,13 @@ _TCP_IDLE_TIMEOUT = 10.0
 _MAX_UDP_QUERIES = 256
 _MAX_TCP_CLIENTS = 256
 _UDP_RELEASE_TIMEOUT = 2.0
-_LISTEN_ADDRESS = "127.0.0.1"
+_LISTEN_ADDRESSES = ("127.0.0.1", "::1")
+_IPV6_UNAVAILABLE = {errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT, errno.EADDRNOTAVAIL}
 _MAX_ALIAS_ORIGINS = 4096
 _ALIAS_PATH = Path(STATE_DIR) / "dns-aliases.sqlite3"
 
 Upstream = Callable[[PolicyPlan, dns.message.Message], Awaitable[dns.message.Message]]
-ClientAddress = tuple[str, int]
+ClientAddress = tuple[str, int] | tuple[str, int, int, int]
 
 
 @runtime_checkable
@@ -62,7 +64,7 @@ class _ScopedMatcher(Protocol):
 
 
 class PolicyDnsService:
-    """Manage one UDP/TCP listener pair per plan with a DNS stub port."""
+    """Manage the loopback UDP and TCP listeners for each plan with a stub port."""
 
     def __init__(
         self,
@@ -218,74 +220,99 @@ class PolicyDnsService:
             rrset.ttl = min(rrset.ttl, int(expires - released))
 
 
-class _Stub(asyncio.DatagramProtocol):
+class _UdpListener(asyncio.DatagramProtocol):
+    def __init__(self, stub: _Stub) -> None:
+        self.stub = stub
+        self.transport: asyncio.DatagramTransport | None = None
+        self.released = asyncio.Event()
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        self.transport = cast(asyncio.DatagramTransport, transport)
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        self.transport = None
+        self.released.set()
+
+    def datagram_received(self, data: bytes, addr: ClientAddress) -> None:
+        self.stub.receive_udp(self, data, addr)
+
+
+class _Stub:
     def __init__(self, service: PolicyDnsService, plan: PolicyPlan) -> None:
         self.service = service
         self.plan = plan
-        self._udp: asyncio.DatagramTransport | None = None
-        self._tcp: asyncio.Server | None = None
+        self._udp: list[_UdpListener] = []
+        self._tcp: list[asyncio.Server] = []
         self._udp_tasks: set[asyncio.Task[None]] = set()
         self._tcp_tasks: set[asyncio.Task[None]] = set()
         self._generation = 0
         self._closed = False
-        self._udp_released = asyncio.Event()
 
     async def open(self, port: int) -> None:
         loop = asyncio.get_running_loop()
+
+        def new_listener() -> _UdpListener:
+            listener = _UdpListener(self)
+            self._udp.append(listener)
+            return listener
+
         try:
-            await loop.create_datagram_endpoint(lambda: self, local_addr=(_LISTEN_ADDRESS, port))
-            self._tcp = await asyncio.start_server(self._accept_tcp, _LISTEN_ADDRESS, port)
+            for address in _LISTEN_ADDRESSES:
+                try:
+                    await loop.create_datagram_endpoint(new_listener, local_addr=(address, port))
+                except OSError as exc:
+                    if address != "::1" or exc.errno not in _IPV6_UNAVAILABLE:
+                        raise
+                    log.debug("IPv6 loopback unavailable for DNS stub on port %d: %s", port, exc)
+                    continue
+                self._tcp.append(await asyncio.start_server(self._accept_tcp, address, port))
         except BaseException:
             await self.close()
             raise
 
     async def close(self) -> None:
         self._closed = True
-        udp = self._udp
-        if udp is not None:
-            udp.close()
-            self._udp = None
-        if self._tcp is not None:
-            self._tcp.close()
+        releases = []
+        for listener in self._udp:
+            transport = listener.transport
+            if transport is not None:
+                transport.close()
+                # On Python 3.11 the selector datagram transport subclasses
+                # BaseTransport rather than DatagramTransport.
+                if isinstance(transport, asyncio.BaseTransport):
+                    releases.append(listener.released)
+        for server in self._tcp:
+            server.close()
         self.cancel_queries()
         await asyncio.gather(*self._udp_tasks, *self._tcp_tasks, return_exceptions=True)
-        if self._tcp is not None:
-            await self._tcp.wait_closed()
-        # Not DatagramTransport: on Python 3.11 the selector datagram
-        # transport does not subclass it.
-        if isinstance(udp, asyncio.BaseTransport):
-            # ``close()`` only releases the socket on a later loop iteration.
-            # Wait for it, so a restart (e.g. on a target change) can bind the
-            # port again at once instead of failing with EADDRINUSE.
-            try:
-                await asyncio.wait_for(self._udp_released.wait(), _UDP_RELEASE_TIMEOUT)
-            except TimeoutError:
-                log.warning("DNS stub UDP socket was not released within %ss", _UDP_RELEASE_TIMEOUT)
+        await asyncio.gather(*(server.wait_closed() for server in self._tcp))
+        # UDP sockets close on a later loop iteration. Wait so a restart can
+        # bind the same port in both families without racing socket release.
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(released.wait() for released in releases)), _UDP_RELEASE_TIMEOUT
+            )
+        except TimeoutError:
+            log.warning("DNS stub UDP sockets were not released within %ss", _UDP_RELEASE_TIMEOUT)
 
     def cancel_queries(self) -> None:
         self._generation += 1
         for task in self._udp_tasks | self._tcp_tasks:
             task.cancel()
 
-    def connection_made(self, transport: asyncio.BaseTransport) -> None:
-        self._udp = cast(asyncio.DatagramTransport, transport)
-
-    def connection_lost(self, exc: Exception | None) -> None:
-        self._udp_released.set()
-
-    def datagram_received(self, data: bytes, addr: ClientAddress) -> None:
-        if len(self._udp_tasks) < _MAX_UDP_QUERIES:
-            task = asyncio.create_task(self._reply_udp(data, addr))
+    def receive_udp(self, listener: _UdpListener, data: bytes, addr: ClientAddress) -> None:
+        if not self._closed and len(self._udp_tasks) < _MAX_UDP_QUERIES:
+            task = asyncio.create_task(self._reply_udp(listener, data, addr))
             self._udp_tasks.add(task)
             task.add_done_callback(self._udp_tasks.discard)
 
-    async def _reply_udp(self, data: bytes, addr: ClientAddress) -> None:
+    async def _reply_udp(self, listener: _UdpListener, data: bytes, addr: ClientAddress) -> None:
         reply = await self.answer(data, tcp=False)
-        if reply is not None and self._udp is not None:
-            self._udp.sendto(reply, addr)
+        if reply is not None and not self._closed and listener.transport is not None:
+            listener.transport.sendto(reply, addr)
 
     def _accept_tcp(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        if len(self._tcp_tasks) >= _MAX_TCP_CLIENTS:
+        if self._closed or len(self._tcp_tasks) >= _MAX_TCP_CLIENTS:
             writer.close()
             return
         task = asyncio.create_task(self._reply_tcp(reader, writer))

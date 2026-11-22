@@ -19,7 +19,11 @@ class AppManager:
 
     async def bind(self, policy_id: int, policy: Policy, groups: Sequence[AppGroup]) -> AppBinding:
         if not policy.apps:
-            binding = AppBinding(policy_id, any_process=bool(policy.domains))
+            paths: tuple[str, ...] = ()
+            if policy.domains:
+                self.cgroups.create(policy_id)
+                paths = (policy_cgroup(policy_id),)
+            binding = AppBinding(policy_id, cgroup_paths=paths, any_process=bool(policy.domains))
         else:
             self.cgroups.create(policy_id)
             group_map = {group.name: group.apps for group in groups}

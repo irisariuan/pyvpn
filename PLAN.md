@@ -180,7 +180,7 @@ drives.
 ```
 process ── in cgroup pyvpn.slice/p-<id>, or matched by uid / unit cgroup
    │
-   ├─ DNS (port 53) ──► nft redirect ─► per-policy stub 127.0.0.1:53<id>
+   ├─ DNS (port 53) ──► nft redirect ─► per-policy stub on IPv4/IPv6 loopback
    │                                     resolves via the policy's interface,
    │                                     fills dest sets before replying
    │
@@ -194,9 +194,70 @@ process ── in cgroup pyvpn.slice/p-<id>, or matched by uid / unit cgroup
                                    + higher-metric unreachable default (link-loss guard)
                                  | unreachable default               (kill switch)
                                  | no policy lookup for that mark    (fall back to host routing)
-              ──► nft postrouting: masquerade marked traffic to the interface's address
+              ──► nft postrouting: verify egress, then masquerade to the interface's address
                     (the source address was chosen for the default route before re-routing)
 ```
+
+Linux backend details (stream C, `netfilter/`, `routing/`,
+`platform/linux/backend.py`):
+
+* Chains: `dns` (nat, output, prio -100) redirects port 53 first, so a mark
+  set later never hides an app's query; only packets whose *socket* already
+  carries a pyvpn mark (the stubs' upstream sockets, `SO_MARK`) skip it.
+  `output` (route, prio -90) exempts LAN/loopback/multicast, leaves
+  socket-marked packets alone, enforces the current leak and routing rules
+  of the policy recorded in conntrack, then classifies unmarked connections
+  by their app and destination.
+  `egress` (postrouting) checks marked packets against the actual outgoing
+  interface for their policy and address family. It drops packets on a
+  different interface and drops all marked packets for an unreachable
+  family. `masq` masquerades mark P out of P's interface; `restore`
+  (prerouting) copies the conntrack mark back onto replies.
+* Marks are written as `mark & ~POLICY_MARK_MASK | P`, so bits other
+  software uses survive. A kill-switch policy's traffic is rejected in nft
+  *and* hits the unreachable table; it is never marked for another route.
+* DoT and known-DoH rejects apply to every packet of the policy's apps (they
+  bypass the stub); IPv6 and QUIC rejects apply to the traffic the policy
+  governs (everything, or only its destination sets).
+* The ruleset is built as nft JSON (golden-tested) and loaded as rendered
+  nft script text in one `nft -f -` transaction (`add`/`delete`/`add table`):
+  nft 1.0.9 (Ubuntu 24.04) cannot parse `socket cgroupv2` in JSON.
+* Apply and teardown temporarily reject marked output in a separate nft
+  table, update the policy routes and rules, then replace the classifier and
+  remove the guard in one nft transaction. A failed update restores the
+  previous routes and rules before lifting the guard, provided this daemon
+  previously installed a plan successfully. If recovery fails or startup
+  cannot install its first plan, the guard remains until a successful apply.
+  A plan referring to a missing cgroup is rejected before changing rules.
+  Each `nft` command has a deadline. The backend terminates a stalled
+  command and waits briefly for it to exit. After a final-batch timeout, it
+  reads the kernel's tables once the command has exited. The same atomic
+  batch replaces the classifier and removes the guard, so a retained guard
+  permits rollback and a verified commit keeps the new routes. If the
+  outcome cannot be verified, the backend keeps the matching routes or the
+  guard already in the kernel and recovers by reapplying under a fresh
+  guard. It waits for the old command to exit before issuing further nft
+  commands, and holds DNS destination updates until routing is recovered.
+* `socket cgroupv2` rules hold the cgroup ID nft resolved at load time. If
+  a policy cgroup or its parent slice is recreated, Linux placement
+  reinstalls the last plan, including learned destinations, before moving
+  the PID. The move writes into the exact installed cgroup, and a failed
+  reinstall or a further cgroup replacement refuses placement. The backend
+  also polls for cgroups recreated outside placement. A dedicated chain
+  rejects unknown children of the installed `pyvpn.slice` before the LAN
+  exemption. Domain-only policies register their placement cgroups while
+  continuing to match all user processes. Before the app watcher starts
+  placing processes in top-level exclusion cgroups (PR #33), the backend
+  must recognize those installed cgroups in this check and track their IDs.
+* Policies for every process (`any_process`) also require `meta skuid`, so
+  kernel sockets are never marked: a WireGuard endpoint inside a
+  destination set cannot loop the tunnel's own packets into it. A
+  userspace VPN client is an ordinary process and still needs to stay out
+  of the destination sets.
+* `apply` turns on `net.ipv4.conf.all.src_valid_mark` (as `wg-quick` does)
+  so strict `rp_filter` validates replies with their restored mark; it is
+  left on at teardown. A kernel booted without IPv6 gets IPv4 rules and
+  routes only.
 
 ### 3.1 Interfaces (targets)
 
@@ -245,10 +306,68 @@ Fail-back hold and the latency-based selection are ported from snake's
 | systemd unit / slice | `unit: transmission-daemon.service` | match its existing cgroup path; nothing is moved |
 | user | `uid: 1001`, `user: torrent` | nft `meta skuid` |
 | Flatpak / Snap | `flatpak: org.mozilla.firefox` | its `app-flatpak-…scope` cgroup |
-| exclusions | `exclude_apps: [...]` | the same selectors; an excluded app never matches |
+| exclusions | `exclude_apps: [...]` | the same selectors; an excluded app never matches (see below for policies without apps) |
 
 Already-open sockets keep their route; new connections follow the new
 cgroup (as in snake: "connections keep their route").
+
+Exclusions on a policy with destination rules and no apps (an
+`any_process` binding) exempt processes from that policy's marking. This
+is how a userspace VPN client (OpenVPN, a provider app) whose server
+address is in the policy's destination set keeps its encrypted packets on
+the normal route instead of looping them into the target. Kernel tunnels
+(WireGuard) need no exclusion: `any_process` matches only packets with a
+socket owner (`meta skuid`), which kernel sockets lack. The app manager
+reports exclusions in `AppBinding.exclude_cgroup_paths` and
+`exclude_uids`, and the backend skips a socket in one of those cgroups (or
+below it) or owned by one of those uids:
+
+- `unit`, `flatpak`, `snap`: their existing cgroup path; nothing is moved.
+- `uid`, `user`: `exclude_uids`.
+- `exe`, `name`: the watcher moves matching processes into
+  `pyvpn.slice/x-<hex>` (`constants.excluded_cgroup`), one cgroup per
+  distinct set of destination-only policies that exclude the process, and
+  each of those policies lists it. `<hex>` is the policy-id bitmask (bit
+  `id - 1`) in lowercase hex, so names are collision-free and at most
+  `EXCLUDED_NAME_MAX` (27) bytes: `x-9` for policies 1 and 4.
+  `constants.parse_excluded_cgroup` decodes a path back to its policy ids,
+  the app policy it is nested under, and its `socket cgroupv2` level. A
+  process that is also an app of policy Q goes to `pyvpn.slice/p-Q/x-<hex>`
+  instead, so policy Q still matches it. The backend only matches paths:
+  the app manager creates the cgroup, and moves a process into it only
+  after a binding that lists the path has been applied. Until then the
+  process is not exempt, which can loop its traffic but never sends a
+  policy's traffic out the default route.
+
+An `any_process` binding may also list the policy's own cgroup
+(`pyvpn.slice/p-<id>`) in `cgroup_paths`, so `pyvpn run` works for
+destination-only policies; it never lists other cgroups or `uids`.
+
+Two rules keep exclusions fail-closed:
+
+- **Positive matches only.** The backend tests exclusions with positive
+  matches (a socket in an excluded cgroup or owned by an excluded uid
+  returns before the policy's rules) and every other socket continues
+  through normal policy handling: target route, kill switch and DNS
+  redirect. A negated `socket cgroupv2 level N != …` is not used, because it
+  does not match a socket with no ancestor at depth N (for example one in a
+  shallower cgroup), which would leave that socket ungoverned.
+- **Revalidate on reload and restart.** An `x-<hex>` name is keyed by
+  policy positions, not selectors, so it survives a reload that changes the
+  selectors. After every config commit and at daemon start, the app manager
+  withholds every existing `x-*` path from `exclude_cgroup_paths` until it
+  has checked each live member against the committed exclusions. Members
+  that no longer match go to the cgroup for their new set, or back to the
+  cgroup they came from, before the path is published again. Until then
+  those members are governed by the policy like any other process.
+  Exclusion cgroups (top-level `pyvpn.slice/x-*` and nested
+  `pyvpn.slice/p-Q/x-*`) are known paths for the backend's stale-cgroup
+  check and cgroup-id reapplication, not stale policy cgroups. Listed
+  exclusion cgroups must exist when a plan is applied. The backend also
+  knows existing top-level `x-*` cgroups that no binding lists yet
+  (withheld during revalidation), so their members are governed instead of
+  rejected, and re-applies when one appears or disappears. A nested
+  `p-Q/x-*` passes the check only while `p-Q` is known.
 
 Policy names are unique. Reload, and a daemon restart, keep each policy
 that has used an app cgroup at the same position in the config (the
@@ -276,7 +395,8 @@ A policy with only apps sends **all** of their traffic through the target. A
 policy with apps **and** destination rules sends only the matched
 destinations (snake's domain rules, `asn:`, `cidr:`) through it. A policy
 with destination rules and no app selectors or exclusions applies those
-destinations to every process. The per-policy DNS stub scopes the active
+destinations to every process except those its `exclude_apps` match
+(§3.3). The per-policy DNS stub scopes the active
 rule matcher to its own policy and those global policies before matching the
 query name and its CNAME chain. A and AAAA answers, HTTPS/SVCB address hints,
 and additional addresses for referenced names go into the winning policy's
@@ -328,9 +448,11 @@ snake. snake's Domain VPN Routing importer is not ported (router-only).
 
 ### 3.5 Per-app DNS and leaks
 
-* Each policy gets its own stub (`127.0.0.1:53<id>`). nft redirects port 53
-  **from that policy's apps** to it, which also catches hard-coded `8.8.8.8`.
-  The stub listens on UDP and TCP. The composition root supplies the Linux
+* Each policy gets its own UDP and TCP stub on `127.0.0.1:53<id>` and, when
+  IPv6 loopback is available, `[::1]:53<id>`. nft redirects port 53 **from
+  that policy's apps** to loopback in the query's address family, which
+  also catches hard-coded resolvers. Both listeners use the same policy
+  and upstream settings. The composition root supplies the Linux
   socket factory, which binds upstream sockets to the target interface and
   sets the policy's mark before connecting so the policy's route and gateway
   apply. With no `dns_server`, the stub uses Quad9 at
@@ -347,7 +469,10 @@ snake. snake's Domain VPN Routing importer is not ported (router-only).
   routes. The daemon activates the new matcher before reopening listeners,
   so an answer cannot use the previous config's matching rules.
 * Other apps keep the system resolver. **pyvpn does not take over system
-  DNS.**
+  DNS.** If several destination-only policies match the same DNS query,
+  the first matching policy with a stub serves it. Its upstream depends on
+  that policy's target even when the matcher learns a destination for a
+  later policy.
 * Per-policy leak toggles (snake's): block DoT 853, block known DoH
   addresses, block QUIC, IPv6 `route`/`block`/`off`. A stub with
   `block_doh` answers Firefox's `use-application-dns.net` canary with NXDOMAIN.
@@ -489,8 +614,17 @@ policy as `not_installed`.
   `tests.ci.preflight` first: one clear message instead of test errors when
   the runner has no cgroup v2, no writable cgroup tree, no root or is missing
   one of the test-bed tools (`ip`, `nft`, `ping`, `openssl`, `unshare`). The
-  unit suite stays root-free because the marker is deselected
-  by default.
+  unit suite stays root-free because the marker is deselected by default.
+* **Linux backend integration (root on Linux):**
+  `sudo .venv/bin/python -m pytest -m integration tests/platform/test_linux_namespace.py`
+  applies real plans in a disposable namespace with dummy interfaces and
+  one throwaway cgroup, and checks by nft counters that the cgroup's traffic
+  leaves via the target, that nothing leaves after link loss or under the
+  kill switch, DNS redirection to the stub, and that teardown leaves nothing.
+  It also checks replies under strict `rp_filter`, a re-created cgroup, and
+  a WireGuard handshake to an endpoint inside a destination set.
+  Workers enter the namespace with `nsenter --net`, not `ip netns exec`,
+  which remounts `/sys` and hides the cgroup tree.
 * **Standalone DNS integration (root on Linux):**
   `sudo .venv/bin/python -m pytest -m integration tests/dns/test_namespace.py`
   exercises the stubs with two DNS peers in disposable namespaces. It checks
@@ -504,10 +638,11 @@ policy as `not_installed`.
 * **Moving running processes** between cgroups can fight systemd scopes.
   Prefer `pyvpn run` / transient scopes; use the exe watcher only where
   configured.
-* **VPN apps with their own kill switches** (their own nft tables, or
-  `ip rule` that sends everything into the tunnel) can override us. Use our
-  own table, rule priorities below theirs where possible, and document the
-  ranges. `pyvpn audit` detects competing rules.
+* **Competing VPN rules** can win before a pyvpn policy lookup. The
+  postrouting filter drops traffic that still carries a managed mark and
+  would leave through another interface. An explicit fallback to the host
+  route or an unmanaged address family is exempt from this check. Other
+  VPN kill switches can still block traffic.
 * **Interface flaps**: the device route can disappear before the daemon sees
   the link event. Keep a higher-metric, device-independent `unreachable`
   default in each active policy table so the kernel stops there even if the

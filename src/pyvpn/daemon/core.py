@@ -36,6 +36,7 @@ log = logging.getLogger(__name__)
 ConfigLoader = Callable[[], Config]
 NOT_INSTALLED = "not_installed"  # PolicyStatus.route when no rules are installed
 AuditFn = Callable[[], Awaitable[Any]]
+PlacePidFn = Callable[[int, int, Callable[[], None]], Awaitable[None]]
 
 
 class Daemon:
@@ -49,6 +50,7 @@ class Daemon:
         dns: DnsService | None = None,
         matcher_factory: RuleMatcherFactory | None = None,
         audit: AuditFn | None = None,
+        place_policy_pid: PlacePidFn | None = None,
         # Required: the enabled flag and cgroup reservations must survive a
         # restart. Pass ``None`` only to opt out explicitly (tests).
         store: StateStore | None,
@@ -62,6 +64,7 @@ class Daemon:
         self._dns = dns
         self._matcher_factory = matcher_factory
         self._audit = audit
+        self._place_policy_pid = place_policy_pid
         self._store = store
         self._teardown_on_stop = teardown_on_stop
         self.reconciler = Reconciler(backend, dns)
@@ -192,7 +195,7 @@ class Daemon:
             slots = old_slots | {
                 pid: policy.name
                 for pid, policy in enumerate(config.policies, start=1)
-                if policy.apps or staged[pid].cgroup_paths
+                if policy.apps or (staged[pid].cgroup_paths and not staged[pid].any_process)
             }
             if slots != old_slots:
                 self._save_state(enabled=enabled, slots=slots)
@@ -419,7 +422,7 @@ class Daemon:
                 # The caller may have exited while waiting for the lock.
                 raise ApiError("forbidden", "cannot verify that the calling process still exists")
             pid = self._resolve_policy(p.policy)
-            await self._place_locked(p.pid, pid)
+            await self._place_locked(p.pid, pid, peer=peer)
         return {"policy_id": pid}
 
     def report_watcher_error(self, name: str, reason: str) -> None:
@@ -437,7 +440,9 @@ class Daemon:
             self._resolve_policy(policy_id)
             await self._place_locked(pid, policy_id)
 
-    async def _place_locked(self, pid: int, policy_id: int) -> None:
+    async def _place_locked(
+        self, pid: int, policy_id: int, *, peer: PeerCred | None = None
+    ) -> None:
         """Move ``pid`` into ``policy_id``'s cgroup if its rules govern it.
 
         Caller holds ``_config_lock``."""
@@ -457,7 +462,17 @@ class Daemon:
         if policy_id not in self._cgroup_policy_names:
             name = self.config.policies[policy_id - 1].name
             self._save_state(enabled=True, slots=self._cgroup_policy_names | {policy_id: name})
-        await self._apps.place_pid(pid, policy_id)
+
+        def verify_peer() -> None:
+            # Recheck after a placement that needed to wait for kernel rules.
+            if peer is not None and peer.uid != 0 and not peer.same_process_alive():
+                raise ApiError("forbidden", "cannot verify that the calling process still exists")
+
+        if self._place_policy_pid is None:
+            verify_peer()
+            await self._apps.place_pid(pid, policy_id)
+        else:
+            await self._place_policy_pid(pid, policy_id, verify_peer)
 
     def _resolve_policy(self, ref: str | int) -> int:
         n = len(self.config.policies)

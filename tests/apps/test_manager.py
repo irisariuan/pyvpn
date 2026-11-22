@@ -22,6 +22,8 @@ async def test_domain_only_policy_is_any_process(tmp_path: Path) -> None:
     policy = Policy(name="p", targets=("t",), domains=("example.com",))
     binding = await manager.bind(1, policy, ())
     assert binding.any_process
+    assert binding.cgroup_paths == ("pyvpn.slice/p-1",)
+    assert (tmp_path / "pyvpn.slice/p-1").is_dir()
 
 
 async def test_group_uid_is_in_binding(tmp_path: Path) -> None:

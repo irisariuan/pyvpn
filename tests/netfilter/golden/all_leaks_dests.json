@@ -1,0 +1,1193 @@
+{
+  "nftables": [
+    {
+      "add": {
+        "table": {
+          "family": "inet",
+          "name": "pyvpn"
+        }
+      }
+    },
+    {
+      "delete": {
+        "table": {
+          "family": "inet",
+          "name": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "table": {
+          "family": "inet",
+          "name": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "set": {
+          "auto-merge": true,
+          "elem": [
+            {
+              "prefix": {
+                "addr": "0.0.0.0",
+                "len": 8
+              }
+            },
+            {
+              "prefix": {
+                "addr": "10.0.0.0",
+                "len": 8
+              }
+            },
+            {
+              "prefix": {
+                "addr": "127.0.0.0",
+                "len": 8
+              }
+            },
+            {
+              "prefix": {
+                "addr": "169.254.0.0",
+                "len": 16
+              }
+            },
+            {
+              "prefix": {
+                "addr": "172.16.0.0",
+                "len": 12
+              }
+            },
+            {
+              "prefix": {
+                "addr": "192.168.0.0",
+                "len": 16
+              }
+            },
+            {
+              "prefix": {
+                "addr": "224.0.0.0",
+                "len": 4
+              }
+            },
+            "255.255.255.255"
+          ],
+          "family": "inet",
+          "flags": [
+            "interval"
+          ],
+          "name": "lan_v4",
+          "table": "pyvpn",
+          "type": "ipv4_addr"
+        }
+      }
+    },
+    {
+      "add": {
+        "set": {
+          "auto-merge": true,
+          "elem": [
+            "::1",
+            {
+              "prefix": {
+                "addr": "fc00::",
+                "len": 7
+              }
+            },
+            {
+              "prefix": {
+                "addr": "fe80::",
+                "len": 10
+              }
+            },
+            {
+              "prefix": {
+                "addr": "ff00::",
+                "len": 8
+              }
+            }
+          ],
+          "family": "inet",
+          "flags": [
+            "interval"
+          ],
+          "name": "lan_v6",
+          "table": "pyvpn",
+          "type": "ipv6_addr"
+        }
+      }
+    },
+    {
+      "add": {
+        "set": {
+          "auto-merge": true,
+          "elem": [
+            "1.0.0.1",
+            "1.0.0.2",
+            "1.0.0.3",
+            "1.1.1.1",
+            "1.1.1.2",
+            "1.1.1.3",
+            "8.8.4.4",
+            "8.8.8.8",
+            "9.9.9.9",
+            "9.9.9.10",
+            "9.9.9.11",
+            {
+              "prefix": {
+                "addr": "45.90.28.0",
+                "len": 24
+              }
+            },
+            {
+              "prefix": {
+                "addr": "45.90.30.0",
+                "len": 24
+              }
+            },
+            "94.140.14.14",
+            "94.140.15.15",
+            "149.112.112.10",
+            "149.112.112.11",
+            "149.112.112.112",
+            "208.67.220.220",
+            "208.67.222.222"
+          ],
+          "family": "inet",
+          "flags": [
+            "interval"
+          ],
+          "name": "doh_v4",
+          "table": "pyvpn",
+          "type": "ipv4_addr"
+        }
+      }
+    },
+    {
+      "add": {
+        "set": {
+          "auto-merge": true,
+          "elem": [
+            "2001:4860:4860::8844",
+            "2001:4860:4860::8888",
+            "2606:4700:4700::1001",
+            "2606:4700:4700::1111",
+            "2620:fe::9",
+            "2620:fe::fe",
+            "2620:119:35::35",
+            "2620:119:53::53",
+            "2a10:50c0::ad1:ff",
+            "2a10:50c0::ad2:ff"
+          ],
+          "family": "inet",
+          "flags": [
+            "interval"
+          ],
+          "name": "doh_v6",
+          "table": "pyvpn",
+          "type": "ipv6_addr"
+        }
+      }
+    },
+    {
+      "add": {
+        "set": {
+          "auto-merge": true,
+          "elem": [
+            "198.51.100.7",
+            {
+              "prefix": {
+                "addr": "203.0.113.0",
+                "len": 24
+              }
+            }
+          ],
+          "family": "inet",
+          "flags": [
+            "interval"
+          ],
+          "name": "p1_v4",
+          "table": "pyvpn",
+          "type": "ipv4_addr"
+        }
+      }
+    },
+    {
+      "add": {
+        "set": {
+          "auto-merge": true,
+          "elem": [
+            {
+              "prefix": {
+                "addr": "2001:db8::",
+                "len": 32
+              }
+            },
+            "2001:db8:1::5"
+          ],
+          "family": "inet",
+          "flags": [
+            "interval"
+          ],
+          "name": "p1_v6",
+          "table": "pyvpn",
+          "type": "ipv6_addr"
+        }
+      }
+    },
+    {
+      "add": {
+        "chain": {
+          "family": "inet",
+          "hook": "output",
+          "name": "dns",
+          "policy": "accept",
+          "prio": -100,
+          "table": "pyvpn",
+          "type": "nat"
+        }
+      }
+    },
+    {
+      "add": {
+        "chain": {
+          "family": "inet",
+          "hook": "output",
+          "name": "output",
+          "policy": "accept",
+          "prio": -90,
+          "table": "pyvpn",
+          "type": "route"
+        }
+      }
+    },
+    {
+      "add": {
+        "chain": {
+          "family": "inet",
+          "hook": "postrouting",
+          "name": "egress",
+          "policy": "accept",
+          "prio": 0,
+          "table": "pyvpn",
+          "type": "filter"
+        }
+      }
+    },
+    {
+      "add": {
+        "chain": {
+          "family": "inet",
+          "hook": "postrouting",
+          "name": "masq",
+          "policy": "accept",
+          "prio": 100,
+          "table": "pyvpn",
+          "type": "nat"
+        }
+      }
+    },
+    {
+      "add": {
+        "chain": {
+          "family": "inet",
+          "hook": "prerouting",
+          "name": "restore",
+          "policy": "accept",
+          "prio": -150,
+          "table": "pyvpn",
+          "type": "filter"
+        }
+      }
+    },
+    {
+      "add": {
+        "chain": {
+          "family": "inet",
+          "name": "check_cgroup",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "chain": {
+          "family": "inet",
+          "name": "p1",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "chain": {
+          "family": "inet",
+          "name": "p1_route",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "dns",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "&": [
+                    {
+                      "meta": {
+                        "key": "mark"
+                      }
+                    },
+                    4294901760
+                  ]
+                },
+                "op": "==",
+                "right": 1348009984
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "dns",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "socket": {
+                    "key": "cgroupv2",
+                    "level": 2
+                  }
+                },
+                "op": "==",
+                "right": "pyvpn.slice/p-1"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "set": [
+                    "tcp",
+                    "udp"
+                  ]
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "th"
+                  }
+                },
+                "op": "==",
+                "right": 53
+              }
+            },
+            {
+              "redirect": {
+                "port": 5301
+              }
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "output",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "socket": {
+                    "key": "cgroupv2",
+                    "level": 1
+                  }
+                },
+                "op": "==",
+                "right": "pyvpn.slice"
+              }
+            },
+            {
+              "jump": {
+                "target": "check_cgroup"
+              }
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "check_cgroup",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "socket": {
+                    "key": "cgroupv2",
+                    "level": 2
+                  }
+                },
+                "op": "==",
+                "right": "pyvpn.slice/p-1"
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "check_cgroup",
+          "expr": [
+            {
+              "reject": {
+                "expr": "admin-prohibited",
+                "type": "icmpx"
+              }
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "output",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "daddr",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "@lan_v4"
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "output",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "daddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": "@lan_v6"
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "output",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "&": [
+                    {
+                      "meta": {
+                        "key": "mark"
+                      }
+                    },
+                    4294901760
+                  ]
+                },
+                "op": "==",
+                "right": 1348009984
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "output",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "&": [
+                    {
+                      "ct": {
+                        "key": "mark"
+                      }
+                    },
+                    4294901887
+                  ]
+                },
+                "op": "==",
+                "right": 1348009985
+              }
+            },
+            {
+              "jump": {
+                "target": "p1"
+              }
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "output",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "socket": {
+                    "key": "cgroupv2",
+                    "level": 2
+                  }
+                },
+                "op": "==",
+                "right": "pyvpn.slice/p-1"
+              }
+            },
+            {
+              "jump": {
+                "target": "p1"
+              }
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "p1",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "set": [
+                    "tcp",
+                    "udp"
+                  ]
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "th"
+                  }
+                },
+                "op": "==",
+                "right": 853
+              }
+            },
+            {
+              "reject": {
+                "expr": "admin-prohibited",
+                "type": "icmpx"
+              }
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "p1",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "daddr",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "@doh_v4"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "set": [
+                    "tcp",
+                    "udp"
+                  ]
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "th"
+                  }
+                },
+                "op": "==",
+                "right": 443
+              }
+            },
+            {
+              "reject": {
+                "expr": "admin-prohibited",
+                "type": "icmpx"
+              }
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "p1",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "daddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": "@doh_v6"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "set": [
+                    "tcp",
+                    "udp"
+                  ]
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "th"
+                  }
+                },
+                "op": "==",
+                "right": 443
+              }
+            },
+            {
+              "reject": {
+                "expr": "admin-prohibited",
+                "type": "icmpx"
+              }
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "p1",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "&": [
+                    {
+                      "ct": {
+                        "key": "mark"
+                      }
+                    },
+                    4294901887
+                  ]
+                },
+                "op": "==",
+                "right": 1348009985
+              }
+            },
+            {
+              "goto": {
+                "target": "p1_route"
+              }
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "p1",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "daddr",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "@p1_v4"
+              }
+            },
+            {
+              "goto": {
+                "target": "p1_route"
+              }
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "p1",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "daddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": "@p1_v6"
+              }
+            },
+            {
+              "goto": {
+                "target": "p1_route"
+              }
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "p1_route",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "nfproto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6"
+              }
+            },
+            {
+              "reject": {
+                "expr": "admin-prohibited",
+                "type": "icmpx"
+              }
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "p1_route",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "udp"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "th"
+                  }
+                },
+                "op": "==",
+                "right": 443
+              }
+            },
+            {
+              "reject": {
+                "expr": "admin-prohibited",
+                "type": "icmpx"
+              }
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "p1_route",
+          "expr": [
+            {
+              "mangle": {
+                "key": {
+                  "meta": {
+                    "key": "mark"
+                  }
+                },
+                "value": {
+                  "|": [
+                    {
+                      "&": [
+                        {
+                          "meta": {
+                            "key": "mark"
+                          }
+                        },
+                        65408
+                      ]
+                    },
+                    1348009985
+                  ]
+                }
+              }
+            },
+            {
+              "mangle": {
+                "key": {
+                  "ct": {
+                    "key": "mark"
+                  }
+                },
+                "value": {
+                  "|": [
+                    {
+                      "&": [
+                        {
+                          "ct": {
+                            "key": "mark"
+                          }
+                        },
+                        65408
+                      ]
+                    },
+                    1348009985
+                  ]
+                }
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "egress",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "&": [
+                    {
+                      "meta": {
+                        "key": "mark"
+                      }
+                    },
+                    4294901887
+                  ]
+                },
+                "op": "==",
+                "right": 1348009985
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "nfproto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv4"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "oifname"
+                  }
+                },
+                "op": "!=",
+                "right": "wg-jp"
+              }
+            },
+            {
+              "drop": null
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "egress",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "&": [
+                    {
+                      "meta": {
+                        "key": "mark"
+                      }
+                    },
+                    4294901887
+                  ]
+                },
+                "op": "==",
+                "right": 1348009985
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "nfproto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6"
+              }
+            },
+            {
+              "drop": null
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "masq",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "&": [
+                    {
+                      "meta": {
+                        "key": "mark"
+                      }
+                    },
+                    4294901887
+                  ]
+                },
+                "op": "==",
+                "right": 1348009985
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "oifname"
+                  }
+                },
+                "op": "==",
+                "right": "wg-jp"
+              }
+            },
+            {
+              "masquerade": null
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "restore",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "&": [
+                    {
+                      "ct": {
+                        "key": "mark"
+                      }
+                    },
+                    4294901887
+                  ]
+                },
+                "op": "==",
+                "right": 1348009985
+              }
+            },
+            {
+              "mangle": {
+                "key": {
+                  "meta": {
+                    "key": "mark"
+                  }
+                },
+                "value": {
+                  "|": [
+                    {
+                      "&": [
+                        {
+                          "meta": {
+                            "key": "mark"
+                          }
+                        },
+                        65408
+                      ]
+                    },
+                    1348009985
+                  ]
+                }
+              }
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    }
+  ]
+}

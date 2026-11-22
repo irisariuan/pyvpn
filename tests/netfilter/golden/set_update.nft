@@ -1,0 +1,2 @@
+add element inet pyvpn p4_v4 { 198.51.100.7, 203.0.113.0/24 }
+add element inet pyvpn p4_v6 { 2001:db8::/32, 2001:db8:1::5 }

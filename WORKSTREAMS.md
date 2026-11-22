@@ -39,7 +39,7 @@ every stream that uses it.
 | File | Contents |
 |---|---|
 | `pyproject.toml`, ruff, mypy, pytest config, CI skeleton | M0 scaffold so every stream runs the same checks |
-| `src/pyvpn/constants.py` | fwmark range, table ids (`1000+id`), `ip rule` prefs (`5200+id`), cgroup root `pyvpn.slice`, stub port base `53<id>`, nft table name, socket path |
+| `src/pyvpn/constants.py` | fwmark range, table ids (`1000+id`), `ip rule` prefs (`5200+id`), cgroup root `pyvpn.slice` (policy cgroups `p-<id>`, exclusion cgroups `x-<hex>`), stub port base `53<id>`, nft table name, socket path |
 | `src/pyvpn/config/models.py` | pydantic models for PLAN.md §5: `Target`, `AppSelector`, `AppGroup`, `Policy`, `LeakSettings`, `Settings`, `Config` (fields only; validation details can follow) |
 | `src/pyvpn/state.py` | runtime data passed **between** streams (frozen dataclasses, see below) |
 | `src/pyvpn/platform/base.py` | `Backend` protocol + `Capabilities` flags |
@@ -63,6 +63,10 @@ class AppBinding:            # produced by E (apps)
     policy_id: int
     cgroup_paths: tuple[str, ...]   # e.g. "pyvpn.slice/p-3", "app-flatpak-…scope"
     uids: tuple[int, ...]
+    any_process: bool               # destination-only policy: every user process
+                                    # (cgroup_paths may then hold only its own p-<id>)
+    exclude_cgroup_paths: tuple[str, ...]  # any_process only: exempt (positive match)
+    exclude_uids: tuple[int, ...]          # any_process only: exempt these uids
 
 @dataclass(frozen=True)
 class DestSet:               # produced by F (DNS answers) and G (asn:/cidr:)
@@ -136,7 +140,7 @@ code needed.
 
 ### E — Apps
 - **Owns:** `src/pyvpn/apps/`
-- **Builds:** cgroup v2 manager (`pyvpn.slice/p-<id>`), selectors (exe / name / unit / uid / flatpak / snap / exclusions / groups), proc-connector process watcher with startup `/proc` scan, `pyvpn run` launcher (asks the daemon to place its PID, then `exec`), netns launcher for `isolation: netns`.
+- **Builds:** cgroup v2 manager (`pyvpn.slice/p-<id>`, exclusion cgroups `pyvpn.slice/x-<hex>`), selectors (exe / name / unit / uid / flatpak / snap / exclusions / groups, including exclusions on destination-only policies, PLAN.md §3.3), proc-connector process watcher with startup `/proc` scan, `pyvpn run` launcher (asks the daemon to place its PID, then `exec`), netns launcher for `isolation: netns`.
 - **Tests against:** fake `/proc` trees and a temp cgroup directory; fake daemon for `pyvpn run`.
 - **Done when:** M3's criterion is met — a started process lands in the right cgroup within 50 ms and its children follow.
 
