@@ -17,37 +17,36 @@ which picks a tunnel per *device* on a router.
 
 ## Status
 
-Early development. Nothing described below as a command works yet; the CLI
-currently only prints its version. Work follows the milestones in
-[PLAN.md §7](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md#7-milestones):
+**Alpha (0.0.x): pyvpn does not route traffic yet.** The CLI, configuration
+validation and rule tools work. The routing daemon and the Linux backend
+that installs the nft rules and routes are still being built (see
+[PLAN.md §7](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md#7-milestones)
+for milestones). Do not rely on it for privacy yet.
 
-| | Milestone |
-|---|---|
-| M0 | Scaffold, CI, PyPI Trusted Publishing |
-| M1 | Core app routing: daemon, cgroups, `pyvpn run`, nft marks, policy tables, kill switch |
-| M2 | Targets: netlink watcher, interface patterns, gateways, ordered fallback, probes |
-| M3 | App selectors (exe, name, unit, uid, Flatpak) and process watcher |
-| M4 | Per-app DNS and leak protection, `pyvpn audit` |
-| M5 | Destination filters (snake's rule language, ASN/CIDR) |
-| M7 | netns isolation, `pyvpn install` (systemd), `--json`: **v0.1 release** |
-
-**Linux only** (cgroup v2 required). macOS, Windows and proxy mode (M6, M8,
-M9) are deferred.
+**Linux only**, and it needs cgroup v2. macOS and Windows are not supported.
 
 ## Install
 
-Not released yet. It will be published on PyPI as **`snakevpn`** (`pyvpn` is
-taken there); the import package and command are `pyvpn`. Python ≥ 3.11.
-
 ```bash
-pip install snakevpn   # planned
+pip install snakevpn
 pyvpn --version
 ```
 
-## Configuration (planned)
+The PyPI package is **`snakevpn`**; the command and the Python import are
+`pyvpn`. Requires Python 3.11 or newer.
 
-Targets are interfaces (or patterns); policies map apps to an ordered list of
-targets. From [PLAN.md §5](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md#5-configuration-sketch), shortened:
+Optional extras:
+
+- `snakevpn[doh]`: DNS over HTTPS upstreams (`dns_protocol: "doh"`).
+- `snakevpn[re2]`: needed for regex rules in destination filters. Without
+  it, regex rules are refused.
+
+## Configuration
+
+The config is JSON, read from `/etc/pyvpn/config.json` by default. Set
+`PYVPN_CONFIG` or pass `--config` to use another file. **Targets** are
+interfaces (exact names or patterns such as `tun*`); **policies** map apps
+to an ordered list of targets:
 
 ```json
 {
@@ -66,68 +65,91 @@ targets. From [PLAN.md §5](https://github.com/irisariuan/pyvpn/blob/main/PLAN.m
 }
 ```
 
-`on_down` is `default` (fall back to the normal route) or `block` (kill
-switch), tried after every target in the list is down.
+- Targets are tried in order. `on_down` decides what happens once every
+  target in the list is down: `default` (use the normal route) or `block`
+  (kill switch).
+- Each app selector uses exactly one of `exe`, `name`, `unit`, `uid`,
+  `user`, `flatpak` or `snap`. Reusable lists go in `app_groups` and are
+  referenced as `"group:<name>"`.
+- A policy needs `apps`, `domains` or both. With only `apps`, all of their
+  traffic uses the target. With both, only the matched destinations do.
+  With only `domains`, those destinations use the target for every process.
+  `domains` uses snake's rule syntax (domain rules, `asn:`, `cidr:`).
 
-## Commands (planned)
+The full schema is in
+[PLAN.md §5](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md#5-configuration-sketch).
+
+Check a config before using it:
+
+```bash
+pyvpn test /etc/pyvpn/config.json     # prints "ok" or the validation failure
+pyvpn policy --config /etc/pyvpn/config.json
+```
+
+## Commands
+
+These work today without the daemon:
+
+```bash
+pyvpn test [config]                        # validate a config and its rules
+pyvpn policy [name] [--config FILE]        # show configured policies
+pyvpn rules check FILE                     # validate a destination rule file
+pyvpn rules test FILE NAME...              # show which rule matches a DNS name
+pyvpn rules import FILE                    # convert a foreign list to snake rules
+pyvpn rules export POLICY [--config FILE]  # print a policy's rules
+pyvpn install [--scope user]               # print the systemd unit (--write to install it)
+pyvpn desktop --policy NAME                # print a .desktop launcher for a policy
+```
+
+These talk to the root daemon over `/run/pyvpn/pyvpn.sock`. Until the daemon
+ships they exit with `cannot contact pyvpn daemon`:
 
 ```bash
 pyvpn run -p "Japan browsing" -- firefox   # start an app inside a policy
 pyvpn status                               # policies, active targets
 pyvpn apps                                 # live PID → policy → interface
 pyvpn audit                                # what each policy does and does not protect
-pyvpn rules check example.rules            # validate destination rules (snake format)
-pyvpn install                              # systemd unit for the daemon
+pyvpn reload                               # re-read the config
 pyvpn disable                              # remove all pyvpn rules and routes
 ```
 
-`pyvpn rules` also has `test`, `import` and `export` subcommands.
+Add `--json` before the command (`pyvpn --json status`) for machine-readable
+output.
 
 ## How it works
 
 - A small **root daemon** owns nft, routes and cgroups. The CLI and
-  `pyvpn run` run unprivileged and talk to it over a **unix socket**; `run`
+  `pyvpn run` run unprivileged and talk to it over a **unix socket**. `run`
   asks the daemon to put its own PID in the policy's cgroup, then `exec`s
-  the command.
+  the command, so the app keeps your environment and desktop session.
 - Apps are identified by cgroup v2 (`pyvpn.slice/p-<id>`, systemd units,
-  Flatpak scopes) or by uid. An nft `output` chain matches them with
-  `socket cgroupv2` (cgroups) or `meta skuid` (uids) and sets a **fwmark**;
-  an **`ip rule`** sends that mark
-  to a per-policy routing table (`default dev <iface>`, or `unreachable` for
-  the kill switch). Marked traffic is masqueraded to the interface's address.
-- A **netlink** watcher reconciles as soon as an interface goes up or down,
-  with no polling.
-- Each policy gets its own DNS stub; port 53 from that policy's apps is
-  redirected to it and resolved through the policy's interface. System DNS
-  is left alone.
+  Flatpak scopes) or by uid. An nft `output` chain matches them and sets a
+  **fwmark**; an **`ip rule`** sends that mark to a per-policy routing table
+  (`default dev <iface>`, or `unreachable` for the kill switch).
+- A **netlink** watcher switches targets as soon as an interface goes up or
+  down, with no polling.
+- Each policy gets its own DNS stub, resolved through the policy's
+  interface, so DNS follows the app. System DNS is left alone.
+- pyvpn **fails closed**: with `on_down: block`, traffic is dropped while
+  rules change, never sent out the default route.
 
-All Linux-specific code sits behind the `Backend` protocol in
-`src/pyvpn/platform/base.py` (using `pyroute2`), so other OSes can be added
-later. Details: [PLAN.md §3](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md#3-how-it-works).
+Details: [PLAN.md §3](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md#3-how-it-works).
 
 ## Development
 
 ```bash
+git clone https://github.com/irisariuan/pyvpn && cd pyvpn
 pip install -e '.[dev]'
 ruff check . && ruff format --check .
 mypy src
-pytest                         # unit tests, no root, never touch the host network
-```
-
-Once the Linux network-namespace suite lands ([PLAN.md §8](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md#8-testing)),
-integration tests run as root with:
-
-```bash
-sudo pytest -m integration
+pytest                         # unit tests: no root, never touch the host network
 ```
 
 Before contributing, read:
 
 - [PLAN.md](https://github.com/irisariuan/pyvpn/blob/main/PLAN.md): design, scope and milestones (source of truth)
-- [WORKSTREAMS.md](https://github.com/irisariuan/pyvpn/blob/main/WORKSTREAMS.md): which workstream owns which directory,
-  and the shared Phase 0 contracts
-- [AGENTS.md](https://github.com/irisariuan/pyvpn/blob/main/AGENTS.md): working rules (fail closed, test rules, commits,
-  branch names)
+- [WORKSTREAMS.md](https://github.com/irisariuan/pyvpn/blob/main/WORKSTREAMS.md): which workstream owns which directory
+- [AGENTS.md](https://github.com/irisariuan/pyvpn/blob/main/AGENTS.md): working rules (fail closed, test rules, commits, branch names)
 
 ## License
 
