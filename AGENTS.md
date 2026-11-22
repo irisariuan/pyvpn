@@ -55,7 +55,7 @@ Once the M0 scaffold exists (see PLAN.md §7):
 ruff check . && ruff format --check .
 mypy src
 pytest            # unit tests, no root
-sudo pytest -m integration   # netns integration tests (Linux, root)
+sudo .venv/bin/python -m pytest -m integration   # netns integration tests (Linux, root)
 ```
 
 Run lint, types and unit tests before committing.

@@ -163,7 +163,7 @@ pytest                         # unit tests: no root, never touch the host netwo
 Network-namespace integration tests run as root on Linux:
 
 ```bash
-sudo pytest -m integration
+sudo .venv/bin/python -m pytest -m integration
 ```
 
 CI runs the same command on every pull request; the unit suite above never

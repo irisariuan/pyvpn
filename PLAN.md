@@ -477,17 +477,19 @@ policy as `not_installed`.
   identifies the egress interface. The fixture creates every part of it and
   removes both namespaces on teardown; nothing outside them is touched.
   Tests launch processes inside "host" with `netbed.run`, take links down and
-  up with `netbed.down("vpn")` / `netbed.up("vpn")`, and read the egress
-  interface from `netbed.tcp_echo()`, `netbed.udp_echo()` and
-  `netbed.dns_query()`: the internet-side services started by
-  `netbed.services()` reply with the source address they observed.
-  Run the root suite with `sudo pytest -m integration`; CI runs the same
-  command on every pull request in the `integration` job (ubuntu-24.04,
-  Python 3.12), which remounts cgroups v2 read-write and runs
+  up with `netbed.down("vpn")` / `netbed.up("vpn")` (an admin-down drops the
+  device's routes; `up` restores the ones the bed saw), and read the egress
+  interface from the source address the internet-side services recorded:
+  `netbed.tcp_echo()` and `netbed.udp_echo()` return it directly, and
+  `netbed.dns_query()` returns the A record, so DNS egress comes from
+  `services.peers("dns")`.
+  Run the root suite with `sudo .venv/bin/python -m pytest -m integration`;
+  CI runs the same suite on every pull request in the `integration` job
+  (ubuntu-24.04, Python 3.12), which remounts cgroups v2 read-write and runs
   `tests.ci.preflight` first: one clear message instead of test errors when
   the runner has no cgroup v2, no writable cgroup tree, no root or is missing
-  one of the test-bed tools (`ip`, `nft`, `ping`, `openssl`, `sysctl`,
-  `unshare`). The unit suite stays root-free because the marker is deselected
+  one of the test-bed tools (`ip`, `nft`, `ping`, `openssl`, `unshare`). The
+  unit suite stays root-free because the marker is deselected
   by default.
 * **Standalone DNS integration (root on Linux):**
   `sudo .venv/bin/python -m pytest -m integration tests/dns/test_namespace.py`
