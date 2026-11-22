@@ -66,7 +66,7 @@ It is the client-side counterpart of
 | **Policy** | A named rule: a set of apps, an ordered list of targets, and what to do when every target is down. |
 | **App selector** | How a policy finds its apps: launched with `pyvpn run`, executable path or name, systemd unit, uid or user, Flatpak or Snap ID. |
 | **`on_down`** | Used after every target in the list is down: `default` falls back to the normal route, `block` drops the traffic (kill switch). |
-| **Usable target** | The link is up and has an address (and, with `"gateway": "auto"`, a gateway). Reachability probes are planned. |
+| **Usable target** | The link is up and has an address (and, with `"gateway": "auto"`, a gateway). A target with `"probe": true` must also pass TCP probes sent through its interface. |
 | **Destination filter** | Optional domain, `asn:` or `cidr:` rules (snake's rule language) that limit a policy to matching destinations; `drop:` rules block a destination for the policy's apps. |
 
 ### Target types
@@ -140,7 +140,7 @@ name interfaces; policies map apps to an ordered list of targets. The
 |---|---|---|
 | `interface` | target | Interface name or pattern (`tun*`). |
 | `gateway` | target | An address, or `"auto"` to require a discovered next hop. |
-| `probe` | target | *Not supported yet:* a target with `true` stays unusable. |
+| `probe` | target | `true`: usable only while TCP probes to `settings.probe_targets`, sent through the interface every `settings.probe_interval` seconds, succeed (down after 2 failures in a row, up after 2 successes). |
 | `targets` | policy | Target names in priority order. The first usable one wins. |
 | `on_down` | policy | `default` or `block`. |
 | `apps` | policy | App selectors or `group:<name>`. |

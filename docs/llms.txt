@@ -2,7 +2,7 @@
 
 > pyvpn is per-process policy routing for Linux. It sends each app's traffic and DNS out through a chosen, already-existing network interface (wg-jp, tun0, wlan1, ...), with fallback to another interface or the default route, or a kill switch. It does not create or manage VPN connections. Status: alpha (0.0.x); `pyvpn-daemon` routes traffic on Linux, not yet audited. PyPI package: snakevpn. Command and import package: pyvpn. Python >= 3.11, Linux with cgroup v2. License: GPL-3.0-or-later.
 
-Some configuration options are not supported yet (target probes, `isolation: netns`, `asn:` rules); see the usage guide's "Not supported yet" section.
+Some configuration options are not supported yet (`isolation: netns`, `asn:` rules); see the usage guide's "Not supported yet" section.
 
 ## Docs
 
