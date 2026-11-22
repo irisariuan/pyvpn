@@ -1,0 +1,360 @@
+"""Composition root and ``pyvpn-daemon`` entry point (WORKSTREAMS.md Phase 2).
+
+Wires the real parts of every workstream into one :class:`Daemon`:
+
+- C: the platform backend (``pyvpn.platform.linux.backend.LinuxBackend``),
+  or the development-only :class:`DryRunBackend`;
+- D: :class:`NetlinkTargetWatcher`;
+- E: :class:`AppManager` over :class:`CgroupManager`, plus the
+  :class:`ProcessWatcher` that places matching processes as they start;
+- F: :class:`PolicyDnsService` with upstream sockets bound by
+  :func:`bound_dns_socket`, and :func:`audit_dns` for ``pyvpn audit``;
+- G: :func:`matcher_factory` with an on-disk ASN cache;
+- A: configuration loading.
+
+If the Linux backend is not part of the installed package, the daemon refuses
+to start (fail closed): it never runs as if it were routing when it is not.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import importlib
+import logging
+import signal
+import sys
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from pyvpn import __version__
+from pyvpn.apps.cgroups import CgroupManager
+from pyvpn.apps.manager import AppManager
+from pyvpn.apps.watcher import Place, ProcessWatcher
+from pyvpn.audit import audit_dns
+from pyvpn.config import ConfigError, default_config_path, load_config
+from pyvpn.config.models import Config
+from pyvpn.constants import SOCKET_PATH, STATE_DIR
+from pyvpn.daemon.core import Daemon
+from pyvpn.daemon.dryrun import DryRunBackend, describe_policy
+from pyvpn.daemon.persistence import StateError, StateStore
+from pyvpn.daemon.server import ApiError
+from pyvpn.dns.service import PolicyDnsService
+from pyvpn.dns.upstream import BoundUpstream
+from pyvpn.match.asn import AsnCache
+from pyvpn.match.policy import matcher_factory
+from pyvpn.platform.base import Backend
+from pyvpn.platform.linux.dns import bound_dns_socket
+from pyvpn.platform.linux.netlink import NetlinkEventSource, NetlinkTargetWatcher
+
+log = logging.getLogger("pyvpn.daemon")
+
+BACKENDS = ("linux", "dry-run")
+LINUX_BACKEND_MODULE = "pyvpn.platform.linux.backend"
+LINUX_BACKEND_CLASS = "LinuxBackend"
+SYSTEM_CGROUP_ROOT = Path("/sys/fs/cgroup")
+
+
+class BackendUnavailable(RuntimeError):
+    """The requested platform backend cannot be loaded."""
+
+
+def load_backend(name: str) -> Backend:
+    """Return the backend called ``name``; raise :class:`BackendUnavailable`."""
+    if name == "dry-run":
+        return DryRunBackend()
+    if name != "linux":
+        raise BackendUnavailable(f"unknown backend {name!r}; choose one of {', '.join(BACKENDS)}")
+    try:
+        module = importlib.import_module(LINUX_BACKEND_MODULE)
+    except ModuleNotFoundError as exc:
+        if exc.name != LINUX_BACKEND_MODULE:
+            raise
+        raise BackendUnavailable(
+            "the Linux routing backend is not part of this build "
+            f"({LINUX_BACKEND_MODULE} is missing), so nothing can be routed; refusing "
+            "to start. Use --backend dry-run to run the daemon without routing."
+        ) from exc
+    backend_class = getattr(module, LINUX_BACKEND_CLASS, None)
+    if backend_class is None:
+        raise BackendUnavailable(f"{LINUX_BACKEND_MODULE} does not define {LINUX_BACKEND_CLASS}")
+    backend: Backend = backend_class()
+    return backend
+
+
+@dataclass(frozen=True)
+class Options:
+    config_path: Path
+    socket_path: Path = Path(SOCKET_PATH)
+    state_dir: Path = Path(STATE_DIR)
+    backend: str = "linux"
+    cgroup_root: Path | None = None  # None: /sys/fs/cgroup, or a scratch dir for dry-run
+    process_watcher: bool | None = None  # None: on, except for dry-run
+
+    @property
+    def dry_run(self) -> bool:
+        return self.backend == "dry-run"
+
+    def resolved_cgroup_root(self) -> Path:
+        if self.cgroup_root is not None:
+            return self.cgroup_root
+        # A dry run must not move real processes between cgroups.
+        return self.state_dir / "cgroup-dry-run" if self.dry_run else SYSTEM_CGROUP_ROOT
+
+    def watch_processes(self) -> bool:
+        return (not self.dry_run) if self.process_watcher is None else self.process_watcher
+
+
+class ProcessWatcherRunner:
+    """Run one :class:`ProcessWatcher` for the committed config.
+
+    The watcher's selectors come from the config, so it is replaced every time
+    the daemon commits a config (startup and reload). The replacement scans
+    ``/proc`` again, so no running app is missed across a reload.
+    """
+
+    def __init__(self, place: Place) -> None:
+        self._place = place
+        self._watcher: ProcessWatcher | None = None
+        self._task: asyncio.Task[None] | None = None
+
+    def update(self, config: Config) -> None:
+        self._stop_current()
+        watcher = ProcessWatcher(config.policies, self._place, groups=config.app_groups)
+        self._watcher = watcher
+        self._task = asyncio.ensure_future(self._run(watcher))
+        self._task.set_name("pyvpn-process-watcher")
+
+    @staticmethod
+    async def _run(watcher: ProcessWatcher) -> None:
+        try:
+            await watcher.run_proc_connector()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("process watcher failed; new processes are no longer placed")
+
+    def _stop_current(self) -> None:
+        if self._watcher is not None:
+            self._watcher.stop()
+        if self._task is not None:
+            self._task.cancel()
+
+    async def close(self) -> None:
+        task = self._task
+        self._stop_current()
+        self._watcher = self._task = None
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@dataclass
+class Assembly:
+    """The daemon and the parts the composition root still owns."""
+
+    daemon: Daemon
+    backend: Backend
+    dns: PolicyDnsService
+    apps: AppManager
+    process_watcher: ProcessWatcherRunner | None
+
+    async def close(self) -> None:
+        if self.process_watcher is not None:
+            await self.process_watcher.close()
+
+
+def build_daemon(
+    options: Options,
+    *,
+    backend: Backend,
+    config: Config | None = None,
+    netlink: NetlinkEventSource | None = None,
+) -> Assembly:
+    """Build the daemon from the real parts. Opens state files, nothing else.
+
+    ``config`` (the startup config) is loaded from ``options.config_path``
+    when not given; the target watcher needs its targets up front, since
+    reload cannot change targets.
+    """
+    if config is None:
+        config = load_config(options.config_path)
+    state_dir = options.state_dir
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    apps = AppManager(CgroupManager(options.resolved_cgroup_root()))
+    targets = NetlinkTargetWatcher(config.targets, netlink)
+
+    daemon: Daemon | None = None
+
+    def active_matcher() -> Any:
+        # Late-bound: the DNS service is built before the daemon.
+        if daemon is None:
+            raise RuntimeError("daemon not built yet")
+        return daemon.active_matcher()
+
+    dns = PolicyDnsService(
+        BoundUpstream(bound_dns_socket),
+        alias_path=state_dir / "dns-aliases.sqlite3",
+        matcher_factory=active_matcher,
+    )
+
+    async def audit() -> dict[str, Any]:
+        if daemon is None:
+            raise RuntimeError("daemon not built yet")
+        return audit_report(daemon, dns, options.backend)
+
+    daemon = Daemon(
+        config_loader=lambda: load_config(options.config_path),
+        backend=backend,
+        targets=targets,
+        apps=apps,
+        dns=dns,
+        matcher_factory=matcher_factory(AsnCache(state_dir / "asn")),
+        audit=audit,
+        store=StateStore(state_dir / "state.json"),
+        socket_path=options.socket_path,
+    )
+
+    runner: ProcessWatcherRunner | None = None
+    if options.watch_processes():
+        runner = ProcessWatcherRunner(apps.place_pid)
+        daemon.on_config = runner.update
+    return Assembly(daemon=daemon, backend=backend, dns=dns, apps=apps, process_watcher=runner)
+
+
+def audit_report(daemon: Daemon, dns: PolicyDnsService, backend_name: str) -> dict[str, Any]:
+    """The ``audit`` API result: backend, enabled state and per-policy DNS checks."""
+    reconciler = daemon.reconciler
+    plan = reconciler.plan()
+    names = [policy.name for policy in daemon.config.policies] if reconciler.config else []
+    warnings: list[str] = []
+    if backend_name == "dry-run":
+        warnings.append("dry-run backend: no traffic is routed or blocked")
+    if reconciler.last_error:
+        warnings.append(reconciler.last_error)
+    policies: list[str] = []
+    dns_checks: dict[str, str] = {}
+    for policy in plan.policies if plan is not None else ():
+        pid = policy.policy_id
+        name = names[pid - 1] if pid <= len(names) else str(pid)
+        policies.append(f"{name}: {describe_policy(policy)}")
+        result = audit_dns(policy, listening=dns.is_listening(pid))
+        dns_checks[name] = result.upstream_problem or f"via {result.upstream_interface}"
+    return {
+        "enabled": reconciler.enabled,
+        "backend": backend_name,
+        "policies": policies,
+        "dns": dns_checks,
+        "warnings": warnings,
+    }
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="pyvpn-daemon", description="pyvpn root daemon (per-process policy routing)"
+    )
+    parser.add_argument("--version", action="version", version=f"pyvpn-daemon {__version__}")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="configuration JSON (default: $PYVPN_CONFIG or /etc/pyvpn/config.json)",
+    )
+    parser.add_argument("--socket", type=Path, default=Path(SOCKET_PATH), help="API socket path")
+    parser.add_argument("--state-dir", type=Path, default=Path(STATE_DIR), help="state directory")
+    parser.add_argument(
+        "--backend",
+        choices=BACKENDS,
+        default="linux",
+        help="routing backend; dry-run logs plans and routes NOTHING (development only)",
+    )
+    parser.add_argument(
+        "--cgroup-root",
+        type=Path,
+        default=None,
+        help="cgroup v2 mount (default /sys/fs/cgroup; a scratch dir with --backend dry-run)",
+    )
+    watcher = parser.add_mutually_exclusive_group()
+    watcher.add_argument(
+        "--process-watcher",
+        dest="process_watcher",
+        action="store_true",
+        default=None,
+        help="place matching processes as they start (default, except with dry-run)",
+    )
+    watcher.add_argument("--no-process-watcher", dest="process_watcher", action="store_false")
+    parser.add_argument(
+        "--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR")
+    )
+    return parser
+
+
+def options_from_args(args: argparse.Namespace) -> Options:
+    return Options(
+        config_path=args.config if args.config is not None else default_config_path(),
+        socket_path=args.socket,
+        state_dir=args.state_dir,
+        backend=args.backend,
+        cgroup_root=args.cgroup_root,
+        process_watcher=args.process_watcher,
+    )
+
+
+async def serve(assembly: Assembly) -> int:
+    """Start the daemon, handle signals and wait until it stops."""
+    daemon = assembly.daemon
+    loop = asyncio.get_running_loop()
+    pending: set[asyncio.Task[None]] = set()
+
+    def later(coro: Any) -> None:
+        task = asyncio.ensure_future(coro)
+        pending.add(task)
+        task.add_done_callback(pending.discard)
+
+    async def reload() -> None:
+        try:
+            await daemon.reload()
+            log.info("configuration reloaded")
+        except Exception as exc:
+            log.error("reload failed, previous configuration stays in force: %s", exc)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, lambda: later(daemon.stop()))
+    loop.add_signal_handler(signal.SIGHUP, lambda: later(reload()))
+    try:
+        try:
+            await daemon.start()
+        except (ConfigError, ApiError, StateError, OSError) as exc:
+            log.error("cannot start: %s", exc)
+            return 1
+        await daemon.wait_stopped()
+        return 0
+    finally:
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            loop.remove_signal_handler(sig)
+        await assembly.close()
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    logging.basicConfig(level=args.log_level, format="%(levelname)s %(name)s: %(message)s")
+    options = options_from_args(args)
+    try:
+        backend = load_backend(options.backend)
+    except BackendUnavailable as exc:
+        print(f"pyvpn-daemon: {exc}", file=sys.stderr)
+        return 2
+    if options.dry_run:
+        log.warning("running with the dry-run backend: NO traffic is routed or blocked")
+    try:
+        assembly = build_daemon(options, backend=backend)
+    except (ConfigError, OSError) as exc:
+        print(f"pyvpn-daemon: {exc}", file=sys.stderr)
+        return 1
+    return asyncio.run(serve(assembly))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -31,6 +31,7 @@ dev = [
 
 [project.scripts]
 pyvpn = "pyvpn.cli:main"
+pyvpn-daemon = "pyvpn.daemon.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pyvpn"]

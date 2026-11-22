@@ -42,6 +42,7 @@ _RESOLVE_TIMEOUT = 5.0
 _TCP_IDLE_TIMEOUT = 10.0
 _MAX_UDP_QUERIES = 256
 _MAX_TCP_CLIENTS = 256
+_UDP_RELEASE_TIMEOUT = 2.0
 _LISTEN_ADDRESS = "127.0.0.1"
 _MAX_ALIAS_ORIGINS = 4096
 _ALIAS_PATH = Path(STATE_DIR) / "dns-aliases.sqlite3"
@@ -227,6 +228,7 @@ class _Stub(asyncio.DatagramProtocol):
         self._tcp_tasks: set[asyncio.Task[None]] = set()
         self._generation = 0
         self._closed = False
+        self._udp_released = asyncio.Event()
 
     async def open(self, port: int) -> None:
         loop = asyncio.get_running_loop()
@@ -239,8 +241,9 @@ class _Stub(asyncio.DatagramProtocol):
 
     async def close(self) -> None:
         self._closed = True
-        if self._udp is not None:
-            self._udp.close()
+        udp = self._udp
+        if udp is not None:
+            udp.close()
             self._udp = None
         if self._tcp is not None:
             self._tcp.close()
@@ -248,6 +251,14 @@ class _Stub(asyncio.DatagramProtocol):
         await asyncio.gather(*self._udp_tasks, *self._tcp_tasks, return_exceptions=True)
         if self._tcp is not None:
             await self._tcp.wait_closed()
+        if isinstance(udp, asyncio.DatagramTransport):
+            # ``close()`` only releases the socket on a later loop iteration.
+            # Wait for it, so a restart (e.g. on a target change) can bind the
+            # port again at once instead of failing with EADDRINUSE.
+            try:
+                await asyncio.wait_for(self._udp_released.wait(), _UDP_RELEASE_TIMEOUT)
+            except TimeoutError:
+                log.warning("DNS stub UDP socket was not released within %ss", _UDP_RELEASE_TIMEOUT)
 
     def cancel_queries(self) -> None:
         self._generation += 1
@@ -256,6 +267,9 @@ class _Stub(asyncio.DatagramProtocol):
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self._udp = cast(asyncio.DatagramTransport, transport)
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        self._udp_released.set()
 
     def datagram_received(self, data: bytes, addr: ClientAddress) -> None:
         if len(self._udp_tasks) < _MAX_UDP_QUERIES:

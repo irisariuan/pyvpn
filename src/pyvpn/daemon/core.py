@@ -78,6 +78,9 @@ class Daemon:
         # Failures of the target/app watchers: they do not recover, so they
         # stay in ``status`` (an apply succeeding later does not clear them).
         self._watcher_errors: dict[str, str] = {}
+        # Called with each config once it is committed (startup and reload),
+        # e.g. so the composition root can refresh its process watcher.
+        self.on_config: Callable[[Config], None] | None = None
 
     @property
     def config(self) -> Config:
@@ -222,6 +225,11 @@ class Daemon:
             for pid in range(len(config.policies) + 1, len(old.policies) + 1):
                 with contextlib.suppress(Exception):
                     await self._apps.unbind(pid)
+        if self.on_config is not None:
+            try:
+                self.on_config(config)
+            except Exception:
+                log.exception("on_config hook failed")
 
     def _check_supported(self, config: Config) -> None:
         """Refuse configs this daemon cannot enforce, before anything changes.
