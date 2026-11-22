@@ -25,8 +25,10 @@ Names are compared lowercase without the trailing dot.
 
 from __future__ import annotations
 
+# mypy resolves this stdlib-private module differently per host: Linux says
+# import-not-found, macOS says import-untyped and calls the other code unused.
 import re
-import re._parser as sre_parse  # type: ignore[import-not-found]
+import re._parser as sre_parse  # type: ignore[import-not-found, import-untyped, unused-ignore]
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Protocol
