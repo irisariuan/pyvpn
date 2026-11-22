@@ -610,6 +610,10 @@ policy as `not_installed`.
   `netbed.tcp_echo()` and `netbed.udp_echo()` return it directly, and
   `netbed.dns_query()` returns the A record, so DNS egress comes from
   `services.peers("dns")`.
+  `tests/integration/test_daemon.py` starts `pyvpn-daemon` in "host" and
+  asserts that a process placed with `pyvpn run` leaves via the policy
+  target, an unplaced one keeps the WAN, and `on_down: block` drops placed
+  traffic once the target goes down.
   Run the root suite with `sudo .venv/bin/python -m pytest -m integration`;
   CI runs the same suite on every pull request in the `integration` job
   (ubuntu-24.04, Python 3.12), which remounts cgroups v2 read-write and runs
