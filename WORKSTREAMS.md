@@ -154,7 +154,7 @@ code needed.
 
 ### I — Test bed, CI, release
 - **Owns:** `tests/integration/`, `tests/conftest.py` netns fixtures, `.github/workflows/`
-- **Builds:** pytest fixture that builds the namespace test bed from PLAN.md §8 ("host", "internet", veth WAN, fake VPN link), capture helpers ("which interface did this packet leave through?"), CI matrix (Linux, Python 3.11–3.13, plus a root job for netns tests), Trusted Publishing release workflow.
+- **Builds:** pytest fixture that builds the namespace test bed from PLAN.md §8 ("host", "internet", veth WAN, fake VPN link), capture helpers ("which interface did this packet leave through?"), CI matrix (Linux, Python 3.11–3.14, plus a root job for netns tests), Trusted Publishing release workflow.
 - **Done when:** other streams can write `def test_x(netbed): ...` and get a clean namespace setup with assertions on egress.
 - **Note:** small stream; whoever takes it can also take A or G.
 

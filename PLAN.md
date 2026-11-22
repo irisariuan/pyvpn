@@ -31,8 +31,13 @@ route, or blocks (kill switch).
   sock_diag, process-event connector), `dnspython` (DNS message parsing and
   serialization), and `pydantic` v2 (config). The `snakevpn[doh]` extra
   installs `aiohttp` for DNS over HTTPS.
-* Release: on a `v*` tag, GitHub Actions runs the tests, builds sdist and
-  wheel, and publishes with **PyPI Trusted Publishing** (no stored token).
+* Release: on a published `v*` GitHub Release, GitHub Actions runs the
+  tests, builds sdist and wheel, uploads them to TestPyPI, checks that the
+  files on TestPyPI have the same sha256 as that build, installs that
+  version back from TestPyPI and runs `pyvpn --version`, and only then
+  publishes the same files to PyPI, all with **Trusted Publishing** (no
+  stored token). A manual run of the workflow (from `main` only) stops
+  after the TestPyPI check. Publish runs never overlap.
 
 ## 2. Platforms: Linux, macOS, Windows
 
@@ -438,7 +443,7 @@ policy as `not_installed`.
 
 | # | Milestone | Done when |
 |---|---|---|
-| **M0** | Scaffold: pyproject, ruff, mypy, pytest, CI (3.11–3.13), Trusted Publishing workflow | `pip install snakevpn` from TestPyPI prints a version |
+| **M0** | Scaffold: pyproject, ruff, mypy, pytest, CI (3.11–3.14), Trusted Publishing workflow | `pip install snakevpn` from TestPyPI prints a version |
 | **M1** | **Core app routing**: daemon + unix socket, cgroup manager, `pyvpn run -p P -- cmd`, nft output chain with `socket cgroupv2` marks, per-policy table + `ip rule`, masquerade, LAN exemption, kill switch, clean teardown, `pyvpn disable` | in a netns test bed, `pyvpn run -p X -- curl` leaves via the target and plain `curl` via the default route; with the target down and `on_down: block`, nothing leaks |
 | **M2** | **Targets**: netlink watcher, interface patterns, gateway discovery for broadcast interfaces, ordered fallback, optional TCP probes / exit country | deleting and re-creating `tun0` switches the policy and switches back within 100 ms, with no leak in between |
 | **M3** | **Selectors + watcher**: exe/name/unit/uid/flatpak, proc-connector watcher, app groups, exclusions, `pyvpn apps` | a normally started `/usr/bin/foo` lands in its policy within 50 ms, and its children follow |
