@@ -145,7 +145,7 @@ name interfaces; policies map apps to an ordered list of targets. The
 | `on_down` | policy | `default` or `block`. |
 | `apps` | policy | App selectors or `group:<name>`. |
 | `domains` | policy | Optional destination filters. |
-| `isolation` | policy | *Not supported yet:* the daemon refuses `netns`. |
+| `isolation` | policy | `none`, or `netns`: `pyvpn run` starts the app in the policy's own network namespace. |
 | `leak` | policy | DNS and leak toggles; see [DNS and leak protection](#dns-and-leak-protection). |
 
 ## Commands
@@ -212,8 +212,12 @@ process ── in cgroup pyvpn.slice/p-<id>, or matched by uid / unit cgroup
 - `pyvpn audit` lists what each policy does and does not protect.
 - **Fail closed:** with `on_down: block`, traffic is dropped, never sent
   through the default route.
-- `isolation: netns`, which runs an app in its own network namespace, is
-  planned; the daemon refuses it for now.
+- **Strict isolation:** with `isolation: netns`, `pyvpn run` starts the app
+  in a network namespace whose only way out is a veth link that the host
+  forwards solely through the policy's target. DNS in the namespace goes to
+  the policy's stub, and the namespace has no IPv6. The kernel keeps
+  enforcing this if the daemon stops. See the
+  [usage guide](usage.md#isolated-apps-network-namespaces).
 
 ## Limitations and risks
 

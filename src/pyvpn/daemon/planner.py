@@ -68,7 +68,9 @@ def plan_policy(
         gateway, interface, target = None, None, None
         route = "unreachable" if policy.on_down == "block" else "main"
 
-    if policy.domains:
+    if policy.domains and policy.isolation != "netns":
+        # An isolated policy's domains are only drop: rules (the daemon
+        # refuses others): it governs every destination.
         plan_dests: DestSet | None = dests if dests is not None else DestSet(policy_id)
     else:
         plan_dests = None
@@ -91,6 +93,7 @@ def plan_policy(
         dns_stub_port=dns_stub_port(policy_id) if policy.leak.dns_via_target else None,
         target=target,
         drops=plan_drops,
+        isolation=policy.isolation,
     )
 
 

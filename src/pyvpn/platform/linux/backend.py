@@ -18,6 +18,11 @@ Kept in sync without the daemon:
 * On a kernel without IPv6 (``ipv6.disable=1``) only IPv4 rules and routes
   are installed; such a host has no IPv6 traffic to leak.
 
+Policies with ``isolation: netns`` also get a network namespace and veth
+pair (``platform.linux.netns``): created before the nft commit with
+forwarding off, let out only after the commit, and deleted before the
+table at teardown. ``spawn_isolated`` starts ``pyvpn run`` commands inside.
+
 The ruleset is loaded as nft script text rendered from the JSON builder:
 nft 1.0.9 cannot parse ``socket cgroupv2`` in JSON (see ``netfilter.render``).
 """
@@ -29,8 +34,9 @@ import contextlib
 import json
 import logging
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 from pyvpn.apps.cgroups import CgroupError, CgroupManager
@@ -45,7 +51,9 @@ from pyvpn.netfilter.ruleset import (
     build_set_update,
     build_teardown,
 )
-from pyvpn.platform.base import Capabilities
+from pyvpn.platform.base import Capabilities, IsolatedCommand
+from pyvpn.platform.linux.isolated import IsolatedChild, spawn_isolated
+from pyvpn.platform.linux.netns import NetnsManager
 from pyvpn.routing.apply import (
     PROC_SYS,
     Pyroute2Netlink,
@@ -177,6 +185,8 @@ class LinuxBackend:
         cgroup_root: Path = CGROUP_ROOT,
         proc_sys: Path = PROC_SYS,
         cgroup_poll: float = 0.5,
+        netns: NetnsManager | None = None,
+        nsexec: Sequence[str] | None = None,
     ) -> None:
         self._nft = nft or run_nft
         self._nft_tables = nft_tables or _list_nft_tables
@@ -184,6 +194,8 @@ class LinuxBackend:
         self._cgroup_root = cgroup_root
         self._proc_sys = proc_sys
         self._cgroup_poll = cgroup_poll
+        self._netns = netns or NetnsManager(proc_sys=proc_sys)
+        self._nsexec = nsexec
         self._known_state = False
         self._needs_recovery = False
         self._exiting_nft: asyncio.subprocess.Process | None = None
@@ -196,7 +208,7 @@ class LinuxBackend:
 
     @property
     def capabilities(self) -> Capabilities:
-        return Capabilities(transparent=True, per_app_dns=True)
+        return Capabilities(transparent=True, per_app_dns=True, netns=True)
 
     def _require_cgroups(self, plan: RoutingPlan) -> None:
         for policy in plan.policies:
@@ -266,10 +278,14 @@ class LinuxBackend:
                 tuple(r for r in routes.rules if r.version == 4),
                 tuple(r for r in routes.routes if r.version == 4),
             )
-        script = render(build_ruleset(plan, idle_exclusions=idle))
+        # Namespaces first: stale veths are cut off and new ones stay down
+        # with forwarding off until their forward rules are committed.
+        guard = await self._netns.prepare(plan)
+        script = render(build_ruleset(plan, idle_exclusions=idle, forwarding_guard=guard))
         self._enable_src_valid_mark()
         await _finish_transaction(self._replace(routes, script))
         self._plan, self._cgroup_ids = plan, ids
+        await self._netns.activate(plan)
 
     async def place_policy_pid(
         self, cgroups: CgroupManager, pid: int, policy_id: int, verify_peer: Callable[[], None]
@@ -307,6 +323,52 @@ class LinuxBackend:
 
             verify_peer()
             cgroups.place_pid(pid, policy_id, installed_id=installed_id)
+
+    async def spawn_isolated(
+        self,
+        cgroups: CgroupManager,
+        command: IsolatedCommand,
+        verify_peer: Callable[[], None],
+    ) -> IsolatedChild:
+        """Start a ``pyvpn run`` command inside the policy's namespace.
+
+        Refused unless the installed plan isolates the policy and its
+        namespace was let out by the last apply.
+        """
+        policy_id = command.policy_id
+        async with self._lock:
+            plan = self._plan
+            isolated = plan is not None and any(
+                p.policy_id == policy_id and p.isolation == "netns" for p in plan.policies
+            )
+            netns = self._netns.ready(policy_id)
+        if not isolated or netns is None:
+            raise CgroupError(f"the network namespace of policy {policy_id} is not installed")
+        return await spawn_isolated(
+            command,
+            netns=netns,
+            place=partial(self._place_isolated, cgroups, policy_id, verify_peer),
+            verify_peer=verify_peer,
+            helper=self._nsexec,
+        )
+
+    async def _place_isolated(
+        self,
+        cgroups: CgroupManager,
+        policy_id: int,
+        verify_peer: Callable[[], None],
+        pid: int,
+    ) -> None:
+        await self.place_policy_pid(cgroups, pid, policy_id, verify_peer)
+
+    async def close(self) -> None:
+        """Daemon shutdown: stop background work. Installed state stays."""
+        if self._watch is not None:
+            self._watch.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._watch
+            self._watch = None
+        await self._netns.close()
 
     def _start_watch(self) -> None:
         if self._watch is None or self._watch.done():
@@ -437,6 +499,8 @@ class LinuxBackend:
                 await self._watch
             self._watch = None
         async with self._lock:
+            # Cut namespaces off before their forward rules disappear.
+            await self._netns.teardown()
             await _finish_transaction(
                 self._replace(RoutePlan((), ()), render(build_teardown()), expect_table=False)
             )

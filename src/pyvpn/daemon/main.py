@@ -219,6 +219,9 @@ class Assembly:
     async def close(self) -> None:
         if self.process_watcher is not None:
             await self.process_watcher.close()
+        close = getattr(self.backend, "close", None)
+        if close is not None:
+            await close()  # background work only; installed rules stay
 
 
 def build_daemon(
@@ -241,6 +244,7 @@ def build_daemon(
 
     apps = AppManager(CgroupManager(options.resolved_cgroup_root()))
     route_and_place = getattr(backend, "place_policy_pid", None)
+    spawn_isolated = getattr(backend, "spawn_isolated", None)
     targets = NetlinkTargetWatcher(config.targets, netlink, settings=config.settings)
 
     daemon: Daemon | None = None
@@ -275,6 +279,9 @@ def build_daemon(
         audit=audit,
         place_policy_pid=(
             partial(route_and_place, apps.cgroups) if route_and_place is not None else None
+        ),
+        spawn_isolated=(
+            partial(spawn_isolated, apps.cgroups) if spawn_isolated is not None else None
         ),
         store=StateStore(state_dir / "state.json"),
         socket_path=options.socket_path,

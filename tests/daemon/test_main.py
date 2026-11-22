@@ -420,7 +420,7 @@ async def test_unenforceable_exclusion_is_refused(tmp_path: Path) -> None:
         await assembly.close()
 
 
-async def test_netns_isolation_is_refused_until_enforced(tmp_path: Path) -> None:
+async def test_netns_isolation_is_refused_by_the_dry_run_backend(tmp_path: Path) -> None:
     policy = {
         "name": "Strict",
         "targets": ["jp"],

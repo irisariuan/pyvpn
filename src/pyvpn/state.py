@@ -14,6 +14,7 @@ from pyvpn.constants import policy_cgroup
 
 IPAddress: TypeAlias = IPv4Address | IPv6Address
 RouteKind: TypeAlias = Literal["dev", "unreachable", "main"]
+Isolation: TypeAlias = Literal["none", "netns"]
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,9 @@ class PolicyPlan:
     # Destinations the policy's processes must not reach (``drop:`` rules,
     # ``DestSet.drop`` set). None: the policy has no drop rules.
     drops: DestSet | None = None
+    # "netns": the backend also keeps a network namespace for the policy whose
+    # only way out is its veth, forwarded like the policy's apps (PLAN.md §3.6).
+    isolation: Isolation = "none"
 
 
 @dataclass(frozen=True)

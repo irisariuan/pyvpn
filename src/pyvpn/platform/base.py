@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from pyvpn.state import DestSet, RoutingPlan
@@ -14,6 +15,10 @@ class Capabilities:
     user: bool = False
     proxy: bool = False
     per_app_dns: bool = False
+    # ``isolation: netns`` (PLAN.md §3.6): the backend keeps a network
+    # namespace for each policy plan with ``isolation="netns"`` and can start
+    # commands inside it (``IsolatedLauncher``).
+    netns: bool = False
 
 
 class Backend(Protocol):
@@ -31,3 +36,44 @@ class Backend(Protocol):
 
     async def teardown(self) -> None:
         """Remove everything pyvpn installed."""
+
+
+@dataclass(frozen=True, eq=False)
+class IsolatedCommand:
+    """``pyvpn run`` for an ``isolation: netns`` policy (PLAN.md §3.6).
+
+    The unprivileged client cannot enter a namespace the daemon owns, so the
+    daemon starts the command for it: inside the policy's namespace, with the
+    caller's credentials, environment, working directory and standard file
+    descriptors (0, 1 and 2 of ``client_pid``). ``client_pidfd`` pins the
+    caller's identity so its descriptors are never taken from a reused PID.
+    """
+
+    policy_id: int
+    argv: tuple[str, ...]
+    env: Mapping[str, str]
+    cwd: str
+    umask: int
+    uid: int
+    gid: int
+    client_pid: int
+    client_pidfd: int | None = field(default=None, repr=False)
+
+
+class IsolatedProcess(Protocol):
+    @property
+    def pid(self) -> int: ...
+
+    async def wait(self) -> int:
+        """Exit status as ``subprocess`` reports it (negative: killed by signal)."""
+
+
+class IsolatedLauncher(Protocol):
+    async def __call__(
+        self, command: IsolatedCommand, verify_peer: Callable[[], None]
+    ) -> IsolatedProcess:
+        """Start ``command`` once the policy's namespace is installed.
+
+        Raises when the namespace is not ready. ``verify_peer`` raises if the
+        caller exited; it is called before the command can run.
+        """

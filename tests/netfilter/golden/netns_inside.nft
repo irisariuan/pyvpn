@@ -1,0 +1,5 @@
+add table inet pyvpn_ns
+delete table inet pyvpn_ns
+add table inet pyvpn_ns
+add chain inet pyvpn_ns dns { type nat hook output priority -100; policy accept; }
+add rule inet pyvpn_ns dns meta l4proto { tcp, udp } th dport 53 redirect to :53

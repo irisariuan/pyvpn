@@ -589,6 +589,76 @@ host by a veth pair. Host-side rules forward that veth **only** to the
 policy's target, so the app cannot leak even if the pyvpn daemon dies. This
 works only for apps launched through `pyvpn run`.
 
+Design (implemented; `platform/linux/netns.py`, `platform/linux/isolated.py`,
+`apps/nsexec.py`):
+
+* **Namespace and veth.** `PolicyPlan.isolation = "netns"` makes the backend
+  keep `/run/netns/pyvpn-p<id>` (root-owned, so an unprivileged app inside
+  cannot change it) and a veth pair `pyvpn-h<id>` (host) / `pyvpn-n<id>`
+  (namespace) on `netns_subnet(id)`, a /30 of `198.18.128.0/17` (host `.1`,
+  namespace `.2`, default route via the host end). The namespace has no IPv6
+  (disabled in the namespace and on the host end; IPv6 is never forwarded),
+  whatever `leak.ipv6` says.
+* **Host rules.** Prerouting marks everything arriving on `pyvpn-h<id>` with
+  the policy's mark (packet and conntrack), so it uses the policy table and
+  the existing egress check and masquerade. A `forward` chain sends it to
+  `n<id>`: drop IPv6, other namespace subnets and port 53, apply the DoT /
+  DoH / QUIC toggles, then reject (route `unreachable`), allow only the
+  target interface (route `dev`), or allow any interface (route `main`,
+  `on_down: default`). Replies are accepted back to the veth; anything else
+  from or to the namespace range is dropped. An `iif pyvpn-h<id> lookup
+  <table>` rule (same priority as the fwmark rule, absent for route `main`)
+  keeps the namespace on the policy table (unreachable included) even if the
+  nft table is flushed. The namespace subnet is masqueraded on every
+  interface but its veth.
+* **Fail closed in every phase.** `prepare` runs before the nft commit: it
+  cuts off veths of policies that lost isolation (forwarding off, link down)
+  and creates new veths down with forwarding off. The route guard table also
+  drops everything forwarded from the namespace range while routes and rules
+  change. `activate` runs after the commit: host end up, subnet route in the
+  policy table, `iif` rule, then forwarding on. `teardown` deletes the veths
+  before the nft table. A failed commit therefore leaves a new namespace cut
+  off.
+* **Forwarding.** IPv4 forwarding is per input interface, and replies arrive
+  on the target, so `activate` turns forwarding on for each active target
+  (for route `main`: the main table's IPv4 default-route devices) that had it
+  off, records it in `/run/pyvpn/forwarding.json`, and turns it off when no
+  namespace needs it. The `forward` chain drops new connections arriving on
+  those interfaces, so the host does not become a router for them. Firewalls
+  with a dropping forward policy (Docker) also drop namespace traffic.
+* **DNS.** `table inet pyvpn_ns` inside the namespace redirects every port-53
+  packet (including to `127.0.0.53`) to the namespace's port 53, where the
+  daemon runs a relay (sockets created inside the namespace on a dedicated
+  thread) that forwards to the policy stub on `127.0.0.1:53<id>`. The stub
+  applies the policy as for any app, so `isolation: netns` requires
+  `dns_via_target: true`. Unix sockets cross namespaces: `nss-resolve`
+  bypasses the stub (as it does without isolation).
+* **Launch.** An unprivileged process cannot join a root-owned namespace, so
+  `pyvpn run` (`isolation: auto` asks the daemon via `status`) sends
+  `run_isolated` with argv, environment, cwd and umask. The daemon copies the
+  caller's fds 0–2 with `pidfd_getfd` through the pidfd taken at connect
+  time, starts `apps/nsexec.py` as root (`python -I`, stdlib only), places it
+  in `pyvpn.slice/p-<id>` (outside the daemon's unit, so stopping the daemon
+  does not kill it), then sends the spec. The helper joins the namespace
+  (checking its inode), drops to the caller's groups, gid and uid (verifying
+  no capabilities remain) and `exec`s. `pyvpn run` forwards signals to the
+  child's pidfd and waits with `wait_isolated`; it exits with the child's
+  status. The app has no controlling terminal (no job control). Each running
+  command holds one API connection (the server allows 64 at once).
+* **What the daemon refuses.** `isolation: netns` without `apps` (drop-only
+  domains would otherwise bind every process), without backend support,
+  with `domains` other than `drop:` rules (the namespace sends everything
+  through the target) or with `dns_via_target: false`. `drop:` rules apply:
+  `n<id>` rejects the policy's drop set first (IPv4; the namespace has no
+  IPv6), and the plan keeps `dests` = None. `place_pid` from the API is refused for such a
+  policy (a cgroup would be weaker); the process watcher still places
+  selector matches in the policy cgroup, which keeps the normal routing and
+  kill switch.
+* **Lifetime.** Namespaces survive daemon restarts (a new daemon adopts and
+  reconfigures them; apps inside keep running) and `disable` (apps are cut
+  off until `enable` attaches a new veth). A namespace whose policy no longer
+  asks for isolation is deleted on the next apply.
+
 ## 4. What carries over from snake
 
 | snake | pyvpn |
