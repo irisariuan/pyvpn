@@ -428,6 +428,16 @@ unprivileged: `run` asks the daemon over the unix socket to place its own
 PID in the policy's cgroup, then `exec`s the command, so the user's
 environment and desktop session are kept.
 
+The daemon runs as `pyvpn-daemon` (`src/pyvpn/daemon/main.py`, the composition
+root). It wires the real parts of every stream: the netlink target watcher,
+the cgroup app manager and process watcher, the DNS stubs with bound
+upstream sockets, and the rule matcher with its ASN cache. It loads the
+backend from `pyvpn.platform.linux.backend.LinuxBackend`. If that module is
+missing, the daemon refuses to start (fail closed). `--backend dry-run` logs
+each routing plan instead of installing it, for development without root.
+It routes nothing, keeps cgroups in a scratch directory and turns off the
+process watcher, and it is never the default.
+
 The daemon locks its socket's companion lock file before changing routing
 and holds the lock through shutdown. It binds the API socket during startup
 and begins serving requests after the initial install attempt.
