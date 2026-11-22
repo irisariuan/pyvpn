@@ -476,8 +476,11 @@ policy as `not_installed`.
   one service address reachable over either link, so a source address
   identifies the egress interface. The fixture creates every part of it and
   removes both namespaces on teardown; nothing outside them is touched.
-  Tests launch processes inside "host", delete and re-create links, and
-  assert by capture which interface the traffic and DNS left through.
+  Tests launch processes inside "host" with `netbed.run`, take links down and
+  up with `netbed.down("vpn")` / `netbed.up("vpn")`, and read the egress
+  interface from `netbed.tcp_echo()`, `netbed.udp_echo()` and
+  `netbed.dns_query()`: the internet-side services started by
+  `netbed.services()` reply with the source address they observed.
   Run the root suite with `sudo pytest -m integration`; CI runs the same
   command on every pull request in the `integration` job (ubuntu-24.04,
   Python 3.12). The unit suite stays root-free because the marker is
