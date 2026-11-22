@@ -242,7 +242,7 @@ class Daemon:
         - hostname rules need a stub to learn addresses, which only runs with
           ``dns_via_target`` (otherwise their traffic is never matched);
         - the target watcher is fixed at startup, so reload cannot change the
-          target definitions;
+          target definitions or the probe settings;
         - ``isolation: netns`` cannot be enforced yet, and placing such an app
           in an ordinary cgroup would silently give it weaker protection.
         """
@@ -268,6 +268,12 @@ class Daemon:
         if old is not None and old.targets != config.targets:
             raise ApiError(
                 "bad_request", "reload cannot change targets yet; restart the daemon instead"
+            )
+        if old is not None and old.settings != config.settings:
+            raise ApiError(
+                "bad_request",
+                "reload cannot change settings (probe_targets, probe_interval) yet; "
+                "restart the daemon instead",
             )
 
     def _validate_policy_slots(self, config: Config) -> None:

@@ -15,8 +15,10 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, M
 from ipaddress import ip_address
 from typing import Any, Protocol
 
-from pyvpn.config.models import Target
+from pyvpn.config.models import Settings, Target
 from pyvpn.state import IPAddress, TargetStatus
+from pyvpn.targets.health import ProbingTargetWatcher
+from pyvpn.targets.probes import Connector
 from pyvpn.targets.watcher import InterfaceSnapshot, SnapshotTargetWatcher
 
 _RT_TABLE_MAIN = 254
@@ -343,11 +345,33 @@ class NetlinkReader:
 
 
 class NetlinkTargetWatcher:
-    """``pyvpn.services.TargetWatcher`` backed by live Linux netlink state."""
+    """``pyvpn.services.TargetWatcher`` backed by live Linux netlink state.
 
-    def __init__(self, targets: Iterable[Target], reader: NetlinkEventSource | None = None) -> None:
+    Targets with ``probe: true`` are probed with ``settings.probe_targets``
+    every ``settings.probe_interval`` seconds over sockets bound to their
+    interface (``connect``, :func:`tcp_connect_bound` by default).
+    """
+
+    def __init__(
+        self,
+        targets: Iterable[Target],
+        reader: NetlinkEventSource | None = None,
+        *,
+        settings: Settings | None = None,
+        connect: Connector = tcp_connect_bound,
+    ) -> None:
         self._targets = tuple(targets)
         self._reader = reader or NetlinkReader()
+        self._settings = settings or Settings()
+        self._connect = connect
 
     def statuses(self) -> AsyncIterator[dict[str, TargetStatus]]:
-        return SnapshotTargetWatcher(self._targets, self._reader.events()).statuses()
+        if not any(target.probe for target in self._targets):
+            return SnapshotTargetWatcher(self._targets, self._reader.events()).statuses()
+        return ProbingTargetWatcher(
+            self._targets,
+            self._reader.events(),
+            connect=self._connect,
+            endpoints=self._settings.probe_targets,
+            interval=self._settings.probe_interval,
+        ).statuses()

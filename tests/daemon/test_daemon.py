@@ -798,6 +798,15 @@ async def test_reload_cannot_change_targets(rig: Rig) -> None:
     await rig.daemon.stop()
 
 
+async def test_reload_cannot_change_probe_settings(rig: Rig) -> None:
+    await rig.daemon.start()
+    settings = rig.config.settings.model_copy(update={"probe_interval": 3.0})
+    rig.config = rig.config.model_copy(update={"settings": settings})
+    with pytest.raises(ApiError, match="reload cannot change settings"):
+        await rig.daemon.handle("reload", {}, ROOT)
+    await rig.daemon.stop()
+
+
 async def test_placement_needs_the_cgroup_in_the_installed_binding(rig: Rig) -> None:
     async def uid_only(policy_id: int, policy: Any, groups: Any) -> AppBinding:
         return AppBinding(policy_id, uids=(1000,))
