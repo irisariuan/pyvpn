@@ -169,5 +169,8 @@ class DaemonClient:
     def disable(self) -> Any:
         return self.request("disable")
 
+    def enable(self) -> Any:
+        return self.request("enable")
+
     def audit(self) -> Any:
         return self.request("audit")

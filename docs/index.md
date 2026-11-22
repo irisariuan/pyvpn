@@ -157,6 +157,7 @@ pyvpn apps                                 # policy bindings by cgroup and uid
 pyvpn audit                                # what each policy does and does not protect
 pyvpn reload                               # re-read the config (root)
 pyvpn disable                              # remove all pyvpn rules and routes (root)
+pyvpn enable                               # reinstall them after disable (root)
 pyvpn test [config]                        # validate a config
 pyvpn rules check example.rules            # validate destination rules (snake format)
 pyvpn install --write                      # install the systemd unit for the daemon

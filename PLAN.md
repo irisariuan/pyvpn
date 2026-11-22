@@ -529,7 +529,7 @@ works only for apps launched through `pyvpn run`.
 
 ```
 src/pyvpn/
-  cli/          run, status, apps (live PID → policy → interface), test, policy, rules, install, disable
+  cli/          run, status, apps (live PID → policy → interface), test, policy, rules, install, disable, enable
   config/       pydantic models, migrations, snake .rules import
   apps/         selectors, process watcher (proc connector), cgroup v2 manager, run launcher, netns launcher
   targets/      interface resolution (names/patterns, gateway discovery), netlink watcher, optional probes
@@ -568,7 +568,7 @@ and begins serving requests after the initial install attempt.
 
 `pyvpn disable` removes every rule and stub and stays in effect, across
 daemon restarts (the enabled flag is in the daemon's state file), until the
-API's `enable` call. `reload` while disabled loads and binds the new config
+API's `enable` call (`pyvpn enable`). `reload` while disabled loads and binds the new config
 but installs nothing; it never re-enables routing on its own. While
 disabled, `place_pid` returns `unavailable` and `status` reports each
 policy as `not_installed`.
