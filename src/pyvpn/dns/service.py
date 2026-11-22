@@ -59,6 +59,16 @@ class _ChainMatcher(Protocol):
 
 
 @runtime_checkable
+class _DecidingMatcher(Protocol):
+    def decide_chain(self, *domains: str) -> tuple[int, bool] | None: ...
+
+
+# (policy id, drop): which policy owns a name's addresses, and whether they
+# go into its drop set (a ``drop:`` rule) rather than its route set.
+_Owner = tuple[int, bool]
+
+
+@runtime_checkable
 class _ScopedMatcher(Protocol):
     def scoped(self, policy_id: int) -> RuleMatcher: ...
 
@@ -154,12 +164,12 @@ class PolicyDnsService:
         if isinstance(matcher, _ScopedMatcher):
             matcher = matcher.scoped(plan.policy_id)
         prefixes = inherited or {(): float("inf")}
-        owners: dict[IPv4Network | IPv6Network, int] = {}
+        owners: dict[IPv4Network | IPv6Network, _Owner] = {}
         for path, addresses in paths.addresses.items():
-            winners = {_match_chain(matcher, prefix + path) for prefix in prefixes}
+            winners = {_decide_chain(matcher, prefix + path) for prefix in prefixes}
             # The same question might be a direct lookup. A cached exclusion
             # must never remove a policy that protects the endpoint on its own.
-            if inherited and (direct := _match_chain(matcher, path)) is not None:
+            if inherited and (direct := _decide_chain(matcher, path)) is not None:
                 winners.add(direct)
             winners.discard(None)
             if len(winners) > 1:
@@ -171,22 +181,16 @@ class PolicyDnsService:
             for address in addresses:
                 if owners.setdefault(address, winner) != winner:
                     raise RuntimeError("shared DNS address has conflicting routing policies")
-        for policy_id in set(owners.values()):
+        for policy_id, drop in sorted(set(owners.values())):
             if self._callback is None:
                 raise RuntimeError("DNS destination publication is unavailable")
+            mine = [a for a, owner in owners.items() if owner == (policy_id, drop)]
             await self._callback(
                 DestSet(
                     policy_id,
-                    frozenset(
-                        a
-                        for a, owner in owners.items()
-                        if owner == policy_id and isinstance(a, IPv4Network)
-                    ),
-                    frozenset(
-                        a
-                        for a, owner in owners.items()
-                        if owner == policy_id and isinstance(a, IPv6Network)
-                    ),
+                    frozenset(a for a in mine if isinstance(a, IPv4Network)),
+                    frozenset(a for a in mine if isinstance(a, IPv6Network)),
+                    drop,
                 )
             )
 
@@ -196,7 +200,7 @@ class PolicyDnsService:
         rows: AliasRows = {}
         now = time.monotonic()
         for path, ttl in paths.aliases.items():
-            if inherited and _match_chain(matcher, path) is not None:
+            if inherited and _decide_chain(matcher, path) is not None:
                 # A standalone protected lookup can itself return another alias.
                 rows[path[-1], path[:-1]] = now + ttl
             for prefix, parent_expires in prefixes.items():
@@ -445,6 +449,14 @@ def _narrow_dname(query: dns.message.Message, response: dns.message.Message) -> 
 
 def _domain(name: dns.name.Name) -> str:
     return name.canonicalize().to_text(omit_final_dot=True)
+
+
+def _decide_chain(matcher: RuleMatcher, domains: DomainChain) -> _Owner | None:
+    """The owner of a chain's addresses; a ``drop:`` match counts as one."""
+    if isinstance(matcher, _DecidingMatcher):
+        return matcher.decide_chain(*domains)
+    policy_id = _match_chain(matcher, domains)
+    return None if policy_id is None else (policy_id, False)
 
 
 def _match_chain(matcher: RuleMatcher, domains: DomainChain) -> int | None:

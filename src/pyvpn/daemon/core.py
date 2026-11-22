@@ -122,7 +122,7 @@ class Daemon:
                     self._cgroup_policy_names.update(state.policy_slots)
                     # Addresses apps may still have cached: govern them from
                     # the first apply on instead of emptying their sets.
-                    self.reconciler.restore_learned(state.learned)
+                    self.reconciler.restore_learned(state.learned, state.learned_drops)
                 self._validate_policy_slots(config)
                 if self._dns is not None:
                     self._dns.on_answer(self.reconciler.add_dests)
@@ -523,6 +523,7 @@ class Daemon:
                     enabled=enabled,
                     policy_slots=tuple(sorted(slots.items())),
                     learned=self.reconciler.learned_entries(),
+                    learned_drops=self.reconciler.learned_entries(drops=True),
                 )
             )
         self._cgroup_policy_names = slots
@@ -533,6 +534,7 @@ class Daemon:
 
 
 def _is_address_rule(rule: str) -> bool:
-    """``asn:``/``cidr:``/``ip:`` rules need no DNS to be enforced."""
-    head = rule.strip().lower()
+    """``asn:``/``cidr:``/``ip:`` rules (and their ``drop:`` forms) need no
+    DNS to be enforced."""
+    head = rule.strip().lower().removeprefix("drop:")
     return head.startswith(("asn:", "cidr:", "ip:"))
