@@ -571,3 +571,24 @@ def test_idle_exclusion_cgroup_appearing_or_leaving_is_reapplied(cgroups: Path) 
         await backend.teardown()
 
     asyncio.run(scenario())
+
+
+def test_drop_answers_go_to_the_drop_set_and_survive_a_reapply(cgroups: Path) -> None:
+    backend, nft, _, _ = make(cgroups)
+    drop = DestSet(1, frozenset({IPv4Network("192.0.2.0/24")}), drop=True)
+    route = DestSet(1, frozenset({IPv4Network("198.51.100.0/24")}))
+
+    async def scenario() -> None:
+        await backend.apply(
+            RoutingPlan((policy(1, dests=DestSet(1), drops=DestSet(1, drop=True)),))
+        )
+        await backend.add_to_set(drop)
+        assert nft.scripts[-1] == "add element inet pyvpn p1_drop_v4 { 192.0.2.0/24 }\n"
+        await backend.add_to_set(route)
+        assert nft.scripts[-1] == "add element inet pyvpn p1_v4 { 198.51.100.0/24 }\n"
+        assert backend._plan is not None
+        (kept,) = backend._plan.policies
+        assert kept.drops == drop and kept.dests == route
+        await backend.teardown()
+
+    asyncio.run(scenario())

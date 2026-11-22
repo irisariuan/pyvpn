@@ -956,6 +956,26 @@ async def test_restart_keeps_governing_learned_destinations(tmp_path: Path) -> N
     await rig.daemon.stop()
 
 
+async def test_restart_keeps_blocking_learned_drop_addresses(tmp_path: Path) -> None:
+    config = make_config()
+    office = config.policies[2].model_copy(update={"domains": ("corp.example", "drop:ads.example")})
+    rig = Rig(tmp_path, config.model_copy(update={"policies": (*config.policies[:2], office)}))
+    net = IPv4Network("192.0.2.9/32")
+    await rig.daemon.start()
+    await rig.daemon.reconciler.add_dests(DestSet(3, frozenset({net}), drop=True))
+    state = rig.store.load()
+    assert state.learned == ()
+    assert state.learned_drops == (("Office", office.domains, (str(net),)),)
+    await rig.daemon.stop()
+
+    rig.daemon = rig.new_daemon()
+    await rig.daemon.start()
+    office_plan = rig.backend.last.policies[2]
+    assert office_plan.drops is not None and net in office_plan.drops.v4
+    assert office_plan.dests is not None and not office_plan.dests
+    await rig.daemon.stop()
+
+
 async def test_placement_refuses_a_caller_that_exits_while_waiting(rig: Rig) -> None:
     await rig.daemon.start()
     r, w = os.pipe()

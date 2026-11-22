@@ -480,3 +480,106 @@ def test_audit_json_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -
     assert main(["--json", "--socket", str(path), "audit"]) == 0
     join(thread)
     assert json.loads(capsys.readouterr().out)["enabled"] is False
+
+
+def test_enable_human_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "daemon.sock"
+    thread = fake_daemon(path, {"id": 1, "ok": True, "result": None})
+
+    assert main(["--socket", str(path), "enable"]) == 0
+    join(thread)
+    assert "enable: ok" in capsys.readouterr().out
+
+
+def test_enable_sends_enable_method(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "daemon.sock"
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(path))
+    server.listen(1)
+    requests: list[dict[str, object]] = []
+
+    def serve() -> None:
+        conn, _ = server.accept()
+        with conn:
+            requests.append(json.loads(conn.makefile("rb").readline()))
+            conn.sendall(b'{"id":1,"ok":true,"result":null}\n')
+        server.close()
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    assert main(["--json", "--socket", str(path), "enable"]) == 0
+    join(thread)
+    assert requests[0]["method"] == "enable"
+    assert json.loads(capsys.readouterr().out) is None
+
+
+def test_enable_daemon_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "daemon.sock"
+    thread = fake_daemon(
+        path,
+        {"id": 1, "ok": False, "error": {"code": "forbidden", "message": "root only"}},
+    )
+
+    assert main(["--socket", str(path), "enable"]) == 1
+    join(thread)
+    assert "root only" in capsys.readouterr().err
+
+
+def test_test_lists_each_schema_problem(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        '{"version": 1, "targets": [{"name": "jp"}],'
+        ' "policies": [{"name": "J", "targets": ["jp"], "on_down": "explode"}],'
+        ' "bogus": 1}',
+        encoding="utf-8",
+    )
+
+    assert main(["test", str(path)]) == 1
+    lines = capsys.readouterr().out.splitlines()
+    assert lines == [
+        f"{path}: error: targets.0.interface: Field required",
+        f"{path}: error: policies.0.on_down: Input should be 'default' or 'block'",
+        f"{path}: error: bogus: Extra inputs are not permitted",
+        "errors found",
+    ]
+
+
+def test_test_reports_json_syntax_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "config.json"
+    path.write_text('{"version": 1,, }', encoding="utf-8")
+
+    assert main(["test", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert f"error: {path}: invalid JSON at line 1, column 15" in out
+    assert out.endswith("errors found\n")
+
+
+def test_test_reports_unsupported_version(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "config.json"
+    path.write_text('{"version": 99}', encoding="utf-8")
+
+    assert main(["test", str(path)]) == 1
+    assert capsys.readouterr().out == (
+        f"error: {path}: unsupported configuration version 99 (supported versions: 1)\n"
+        "errors found\n"
+    )
+
+
+def test_test_json_lists_problems(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "config.json"
+    path.write_text('{"version": 1, "targets": [], "policies": [], "bogus": 1}', encoding="utf-8")
+
+    assert main(["--json", "test", str(path)]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["ok"] is False
+    assert result["errors"] == [f"{path}: error: bogus: Extra inputs are not permitted"]
+    assert result["output"].endswith("errors found\n")
+
+
+def test_test_missing_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "missing.json"
+
+    assert main(["test", str(path)]) == 1
+    assert f"error: configuration file not found: {path}" in capsys.readouterr().out

@@ -51,14 +51,63 @@ def test_runtime_rejects_unparsable_rules() -> None:
         build_matcher(cfg)
 
 
-def test_runtime_rejects_unenforced_drop_rules() -> None:
+def test_runtime_activates_drop_rules() -> None:
     cfg = _config(
-        {"name": "a", "targets": ["jp"], "domains": ["drop:ads.tv"]},
-        {"name": "b", "targets": ["jp"], "domains": ["ads.tv"]},
-    )
-    # Leniently built, the drop claims the name and policy "b" never sees it.
-    assert PolicyMatcher.from_config(cfg).match("x.ads.tv") is None
-    with pytest.raises(RuleConfigError, match=r"policy 'a': drop: .*drop:ads\.tv"):
+        {
+            "name": "a",
+            "targets": ["jp"],
+            "domains": ["drop:ads.tv", "drop:cidr:203.0.113.0/24", "drop:ip:2001:db8::7",
+                        "drop:asn:64500", "cidr:198.51.100.0/24"],
+        },
+        {"name": "b", "targets": ["jp"], "domains": ["ads.tv", "ok.example"]},
+    )  # fmt: skip
+    m = build_matcher(cfg, _FakeAsnCache({64500: ["192.0.2.0/24"]}))  # type: ignore[arg-type]
+    assert m.problems() == []
+    # The drop claims the name: policy "b" never routes it, and the stub puts
+    # its addresses into policy "a"'s drop set.
+    assert m.match("x.ads.tv") is None
+    assert m.decide_chain("x.ads.tv") == (1, True)
+    assert m.decide_chain("cdn.example", "x.ads.tv") == (1, True)
+    assert m.decide_chain("ok.example") == (2, False)
+    assert m.decide_chain("nothing.example") is None
+    route, drop = m.static_sets()
+    assert not route.drop and route.v4 == {ip_network("198.51.100.0/24")}
+    assert drop.drop and drop.policy_id == 1
+    assert drop.v4 == {ip_network("203.0.113.0/24"), ip_network("192.0.2.0/24")}
+    assert drop.v6 == {ip_network("2001:db8::7/128")}
+    assert m.asns() == [64500]
+    assert m.policies[0].has_drops and not m.policies[1].has_drops
+    assert commands.check_config(cfg, lambda n: ["192.0.2.0/24"]).code == 0
+    out = commands.explain_config(cfg, ["x.ads.tv"])
+    assert out.code == 1 and "blocked by policy 'a'" in out.output
+
+
+class _FakeAsnCache:
+    def __init__(self, prefixes: dict[int, list[str]]) -> None:
+        self._prefixes = prefixes
+
+    def cached(self, asn: int) -> list[str]:
+        return self._prefixes.get(asn, [])
+
+    def usable(self, asn: int) -> list[str]:
+        if asn not in self._prefixes:
+            raise AsnError(f"asn:{asn} is not in the ASN cache")
+        return self._prefixes[asn]
+
+
+def test_drop_asn_without_prefixes_is_refused() -> None:
+    cfg = _config({"name": "a", "targets": ["jp"], "domains": ["drop:asn:64500"]})
+    with pytest.raises(RuleConfigError, match="asn:64500 needs the ASN cache"):
+        build_matcher(cfg)
+    with pytest.raises(RuleConfigError, match="asn:64500 is not in the ASN cache"):
+        build_matcher(cfg, _FakeAsnCache({}))  # type: ignore[arg-type]
+
+
+def test_drop_sessions_stay_refused() -> None:
+    cfg = _config({"name": "a", "targets": ["jp"], "domains": ["drop[ttl=5m]:ads.tv"]})
+    m = PolicyMatcher.from_config(cfg)
+    assert m.policies[0].unsupported() == ["drop[ttl=5m]:ads.tv"]
+    with pytest.raises(RuleConfigError, match="per-device rules are not supported yet"):
         build_matcher(cfg)
 
 
@@ -163,7 +212,7 @@ def test_drop_and_sessions_route_nothing() -> None:
     assert d.action == "drop" and d.policy_id == 2 and m.match("x.ads.tv") is None
     assert m.match("s.example") is None
     assert m.policies[1].unsupported() == ["session:s.example"]
-    assert m.policies[0].unsupported() == ["drop:ads.tv"]
+    assert m.policies[0].unsupported() == []
 
 
 def test_static_sets() -> None:
