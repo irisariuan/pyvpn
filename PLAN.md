@@ -221,6 +221,20 @@ Linux backend details (stream C, `netfilter/`, `routing/`,
   previously installed a plan successfully. If recovery fails or startup
   cannot install its first plan, the guard remains until a successful apply.
   A plan referring to a missing cgroup is rejected before changing rules.
+* `socket cgroupv2` rules hold the cgroup id nft resolved at load time. The
+  backend records each cgroup's id (inode) and re-applies the last plan,
+  with destinations added since, once every cgroup it names exists and
+  one was re-created (`place_pid` re-creates a missing policy cgroup
+  without a daemon apply).
+* Policies for every process (`any_process`) also require `meta skuid`, so
+  kernel sockets are never marked: a WireGuard endpoint inside a
+  destination set cannot loop the tunnel's own packets into it. A
+  userspace VPN client is an ordinary process and still needs to stay out
+  of the destination sets.
+* `apply` turns on `net.ipv4.conf.all.src_valid_mark` (as `wg-quick` does)
+  so strict `rp_filter` validates replies with their restored mark; it is
+  left on at teardown. A kernel booted without IPv6 gets IPv4 rules and
+  routes only.
 
 ### 3.1 Interfaces (targets)
 
@@ -496,6 +510,8 @@ policy as `not_installed`.
   one throwaway cgroup, and checks by nft counters that the cgroup's traffic
   leaves via the target, that nothing leaves after link loss or under the
   kill switch, DNS redirection to the stub, and that teardown leaves nothing.
+  It also checks replies under strict `rp_filter`, a re-created cgroup, and
+  a WireGuard handshake to an endpoint inside a destination set.
   Workers enter the namespace with `nsenter --net`, not `ip netns exec`,
   which remounts `/sys` and hides the cgroup tree.
 * **Standalone DNS integration (root on Linux):**
