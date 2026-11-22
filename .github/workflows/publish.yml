@@ -67,7 +67,24 @@ jobs:
         id: version
         run: |
           version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-          module=$(python -c "import ast, pathlib; tree = ast.parse(pathlib.Path('src/pyvpn/__init__.py').read_text()); print(next(n.value.value for n in tree.body if isinstance(n, ast.Assign) and n.targets[0].id == '__version__'))")
+          # Handles `__version__ = "x"` and `__version__: Final[str] = "x"`.
+          module=$(python - <<'PY'
+          import ast, pathlib
+          tree = ast.parse(pathlib.Path("src/pyvpn/__init__.py").read_text())
+          for node in tree.body:
+              if isinstance(node, ast.Assign):
+                  targets = node.targets
+              elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                  targets = [node.target]
+              else:
+                  continue
+              if any(isinstance(t, ast.Name) and t.id == "__version__" for t in targets):
+                  print(ast.literal_eval(node.value))
+                  break
+          else:
+              raise SystemExit("::error::no __version__ in src/pyvpn/__init__.py")
+          PY
+          )
           if [ "$module" != "$version" ]; then
             echo "::error::pyvpn.__version__ '$module' does not match pyproject version '$version'"
             exit 1
@@ -186,8 +203,13 @@ jobs:
               break
             fi
             cat pip.log
+            # Only "not there yet" is worth a retry; anything else is real.
+            if ! grep -qE "No matching distribution found|Could not find a version" pip.log; then
+              echo "::error::pip install snakevpn==$VERSION from TestPyPI failed: $(tail -n 1 pip.log)"
+              exit 1
+            fi
             if [ "$attempt" = 10 ]; then
-              echo "::error::pip install snakevpn==$VERSION from TestPyPI failed 10 times; last error: $(tail -n 1 pip.log)"
+              echo "::error::snakevpn $VERSION did not appear on TestPyPI after 10 tries: $(tail -n 1 pip.log)"
               exit 1
             fi
             echo "attempt $attempt failed; retrying in 15s"
