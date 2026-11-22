@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from pyvpn import __version__
+from pyvpn.apps.exclusions import config_exclusion_problems, exclusion_warnings
 from pyvpn.apps.launcher import DaemonUnavailable as LauncherUnavailable
 from pyvpn.apps.launcher import run as run_app
 from pyvpn.apps.netns import NetworkNamespaceUnavailable
@@ -215,11 +216,22 @@ def _run_test(args: argparse.Namespace, as_json: bool) -> int:
             sys.stdout.write(output)
         return 1
     result = check_config(config, resolver_from_args(args))
+    output, code = result.output, result.code
+    exclusion_errors = [
+        problem.replace(": ", ": error: ", 1) for problem in config_exclusion_problems(config)
+    ]
+    warnings = [w.replace(": ", ": warning: ", 1) for w in exclusion_warnings(config)]
+    if warnings:
+        output = "\n".join(warnings) + "\n" + output
+    if exclusion_errors:
+        # The daemon refuses these configs (PLAN.md §3.3); say so here too.
+        output = "\n".join(exclusion_errors) + "\n" + output.replace("ok\n", "errors found\n")
+        code = 1
     if as_json:
-        print_json({"ok": result.code == 0, "output": result.output})
+        print_json({"ok": code == 0, "output": output})
     else:
-        sys.stdout.write(result.output)
-    return result.code
+        sys.stdout.write(output)
+    return code
 
 
 def _run_mutation(client: DaemonClient, as_json: bool, action: str) -> int:

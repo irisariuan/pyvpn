@@ -395,6 +395,31 @@ def test_process_watcher_is_rejected_with_dry_run(
     assert "cannot be used with --backend dry-run" in capsys.readouterr().err
 
 
+async def test_unenforceable_exclusion_is_refused(tmp_path: Path) -> None:
+    policy = {
+        "name": "Corp",
+        "targets": ["jp"],
+        "domains": ["cidr:203.0.113.0/24"],
+        "exclude_apps": [{"name": "openvpn"}],
+        "leak": {"dns_via_target": False},
+    }
+    config = write_config(tmp_path / "config.json", policies=[policy])
+    opts = Options(
+        config_path=tmp_path / "config.json",
+        socket_path=tmp_path / "pyvpn.sock",
+        state_dir=tmp_path / "state",
+        backend="dry-run",
+    )
+    backend = DryRunBackend()
+    assembly = build_daemon(opts, backend=backend, config=config, netlink=FakeNetlink())
+    try:
+        with pytest.raises(daemon_main.ApiError, match="exclude_apps name: 'openvpn'"):
+            await assembly.daemon.start()
+        assert backend.applies == 0
+    finally:
+        await assembly.close()
+
+
 async def test_netns_isolation_is_refused_until_enforced(tmp_path: Path) -> None:
     policy = {
         "name": "Strict",

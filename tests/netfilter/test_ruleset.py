@@ -93,6 +93,17 @@ VARIANTS: dict[str, RoutingPlan] = {
     "any_process_dests": RoutingPlan(
         (policy(apps=AppBinding(1, any_process=True), dests=dests()),)
     ),
+    "any_process_exclude_uid": RoutingPlan(
+        (policy(apps=AppBinding(1, any_process=True, exclude_uids=(994,)), dests=dests()),)
+    ),
+    "any_process_exclude_uids": RoutingPlan(
+        (
+            policy(
+                apps=AppBinding(1, any_process=True, exclude_uids=(997, 994)),
+                dests=dests(),
+            ),
+        )
+    ),
     "unbound": RoutingPlan((policy(apps=AppBinding(1)),)),
     "unreachable": RoutingPlan((policy(route="unreachable", interface=None),)),
     "unreachable_dests": RoutingPlan(

@@ -157,7 +157,7 @@ footer { margin-top: 56px; padding-top: 16px; border-top: 1px solid var(--border
 <tr><th scope="row">Policy</th><td>A named rule: a set of apps, an ordered list of targets, and what to do when every target is down.</td></tr>
 <tr><th scope="row">App selector</th><td>How a policy finds its apps: launched with <code>pyvpn run</code>, executable path or name, systemd unit, uid or user, Flatpak or Snap ID.</td></tr>
 <tr><th scope="row"><code>on_down</code></th><td>Used after every target in the list is down: <code>default</code> falls back to the normal route, <code>block</code> drops the traffic (kill switch).</td></tr>
-<tr><th scope="row">Usable target</th><td>The link is up and has an address (and, with <code>"gateway": "auto"</code>, a gateway). Reachability probes are planned.</td></tr>
+<tr><th scope="row">Usable target</th><td>The link is up and has an address (and, with <code>"gateway": "auto"</code>, a gateway). A target with <code>"probe": true</code> must also pass TCP probes sent through its interface.</td></tr>
 <tr><th scope="row">Destination filter</th><td>Optional domain, <code>asn:</code> or <code>cidr:</code> rules (snake's rule language) that limit a policy to matching destinations; <code>drop:</code> rules block a destination for the policy's apps.</td></tr>
 </tbody>
 </table></div>
@@ -178,7 +178,7 @@ footer { margin-top: 56px; padding-top: 16px; border-top: 1px solid var(--border
 <tr><th scope="row">systemd unit</th><td><code>{"unit": "transmission-daemon.service"}</code></td><td>The process watcher moves the unit's processes into the policy's cgroup.</td></tr>
 <tr><th scope="row">user</th><td><code>{"uid": 1001}</code>, <code>{"user": "torrent"}</code></td><td>nft <code>meta skuid</code>.</td></tr>
 <tr><th scope="row">Flatpak / Snap</th><td><code>{"flatpak": "org.mozilla.firefox"}</code></td><td>Its <code>app-flatpak-…scope</code> cgroup.</td></tr>
-<tr><th scope="row">exclusions</th><td><code>"exclude_apps": [...]</code></td><td>Same selectors; an excluded app never matches. Not enforced yet.</td></tr>
+<tr><th scope="row">exclusions</th><td><code>"exclude_apps": [...]</code></td><td>Same selectors; an excluded app is never placed in the policy (programs started from inside it stay routed). On a policy with only <code>domains</code>, only <code>uid</code>/<code>user</code> work.</td></tr>
 </tbody>
 </table></div>
 <p>Sockets that are already open keep their route. New connections follow the new policy.</p>
@@ -221,7 +221,7 @@ pyvpn --version</code></pre>
 <tbody>
 <tr><th scope="row"><code>interface</code></th><td>target</td><td>Interface name or pattern (<code>tun*</code>).</td></tr>
 <tr><th scope="row"><code>gateway</code></th><td>target</td><td>An address, or <code>"auto"</code> to require a discovered next hop.</td></tr>
-<tr><th scope="row"><code>probe</code></th><td>target</td><td><em>Not supported yet:</em> a target with <code>true</code> stays unusable.</td></tr>
+<tr><th scope="row"><code>probe</code></th><td>target</td><td><code>true</code>: usable only while TCP probes to <code>settings.probe_targets</code>, sent through the interface every <code>settings.probe_interval</code> seconds, succeed (down after 2 failures in a row, up after 2 successes).</td></tr>
 <tr><th scope="row"><code>targets</code></th><td>policy</td><td>Target names in priority order. The first usable one wins.</td></tr>
 <tr><th scope="row"><code>on_down</code></th><td>policy</td><td><code>default</code> or <code>block</code>.</td></tr>
 <tr><th scope="row"><code>apps</code></th><td>policy</td><td>App selectors or <code>group:&lt;name&gt;</code>.</td></tr>
