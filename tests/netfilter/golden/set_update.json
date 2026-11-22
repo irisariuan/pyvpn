@@ -1,0 +1,40 @@
+{
+  "nftables": [
+    {
+      "add": {
+        "element": {
+          "elem": [
+            "198.51.100.7",
+            {
+              "prefix": {
+                "addr": "203.0.113.0",
+                "len": 24
+              }
+            }
+          ],
+          "family": "inet",
+          "name": "p4_v4",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "element": {
+          "elem": [
+            {
+              "prefix": {
+                "addr": "2001:db8::",
+                "len": 32
+              }
+            },
+            "2001:db8:1::5"
+          ],
+          "family": "inet",
+          "name": "p4_v6",
+          "table": "pyvpn"
+        }
+      }
+    }
+  ]
+}

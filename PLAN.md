@@ -193,6 +193,31 @@ process ── in cgroup pyvpn.slice/p-<id>, or matched by uid / unit cgroup
                     (the source address was chosen for the default route before re-routing)
 ```
 
+Linux backend details (stream C, `netfilter/`, `routing/`,
+`platform/linux/backend.py`):
+
+* Chains: `dns` (nat, output, prio -100) redirects port 53 first, so a mark
+  set later never hides an app's query; only packets whose *socket* already
+  carries a pyvpn mark (the stubs' upstream sockets, `SO_MARK`) skip it.
+  `output` (route, prio -90) exempts LAN/loopback/multicast, leaves
+  socket-marked packets alone, restores the conntrack mark (or rejects, for
+  a kill-switch policy), then jumps to the first matching policy's chain.
+  `masq` (postrouting) masquerades mark P out of P's interface; `restore`
+  (prerouting) copies the conntrack mark back onto replies.
+* Marks are written as `mark & ~POLICY_MARK_MASK | P`, so bits other
+  software uses survive. A kill-switch policy's traffic is rejected in nft
+  *and* hits the unreachable table; it is never marked for another route.
+* DoT and known-DoH rejects apply to every packet of the policy's apps (they
+  bypass the stub); IPv6 and QUIC rejects apply to the traffic the policy
+  governs (everything, or only its destination sets).
+* The ruleset is built as nft JSON (golden-tested) and loaded as rendered
+  nft script text in one `nft -f -` transaction (`add`/`delete`/`add table`):
+  nft 1.0.9 (Ubuntu 24.04) cannot parse `socket cgroupv2` in JSON.
+* `apply` order: guard routes, device routes and new `ip rule`s first, then
+  the nft transaction, then removal of stale routes and rules. A failed nft
+  load restores the previously applied routes. Cgroup paths that do not
+  exist are left out of the ruleset (nft refuses to load them).
+
 ### 3.1 Interfaces (targets)
 
 A *target* is just an interface name, plus an optional gateway:
@@ -461,6 +486,14 @@ policy as `not_installed`.
   (the fixture creates it, pyvpn does not). Tests launch processes through
   `pyvpn run`, delete and re-create interfaces, and assert by capture which
   interface the traffic and DNS left through.
+* **Linux backend integration (root on Linux):**
+  `sudo .venv/bin/python -m pytest -m integration tests/platform/test_linux_namespace.py`
+  applies real plans in a disposable namespace with dummy interfaces and
+  one throwaway cgroup, and checks by nft counters that the cgroup's traffic
+  leaves via the target, that nothing leaves after link loss or under the
+  kill switch, DNS redirection to the stub, and that teardown leaves nothing.
+  Workers enter the namespace with `nsenter --net`, not `ip netns exec`,
+  which remounts `/sys` and hides the cgroup tree.
 * **Standalone DNS integration (root on Linux):**
   `sudo .venv/bin/python -m pytest -m integration tests/dns/test_namespace.py`
   exercises the stubs with two DNS peers in disposable namespaces. It checks
