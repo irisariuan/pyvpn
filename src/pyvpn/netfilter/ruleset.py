@@ -8,7 +8,7 @@ Packet path (PLAN.md §3)::
     hook output, prio -100 (nat)    chain dns
         socket already carries a pyvpn mark (the daemon's own DNS stub
         upstream sockets, SO_MARK) -> return, so queries never loop
-        <policy apps> port 53 udp/tcp -> redirect to 127.0.0.1:<stub port>
+        <policy apps> port 53 udp/tcp -> redirect to the family's loopback stub
 
     hook output, prio -90 (route)   chain output
         socket in a pyvpn.slice/<child> cgroup that is not one of the

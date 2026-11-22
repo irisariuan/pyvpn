@@ -180,7 +180,7 @@ drives.
 ```
 process ── in cgroup pyvpn.slice/p-<id>, or matched by uid / unit cgroup
    │
-   ├─ DNS (port 53) ──► nft redirect ─► per-policy stub 127.0.0.1:53<id>
+   ├─ DNS (port 53) ──► nft redirect ─► per-policy stub on IPv4/IPv6 loopback
    │                                     resolves via the policy's interface,
    │                                     fills dest sets before replying
    │
@@ -234,7 +234,9 @@ Linux backend details (stream C, `netfilter/`, `routing/`,
   also polls for cgroups recreated outside placement. A dedicated chain
   rejects unknown children of the installed `pyvpn.slice` before the LAN
   exemption. Domain-only policies register their placement cgroups while
-  continuing to match all user processes.
+  continuing to match all user processes. Before the app watcher starts
+  placing processes in top-level exclusion cgroups (PR #33), the backend
+  must recognize those installed cgroups in this check and track their IDs.
 * Policies for every process (`any_process`) also require `meta skuid`, so
   kernel sockets are never marked: a WireGuard endpoint inside a
   destination set cannot loop the tunnel's own packets into it. A
@@ -375,9 +377,11 @@ snake. snake's Domain VPN Routing importer is not ported (router-only).
 
 ### 3.5 Per-app DNS and leaks
 
-* Each policy gets its own stub (`127.0.0.1:53<id>`). nft redirects port 53
-  **from that policy's apps** to it, which also catches hard-coded `8.8.8.8`.
-  The stub listens on UDP and TCP. The composition root supplies the Linux
+* Each policy gets its own UDP and TCP stub on `127.0.0.1:53<id>` and, when
+  IPv6 loopback is available, `[::1]:53<id>`. nft redirects port 53 **from
+  that policy's apps** to loopback in the query's address family, which
+  also catches hard-coded resolvers. Both listeners use the same policy
+  and upstream settings. The composition root supplies the Linux
   socket factory, which binds upstream sockets to the target interface and
   sets the policy's mark before connecting so the policy's route and gateway
   apply. With no `dns_server`, the stub uses Quad9 at
@@ -394,7 +398,10 @@ snake. snake's Domain VPN Routing importer is not ported (router-only).
   routes. The daemon activates the new matcher before reopening listeners,
   so an answer cannot use the previous config's matching rules.
 * Other apps keep the system resolver. **pyvpn does not take over system
-  DNS.**
+  DNS.** If several destination-only policies match the same DNS query,
+  the first matching policy with a stub serves it. Its upstream depends on
+  that policy's target even when the matcher learns a destination for a
+  later policy.
 * Per-policy leak toggles (snake's): block DoT 853, block known DoH
   addresses, block QUIC, IPv6 `route`/`block`/`off`. A stub with
   `block_doh` answers Firefox's `use-application-dns.net` canary with NXDOMAIN.

@@ -211,12 +211,17 @@ class LinuxBackend:
             self._watch = asyncio.get_running_loop().create_task(self._watch_cgroups())
 
     async def _watch_cgroups(self) -> None:
+        failed = False
         while True:
             await asyncio.sleep(self._cgroup_poll)
             try:
                 await self.recheck_cgroups()
             except Exception:
-                log.exception("re-apply after a cgroup change failed; retrying")
+                if not failed:
+                    log.exception("re-apply after a cgroup change failed; retrying")
+                failed = True
+            else:
+                failed = False
 
     async def recheck_cgroups(self) -> bool:
         """Re-apply the last plan if a cgroup it names was re-created.
@@ -230,8 +235,8 @@ class LinuxBackend:
             ids = self._plan_cgroups(self._plan)
             if None in ids.values() or ids == self._cgroup_ids:
                 return False
-            log.info("cgroup ids changed; re-applying the routing plan")
             await self._apply_locked(self._plan)
+            log.info("re-applied the routing plan after cgroup ids changed")
             return True
 
     async def _replace(self, routes: RoutePlan, script: str) -> None:

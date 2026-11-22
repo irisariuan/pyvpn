@@ -25,8 +25,13 @@ import uuid
 from dataclasses import replace
 from ipaddress import IPv4Network, ip_address
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from pyvpn.state import PolicyPlan
 
 pytestmark = pytest.mark.integration
 
@@ -34,6 +39,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CGROUP_FS = Path("/sys/fs/cgroup")
 REMOTE = "203.0.113.9"  # off-link: only the default routes reach it
 DNS_REMOTE = "198.51.100.53"
+DNS_REMOTE_V6 = "2001:db8:1::53"
 PORT = 9999
 VETH_LOCAL, VETH_PEER = "198.18.0.1", "198.18.0.2"  # not in the LAN exemption
 
@@ -69,6 +75,7 @@ def test_linux_backend_in_namespace() -> None:
             ("link", "add", "wan0", "type", "dummy"),
             ("addr", "add", "198.51.100.1/24", "dev", "wan0"),
             ("link", "set", "wan0", "up"),
+            ("-6", "addr", "add", "2001:db8:1::1/64", "dev", "wan0", "nodad"),
             ("route", "add", "default", "dev", "wan0"),
             ("link", "add", "d0", "type", "dummy"),
             ("addr", "add", "192.0.2.1/24", "dev", "d0"),
@@ -174,6 +181,52 @@ def _send(cgroup: str | None, addr: str = REMOTE, port: int = PORT, mark: int = 
     return _run(sys.executable, "-c", _CHILD, cgroup or "", addr, str(port), str(mark))
 
 
+_DNS_CLIENT = """
+import os, sys
+import dns.message, dns.query
+
+with open(f"/sys/fs/cgroup/{sys.argv[1]}/cgroup.procs", "w") as f:
+    f.write(str(os.getpid()))
+query = dns.message.make_query("ipv6-stub.example.", "A")
+exchange = dns.query.udp if sys.argv[3] == "udp" else dns.query.tcp
+reply = exchange(query, sys.argv[2], timeout=3)
+assert reply.answer[0][0].address == "192.0.2.10", reply
+"""
+
+
+async def _check_ipv6_dns(cgroup: str, plan: PolicyPlan) -> None:
+    import dns.message
+    import dns.rrset
+
+    from pyvpn.dns.service import PolicyDnsService
+
+    async def upstream(_: PolicyPlan, query: dns.message.Message) -> dns.message.Message:
+        answer = dns.message.make_response(query)
+        answer.answer.append(
+            dns.rrset.from_text(query.question[0].name, 60, "IN", "A", "192.0.2.10")
+        )
+        return answer
+
+    with TemporaryDirectory() as state_dir:
+        service = PolicyDnsService(upstream, alias_path=Path(state_dir) / "aliases.db")
+        await service.start(plan)
+        try:
+            for protocol in ("udp", "tcp"):
+                proc = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-c",
+                    _DNS_CLIENT,
+                    cgroup,
+                    DNS_REMOTE_V6,
+                    protocol,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await proc.communicate()
+                assert proc.returncode == 0, stderr.decode()
+        finally:
+            await service.stop(plan.policy_id)
+
+
 def _delta(before: dict[str, int]) -> dict[str, int]:
     after = _counters()
     return {k: after[k] - before.get(k, 0) for k in after if after[k] != before.get(k, 0)}
@@ -263,6 +316,7 @@ async def _worker(cgroup: str) -> None:
     _send(cgroup, DNS_REMOTE, 53, mark=policy_mark(1))
     assert _delta(before) == {"target_dns": 1}, _delta(before)
     stub.close()
+    await _check_ipv6_dns(cgroup, active)
 
     # Target link lost before the daemon reacts: the guard route holds.
     _run("ip", "link", "set", "d0", "down")

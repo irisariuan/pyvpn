@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import os
 import sqlite3
 from contextlib import closing
@@ -16,7 +17,7 @@ import pytest
 from pyvpn.audit import audit_dns
 from pyvpn.dns import service as dns_service
 from pyvpn.dns.aliases import AliasStore
-from pyvpn.dns.service import PolicyDnsService, _Stub
+from pyvpn.dns.service import PolicyDnsService, _Stub, _UdpListener
 from pyvpn.state import DestSet, PolicyPlan
 from tests.dns._helpers import plan_for_dns as _plan
 from tests.fakes.backend import FakeBackend
@@ -502,7 +503,8 @@ def test_idle_tcp_limit_does_not_starve_udp(monkeypatch: pytest.MonkeyPatch) -> 
         upstream = AsyncMock(side_effect=lambda _, query: _answer(query))
         stub = _Stub(PolicyDnsService(upstream), _plan())
         udp = Mock(sendto=Mock(side_effect=lambda *_: sent.set()))
-        stub.connection_made(udp)
+        listener = _UdpListener(stub)
+        listener.connection_made(udp)
         idle_client = Mock()
         refused_client = Mock()
         stub._accept_tcp(asyncio.StreamReader(), idle_client)
@@ -510,7 +512,7 @@ def test_idle_tcp_limit_does_not_starve_udp(monkeypatch: pytest.MonkeyPatch) -> 
         query = dns.message.make_query("selected.example.", "A")
         try:
             refused_client.close.assert_called_once()
-            stub.datagram_received(query.to_wire(), ("127.0.0.1", 49999))
+            listener.datagram_received(query.to_wire(), ("127.0.0.1", 49999))
             await asyncio.wait_for(sent.wait(), 1)
             reply = dns.message.from_wire(udp.sendto.call_args.args[0])
             assert query.is_response(reply)
@@ -535,6 +537,8 @@ def test_target_change_cancels_inflight_query_and_reuses_listener(
         server = Mock(wait_closed=AsyncMock())
 
         async def listen_udp(factory: object, *, local_addr: tuple[str, int]) -> None:
+            if local_addr[0] == "::1":
+                raise OSError(errno.EAFNOSUPPORT, "IPv6 disabled")
             assert local_addr == ("127.0.0.1", 5301)
             factory().connection_made(transport)
 
@@ -556,7 +560,7 @@ def test_target_change_cancels_inflight_query_and_reuses_listener(
         await service.start(previous)
         stub = service._stubs[1]
         query = dns.message.make_query("selected.example.", "A")
-        stub.datagram_received(query.to_wire(), ("127.0.0.1", 49999))
+        stub._udp[0].datagram_received(query.to_wire(), ("127.0.0.1", 49999))
         await asyncio.wait_for(started.wait(), 1)
         await service.start(next_plan)
         await asyncio.wait_for(sent.wait(), 1)
@@ -564,7 +568,7 @@ def test_target_change_cancels_inflight_query_and_reuses_listener(
         assert cancelled.is_set()
         assert service.is_listening(1)
         assert service._stubs[1] is stub
-        udp.assert_awaited_once()
+        assert udp.await_count == 2
         tcp.assert_awaited_once_with(stub._accept_tcp, "127.0.0.1", 5301)
         wire = transport.sendto.call_args.args[0]
         assert dns.message.from_wire(wire).rcode() == dns.rcode.SERVFAIL
@@ -584,11 +588,13 @@ def test_close_waits_until_the_udp_socket_is_released() -> None:
 
         loop = asyncio.get_running_loop()
         stub = _Stub(PolicyDnsService(AsyncMock()), _plan())
-        # A real datagram transport, without binding any network port.
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        await loop.create_datagram_endpoint(lambda: stub, sock=sock)
+        # Two real datagram transports, without binding any network ports.
+        sockets = [socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) for _ in range(2)]
+        for sock in sockets:
+            _, listener = await loop.create_datagram_endpoint(lambda: _UdpListener(stub), sock=sock)
+            stub._udp.append(listener)
         await stub.close()
-        assert sock.fileno() == -1
+        assert all(sock.fileno() == -1 for sock in sockets)
 
     asyncio.run(run())
 
@@ -607,6 +613,49 @@ def test_tcp_bind_failure_closes_udp_listener(monkeypatch: pytest.MonkeyPatch) -
             await service.start(_plan())
         assert not service.is_listening(1)
         transport.close.assert_called_once()
+
+    asyncio.run(run())
+
+
+def test_both_loopback_listeners_reply_on_the_receiving_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        clients = [("127.0.0.1", 49999), ("::1", 49999, 0, 0)]
+        listeners: list[_UdpListener] = []
+        transports = [Mock(), Mock()]
+        servers = [Mock(wait_closed=AsyncMock()), Mock(wait_closed=AsyncMock())]
+
+        async def open_udp(factory: object, *, local_addr: tuple[str, int]) -> None:
+            index = len(listeners)
+            assert local_addr == (clients[index][0], 5301)
+            listener = factory()
+            listener.connection_made(transports[index])
+            listeners.append(listener)
+
+        tcp = AsyncMock(side_effect=servers)
+        monkeypatch.setattr(asyncio.get_running_loop(), "create_datagram_endpoint", open_udp)
+        monkeypatch.setattr(asyncio, "start_server", tcp)
+        service = PolicyDnsService(AsyncMock(side_effect=lambda _, query: _answer(query)))
+        await service.start(_plan())
+        try:
+            stub = service._stubs[1]
+            assert [call.args for call in tcp.await_args_list] == [
+                (stub._accept_tcp, client[0], 5301) for client in clients
+            ]
+            queries = [dns.message.make_query(f"app{i}.example.", "A") for i in range(2)]
+            for listener, query, client in zip(listeners, queries, clients, strict=True):
+                listener.datagram_received(query.to_wire(), client)
+            await asyncio.gather(*stub._udp_tasks)
+            for transport, query, client in zip(transports, queries, clients, strict=True):
+                transport.sendto.assert_called_once()
+                wire, to = transport.sendto.call_args.args
+                assert to == client and query.is_response(dns.message.from_wire(wire))
+        finally:
+            await service.stop(1)
+        for transport, server in zip(transports, servers, strict=True):
+            transport.close.assert_called_once()
+            server.close.assert_called_once()
 
     asyncio.run(run())
 

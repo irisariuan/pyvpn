@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from ipaddress import IPv4Network
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -307,6 +308,27 @@ def test_watcher_reapplies_in_the_background(cgroups: Path) -> None:
         await backend.teardown()
 
     asyncio.run(scenario())
+
+
+def test_watcher_logs_once_per_failure_streak(
+    cgroups: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    backend, _, _, _ = make(cgroups)
+    backend._cgroup_poll = 0
+    first = RuntimeError("first failure")
+    recheck = AsyncMock(
+        side_effect=[first, first, False, RuntimeError("later failure"), asyncio.CancelledError()]
+    )
+    monkeypatch.setattr(backend, "recheck_cgroups", recheck)
+
+    async def scenario() -> None:
+        with pytest.raises(asyncio.CancelledError):
+            await backend._watch_cgroups()
+
+    asyncio.run(scenario())
+    assert recheck.await_count == 5
+    errors = [str(record.exc_info[1]) for record in caplog.records if record.exc_info]
+    assert errors == ["first failure", "later failure"]
 
 
 class FakeCgroups(CgroupManager):
