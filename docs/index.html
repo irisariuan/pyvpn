@@ -178,7 +178,7 @@ footer { margin-top: 56px; padding-top: 16px; border-top: 1px solid var(--border
 <tr><th scope="row">systemd unit</th><td><code>{"unit": "transmission-daemon.service"}</code></td><td>The process watcher moves the unit's processes into the policy's cgroup.</td></tr>
 <tr><th scope="row">user</th><td><code>{"uid": 1001}</code>, <code>{"user": "torrent"}</code></td><td>nft <code>meta skuid</code>.</td></tr>
 <tr><th scope="row">Flatpak / Snap</th><td><code>{"flatpak": "org.mozilla.firefox"}</code></td><td>Its <code>app-flatpak-…scope</code> cgroup.</td></tr>
-<tr><th scope="row">exclusions</th><td><code>"exclude_apps": [...]</code></td><td>Same selectors; an excluded app never matches. Not enforced yet.</td></tr>
+<tr><th scope="row">exclusions</th><td><code>"exclude_apps": [...]</code></td><td>Same selectors; an excluded app is never placed in the policy (programs started from inside it stay routed). On a policy with only <code>domains</code>, only <code>uid</code>/<code>user</code> work.</td></tr>
 </tbody>
 </table></div>
 <p>Sockets that are already open keep their route. New connections follow the new policy.</p>

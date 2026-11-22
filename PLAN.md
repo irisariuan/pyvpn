@@ -339,10 +339,25 @@ Fail-back hold and the latency-based selection are ported from snake's
 | systemd unit / slice | `unit: transmission-daemon.service` | match its existing cgroup path; nothing is moved |
 | user | `uid: 1001`, `user: torrent` | nft `meta skuid` |
 | Flatpak / Snap | `flatpak: org.mozilla.firefox` | its `app-flatpak-…scope` cgroup |
-| exclusions | `exclude_apps: [...]` | the same selectors; an excluded app never matches. `exe`/`name` are deferred for now (see below for policies without apps) |
+| exclusions | `exclude_apps: [...]` | the same selectors; an excluded app is never placed in the policy. Policies without apps support only `uid`/`user` for now (see below) |
 
 Already-open sockets keep their route; new connections follow the new
 cgroup (as in snake: "connections keep their route").
+
+**Exclusions on a policy with apps** filter placement and nothing else. The
+watcher never places a process whose `exclude_apps` match (the next
+policy whose `apps` match still takes it), and the app manager leaves the
+policy's `uid`/`user` selectors out of nft `meta skuid`, since a raw uid
+match would catch excluded apps too. The watcher places those processes.
+The watcher **never moves a process out of** a policy cgroup it inherited
+(an excluded program started from an app already in the policy). Moving it
+out would grant an exemption by executable, and Linux keeps the cgroup
+across `exec`. Whatever the process executes next would then run outside
+the policy, and its kill switch, until the watcher noticed, and nothing
+could revoke that exemption before the new program opens a socket. So
+such a process stays routed by the policy (fail closed). `pyvpn test`
+warns about this partial enforcement (`apps.exclusions.exclusion_warnings`).
+It can be lifted together with the deferred `exe`/`name` exemptions below.
 
 Exclusions on a policy with destination rules and no apps (an
 `any_process` binding) exempt processes from that policy's marking. This
@@ -353,12 +368,21 @@ the normal route instead of looping them into the target. Kernel tunnels
 socket owner (`meta skuid`), which kernel sockets lack. Exclusions travel
 in `AppBinding.exclude_cgroup_paths` and `exclude_uids`, and the backend
 skips a socket in one of those cgroups (or below it) or owned by one of
-those uids:
+those uids. The daemon (`apps.exclusions.unsupported_exclusions`, called
+from `Daemon._check_supported` at start and reload) and `pyvpn test`
+refuse every selector the app manager cannot enforce, instead of
+accepting and ignoring it:
 
-- `unit`, `flatpak`, `snap`: their existing cgroup path; nothing is moved.
-- `uid`, `user`: `exclude_uids`.
-- `exe`, `name`: **deferred.** A destination-only binding grants no
-  exemption for these selectors (the test fake records them in
+- `uid`, `user`: `exclude_uids`. A `user` that does not exist is refused.
+- `unit`, `flatpak`, `snap`: **deferred and refused.** Their cgroups come
+  and go with the app, and the backend refuses to apply (or re-apply) a
+  plan that lists a missing cgroup. A stopped VPN unit could then keep a
+  later apply, such as a target going down, from taking effect. They can
+  return once the backend skips missing exclusion cgroups and re-applies
+  when one appears. The test fake still maps them to their cgroup paths,
+  so the backend's handling of `exclude_cgroup_paths` stays covered.
+- `exe`, `name`: **deferred and refused.** A destination-only binding
+  grants no exemption for these selectors (the test fake records them in
   `unresolved`), because Linux keeps a process's cgroup across `exec`: a new
   program can open a socket before the watcher revokes the exemption, and
   that socket would then skip the policy. With `on_down: block` it would
@@ -370,10 +394,17 @@ those uids:
   handling of them are reserved for that change; nothing creates such a
   cgroup today.
 
-Only the test fake fills these fields today: the real app manager grants no
-exemption on a destination-only binding for any selector kind. That is
-fail-closed, but silent; reporting it in `pyvpn test` and `pyvpn audit` is a
-follow-up.
+The real app manager fills only `exclude_uids`, and the test fake fills
+both fields. The nft ruleset enforces `exclude_uids` by adding
+`meta skuid != <uids>` to the `any_process` selector, which both the route
+classifier and the DNS redirect use. A negated uid match is safe, unlike a
+negated `socket cgroupv2`: every packet the selector can match has a socket
+owner, so a uid outside the list stays governed. The namespace integration
+test sends from an excluded uid and from a covered one. Rendering
+`exclude_cgroup_paths` (a positive-match return) comes with the deferred
+`unit`/`flatpak`/`snap` exemptions. Until then, those paths only count as
+known cgroups for the stale-cgroup check. Ignoring them is fail-closed,
+since their processes stay governed.
 
 An `any_process` binding may also list the policy's own cgroup
 (`pyvpn.slice/p-<id>`) in `cgroup_paths`, so `pyvpn run` works for

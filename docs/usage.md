@@ -124,7 +124,7 @@ interface, so a probe can never succeed over another route:
 | `targets` | required | Target names in priority order. The first usable one carries the traffic. |
 | `on_down` | `"default"` | When **every** target is down: `"default"` falls back to the normal route; `"block"` drops the traffic (kill switch). |
 | `apps` | | App selectors (below) or `"group:<name>"`. |
-| `exclude_apps` | `[]` | Selectors for apps that should never match this policy. **Not enforced yet**; see [Not supported yet](#not-supported-yet). |
+| `exclude_apps` | `[]` | Selectors for apps that never match this policy (see [Excluding apps](#excluding-apps)). |
 | `domains` | `[]` | Destination filters (see [below](#destination-filters)). |
 | `leak` | see [DNS and leak protection](#dns-and-leak-protection) | DNS and leak options. |
 
@@ -159,6 +159,37 @@ and after each reload. `uid`/`user` selectors are matched in nftables
 directly, so nothing is moved.
 Connections that are already open keep their old route; new ones follow the
 policy.
+
+### Excluding apps
+
+`exclude_apps` takes the same selectors (and `"group:<name>"`). Other
+policies still apply to an excluded process.
+
+- **Policy with `apps`:** an excluded process is never placed in the
+  policy; if another policy's `apps` match it, that policy takes it. With
+  exclusions, the policy's `uid`/`user` app selectors are placed by the
+  process watcher instead of being matched in nftables.
+  **Limit:** a process is never moved *out* of the policy. An excluded
+  program started from something the policy already routes (a shell, your
+  desktop session, `pyvpn run`) stays routed. Moving it out would let
+  whatever it runs next escape the policy and its kill switch. `pyvpn test`
+  warns about this.
+
+  ```json
+  {"name": "Torrents", "targets": ["jp"], "apps": [{"user": "torrent"}],
+   "exclude_apps": [{"name": "ssh"}]}
+  ```
+
+- **Policy with only `domains`** (applies to every process): only `uid` and
+  `user` work. Use them to keep a userspace VPN client's own traffic on the
+  normal route, for example by running it as its own user. The daemon and
+  `pyvpn test` refuse `exe`, `name`, `unit`, `flatpak` and `snap` here
+  (see [Not supported yet](#not-supported-yet)).
+
+  ```json
+  {"name": "Corp", "targets": ["corp"], "domains": ["cidr:10.0.0.0/8"],
+   "exclude_apps": [{"user": "openvpn"}]}
+  ```
 
 ## Starting apps in a policy
 
@@ -361,7 +392,8 @@ The daemon refuses these, or they have no effect yet. Don't rely on them:
 | `"isolation": "netns"` on a policy | The daemon refuses the config (`isolation 'netns' is not supported by the daemon yet`). |
 | `asn:` rules in `domains` | Refused: nothing fetches the ASN prefix cache yet. Use `cidr:` rules instead. |
 | snake's per-device rules (`session:`, `route:`, `drop[...]:`, `if:` with `then:`/`else:`) | Refused by the daemon; `pyvpn rules check` reports them. |
-| `exclude_apps` | Accepted, but the daemon doesn't enforce it: excluded apps are still routed by the policy. |
+| `exclude_apps` by `exe`, `name`, `unit`, `flatpak` or `snap` on a policy with only `domains` | Refused by the daemon and `pyvpn test`. Exclude by `uid` or `user` instead. |
+| `exclude_apps` for programs started from inside a policy with `apps` | They stay routed by the policy; exclusions only stop a process from being placed. `pyvpn test` warns. |
 
 ## Troubleshooting
 

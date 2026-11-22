@@ -15,6 +15,7 @@ import os
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from pyvpn.apps.exclusions import config_exclusion_problems
 from pyvpn.config.models import Config
 from pyvpn.constants import SOCKET_PATH, policy_cgroup
 from pyvpn.daemon.api import AppsEntry, PlacePidParams, PolicyStatus, StatusResult
@@ -243,9 +244,14 @@ class Daemon:
           ``dns_via_target`` (otherwise their traffic is never matched);
         - the target watcher is fixed at startup, so reload cannot change the
           target definitions or the probe settings;
+        - ``exclude_apps`` by ``exe``/``name``/``unit``/``flatpak``/``snap`` on a
+          policy without apps cannot be enforced yet (PLAN.md §3.3);
         - ``isolation: netns`` cannot be enforced yet, and placing such an app
           in an ordinary cgroup would silently give it weaker protection.
         """
+        for problem in config_exclusion_problems(config):
+            # ``exclude_apps`` selectors that cannot be enforced (PLAN.md §3.3).
+            raise ApiError("bad_request", problem)
         for policy in config.policies:
             where = f"policy {policy.name!r}"
             if policy.isolation == "netns":
