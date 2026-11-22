@@ -7,13 +7,16 @@ add chain inet pyvpn dns { type nat hook output priority -100; policy accept; }
 add chain inet pyvpn output { type route hook output priority -90; policy accept; }
 add chain inet pyvpn masq { type nat hook postrouting priority 100; policy accept; }
 add chain inet pyvpn restore { type filter hook prerouting priority -150; policy accept; }
+add chain inet pyvpn check_cgroup
 add chain inet pyvpn p1
 add chain inet pyvpn p1_route
 add rule inet pyvpn dns meta mark & 0xffff0000 0x50590000 return
 add rule inet pyvpn dns socket cgroupv2 level 2 "pyvpn.slice/p-1" meta l4proto { tcp, udp } th dport 53 redirect to :5301
 add rule inet pyvpn dns socket cgroupv2 level 2 "system.slice/transmission.service" meta l4proto { tcp, udp } th dport 53 redirect to :5301
 add rule inet pyvpn dns meta skuid { 1001, 1002 } meta l4proto { tcp, udp } th dport 53 redirect to :5301
-add rule inet pyvpn output socket cgroupv2 level 1 "pyvpn.slice" socket cgroupv2 level 2 != "pyvpn.slice/p-1" reject with icmpx type admin-prohibited
+add rule inet pyvpn output socket cgroupv2 level 1 "pyvpn.slice" jump check_cgroup
+add rule inet pyvpn check_cgroup socket cgroupv2 level 2 "pyvpn.slice/p-1" return
+add rule inet pyvpn check_cgroup reject with icmpx type admin-prohibited
 add rule inet pyvpn output ip daddr @lan_v4 accept
 add rule inet pyvpn output ip6 daddr @lan_v6 accept
 add rule inet pyvpn output meta mark & 0xffff0000 0x50590000 accept

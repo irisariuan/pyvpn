@@ -226,14 +226,15 @@ Linux backend details (stream C, `netfilter/`, `routing/`,
   previously installed a plan successfully. If recovery fails or startup
   cannot install its first plan, the guard remains until a successful apply.
   A plan referring to a missing cgroup is rejected before changing rules.
-* `socket cgroupv2` rules hold the cgroup id nft resolved at load time. The
-  backend records each cgroup's id (inode) and re-applies the last plan,
-  with destinations added since, once every cgroup it names exists and
-  one was re-created (`place_pid` re-creates a missing policy cgroup
-  without a daemon apply). Until then, sockets in a `pyvpn.slice` child
-  that is not one of the loaded cgroups are rejected, so the window cannot
-  leak. Cgroups outside `pyvpn.slice` (none are bound today) are only
-  covered by the re-apply.
+* `socket cgroupv2` rules hold the cgroup ID nft resolved at load time. If
+  a policy cgroup or its parent slice is recreated, Linux placement
+  reinstalls the last plan, including learned destinations, before moving
+  the PID. The move writes into the exact installed cgroup, and a failed
+  reinstall or a further cgroup replacement refuses placement. The backend
+  also polls for cgroups recreated outside placement. A dedicated chain
+  rejects unknown children of the installed `pyvpn.slice` before the LAN
+  exemption. Domain-only policies register their placement cgroups while
+  continuing to match all user processes.
 * Policies for every process (`any_process`) also require `meta skuid`, so
   kernel sockets are never marked: a WireGuard endpoint inside a
   destination set cannot loop the tunnel's own packets into it. A

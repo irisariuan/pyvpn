@@ -9,11 +9,9 @@ marked output is still guarded.
 Kept in sync without the daemon:
 
 * ``socket cgroupv2`` rules hold the cgroup *id* nft resolved at load time.
-  A cgroup that is removed and created again (``CgroupManager.place_pid``
-  re-creates a missing policy cgroup) gets a new id, and the old rule would
-  stop matching its processes. The backend records each cgroup's id (its
-  inode) before loading and re-applies the last plan, with the destinations
-  added since, once every cgroup it names exists and one id has changed.
+  The backend re-applies the last plan, including learned destinations,
+  before placing a PID into a recreated policy cgroup. A background check
+  also reloads changed IDs for cgroups recreated outside that placement path.
 * ``net.ipv4.conf.all.src_valid_mark`` is turned on (as ``wg-quick`` does)
   so strict ``rp_filter`` validates replies with their restored mark. It is
   left on at teardown, since other tunnels may rely on it too.
@@ -34,6 +32,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
 
+from pyvpn.apps.cgroups import CgroupError, CgroupManager
+from pyvpn.constants import policy_cgroup
 from pyvpn.netfilter.render import render
 from pyvpn.netfilter.ruleset import (
     build_route_guard,
@@ -168,6 +168,43 @@ class LinuxBackend:
         self._enable_src_valid_mark()
         await _finish_transaction(self._replace(routes, script))
         self._plan, self._cgroup_ids = plan, ids
+
+    async def place_policy_pid(
+        self, cgroups: CgroupManager, pid: int, policy_id: int, verify_peer: Callable[[], None]
+    ) -> None:
+        """Move a PID only after its exact cgroup is governed by installed rules."""
+        path = policy_cgroup(policy_id)
+        async with self._lock:
+            plan = self._plan
+            if plan is None or path not in self._cgroup_ids:
+                raise CgroupError(f"routing rules for {path} are not installed")
+
+            installed_id = self._cgroup_ids[path]
+            if (
+                not self._known_state
+                or installed_id is None
+                or self._cgroup_id(path) != installed_id
+            ):
+                # Recreate every missing pyvpn-managed child so recovery also
+                # works when the entire slice disappeared. Leave external
+                # cgroups to their owners, as in a normal apply.
+                for policy in plan.policies:
+                    child = policy_cgroup(policy.policy_id)
+                    if child in self._cgroup_ids and self._cgroup_id(child) is None:
+                        cgroups.create(policy.policy_id)
+                try:
+                    await self._apply_locked(plan)
+                except Exception as exc:
+                    raise CgroupError(
+                        f"could not reinstall routing rules for {path}: {exc}"
+                    ) from exc
+                await asyncio.sleep(0)  # deliver any cancellation deferred by the transaction
+                installed_id = self._cgroup_ids[path]
+                if installed_id is None:
+                    raise CgroupError(f"routing rules for {path} are not installed")
+
+            verify_peer()
+            cgroups.place_pid(pid, policy_id, installed_id=installed_id)
 
     def _start_watch(self) -> None:
         if self._watch is None or self._watch.done():

@@ -220,6 +220,15 @@
       "add": {
         "chain": {
           "family": "inet",
+          "name": "check_cgroup",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "chain": {
+          "family": "inet",
           "name": "p1",
           "table": "pyvpn"
         }
@@ -502,17 +511,21 @@
               }
             },
             {
-              "match": {
-                "left": {
-                  "socket": {
-                    "key": "cgroupv2",
-                    "level": 2
-                  }
-                },
-                "op": "!=",
-                "right": "pyvpn.slice/p-1"
+              "jump": {
+                "target": "check_cgroup"
               }
-            },
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "check_cgroup",
+          "expr": [
             {
               "match": {
                 "left": {
@@ -521,10 +534,50 @@
                     "level": 2
                   }
                 },
-                "op": "!=",
+                "op": "==",
+                "right": "pyvpn.slice/p-1"
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "check_cgroup",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "socket": {
+                    "key": "cgroupv2",
+                    "level": 2
+                  }
+                },
+                "op": "==",
                 "right": "pyvpn.slice/p-2"
               }
             },
+            {
+              "return": null
+            }
+          ],
+          "family": "inet",
+          "table": "pyvpn"
+        }
+      }
+    },
+    {
+      "add": {
+        "rule": {
+          "chain": "check_cgroup",
+          "expr": [
             {
               "reject": {
                 "expr": "admin-prohibited",

@@ -26,6 +26,7 @@ import signal
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +62,7 @@ class BackendUnavailable(RuntimeError):
     """The requested platform backend cannot be loaded."""
 
 
-def load_backend(name: str) -> Backend:
+def load_backend(name: str, *, cgroup_root: Path | None = None) -> Backend:
     """Return the backend called ``name``; raise :class:`BackendUnavailable`."""
     if name == "dry-run":
         return DryRunBackend()
@@ -83,7 +84,9 @@ def load_backend(name: str) -> Backend:
     backend_class = getattr(module, LINUX_BACKEND_CLASS, None)
     if backend_class is None:
         raise BackendUnavailable(f"{LINUX_BACKEND_MODULE} does not define {LINUX_BACKEND_CLASS}")
-    backend: Backend = backend_class()
+    backend: Backend = (
+        backend_class() if cgroup_root is None else backend_class(cgroup_root=cgroup_root)
+    )
     return backend
 
 
@@ -233,6 +236,7 @@ def build_daemon(
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     apps = AppManager(CgroupManager(options.resolved_cgroup_root()))
+    route_and_place = getattr(backend, "place_policy_pid", None)
     targets = NetlinkTargetWatcher(config.targets, netlink)
 
     daemon: Daemon | None = None
@@ -262,6 +266,9 @@ def build_daemon(
         dns=dns,
         matcher_factory=matcher_factory(AsnCache(state_dir / "asn")),
         audit=audit,
+        place_policy_pid=(
+            partial(route_and_place, apps.cgroups) if route_and_place is not None else None
+        ),
         store=StateStore(state_dir / "state.json"),
         socket_path=options.socket_path,
     )
@@ -409,7 +416,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
     try:
-        backend = load_backend(options.backend)
+        backend = load_backend(options.backend, cgroup_root=options.cgroup_root)
     except BackendUnavailable as exc:
         print(f"pyvpn-daemon: {exc}", file=sys.stderr)
         return 2

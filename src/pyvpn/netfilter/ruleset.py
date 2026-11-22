@@ -106,12 +106,16 @@ def build_ruleset(plan: RoutingPlan) -> Json:
 
     cmds: list[Json] = [*_table_reset(), {"add": {"table": _table()}}]
     cmds += _sets(plan)
+    stale_checks = _stale_cgroup_rules(plan)
     cmds += _chains()
+    if stale_checks:
+        cmds.append({"add": {"chain": {**_ref(), "name": "check_cgroup"}}})
     for policy in plan.policies:
         cmds += _policy_chains(policy)
 
     rules: list[tuple[str, Expr]] = []
     rules += _dns_rules(plan)
+    rules += stale_checks
     rules += _output_rules(plan)
     for policy in plan.policies:
         rules += _policy_rules(policy)
@@ -318,15 +322,15 @@ def _dns_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:
     return rules
 
 
-def _stale_cgroup_rule(plan: RoutingPlan) -> list[tuple[str, Expr]]:
+def _stale_cgroup_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:
     """Reject sockets in a ``pyvpn.slice`` child the ruleset does not know.
 
     ``socket cgroupv2`` compares cgroup ids resolved when the ruleset was
     loaded. A policy cgroup removed and created again has a new id, so its
-    processes would match no policy and leave by the default route until the
-    backend re-applies. Rejecting every ``pyvpn.slice`` child other than the
-    loaded ones closes that window (fail closed), including for loopback
-    services such as a local resolver, which would forward their DNS.
+    processes would miss the policy until the backend re-applies. Reject
+    unknown children of the installed slice before the loopback exemption,
+    so they cannot reach a local DNS forwarder either. Keep each comparison
+    in its own rule so all policy slots fit within nft's per-rule limit.
     """
     prefix = CGROUP_ROOT + "/"
     known = sorted(
@@ -340,13 +344,18 @@ def _stale_cgroup_rule(plan: RoutingPlan) -> list[tuple[str, Expr]]:
     if not known:
         return []
     slice_match = _match({"socket": {"key": "cgroupv2", "level": 1}}, CGROUP_ROOT)
-    others = [_match({"socket": {"key": "cgroupv2", "level": 2}}, c, "!=") for c in known]
-    return [("output", [slice_match, *others, _REJECT])]
+    rules: list[tuple[str, Expr]] = [
+        ("output", [slice_match, {"jump": {"target": "check_cgroup"}}]),
+    ]
+    for child in known:
+        child_match = _match({"socket": {"key": "cgroupv2", "level": 2}}, child)
+        rules.append(("check_cgroup", [child_match, {"return": None}]))
+    rules.append(("check_cgroup", [_REJECT]))
+    return rules
 
 
 def _output_rules(plan: RoutingPlan) -> list[tuple[str, Expr]]:
     rules: list[tuple[str, Expr]] = [
-        *_stale_cgroup_rule(plan),
         ("output", [_daddr_in(4, "lan_v4"), _ACCEPT]),
         ("output", [_daddr_in(6, "lan_v6"), _ACCEPT]),
         ("output", [_any_pyvpn_mark(), _ACCEPT]),

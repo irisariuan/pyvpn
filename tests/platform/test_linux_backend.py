@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from ipaddress import IPv4Network
 from pathlib import Path
 
 import pytest
 
+from pyvpn.apps.cgroups import CgroupError, CgroupManager
 from pyvpn.config.models import LeakSettings
 from pyvpn.constants import policy_cgroup, policy_mark, policy_rule_pref, policy_table
 from pyvpn.platform.base import Backend, Capabilities
@@ -302,6 +304,62 @@ def test_watcher_reapplies_in_the_background(cgroups: Path) -> None:
             if len(nft.scripts) > loads:
                 break
         assert len(nft.scripts) > loads
+        await backend.teardown()
+
+    asyncio.run(scenario())
+
+
+class FakeCgroups(CgroupManager):
+    def create(self, policy_id: int) -> Path:
+        path = super().create(policy_id)
+        (path / "cgroup.procs").touch()
+        return path
+
+
+@pytest.mark.parametrize("commit_fails", [False, True])
+def test_placement_reinstalls_rules_after_slice_recreation(
+    cgroups: Path, commit_fails: bool
+) -> None:
+    backend, nft, _, log = make(cgroups)
+    groups = FakeCgroups(cgroups)
+    procs = groups.path_for(1) / "cgroup.procs"
+
+    def verify_peer() -> None:
+        assert log[-1] == "nft commit"
+        assert procs.read_text() == ""
+        assert "elements = { 192.0.2.0/24 }" in nft.scripts[-1]
+
+    async def scenario() -> None:
+        await backend.apply(RoutingPlan((policy(1, dests=DestSet(1)), policy(2))))
+        await backend.add_to_set(DestSet(1, frozenset({IPv4Network("192.0.2.0/24")})))
+        groups.slice.rename(cgroups / "previous-slice")
+        if commit_fails:
+            nft.fail_on = "add table inet pyvpn\n"
+            with pytest.raises(CgroupError, match="could not reinstall routing rules"):
+                await backend.place_policy_pid(groups, 123, 1, verify_peer)
+            assert procs.read_text() == ""
+            nft.fail_on = None
+        await backend.place_policy_pid(groups, 123, 1, verify_peer)
+        assert procs.read_text() == "123\n"
+        assert groups.path_for(2).is_dir()
+        await backend.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_placement_refuses_cgroup_replaced_after_rules_commit(cgroups: Path) -> None:
+    backend, _, _, _ = make(cgroups)
+    groups = FakeCgroups(cgroups)
+
+    def replace_cgroup() -> None:
+        groups.path_for(1).rename(cgroups / "previous-cgroup")
+        groups.create(1)
+
+    async def scenario() -> None:
+        await backend.apply(RoutingPlan((policy(1),)))
+        with pytest.raises(CgroupError, match=r"routing rules .* are stale"):
+            await backend.place_policy_pid(groups, 123, 1, replace_cgroup)
+        assert (groups.path_for(1) / "cgroup.procs").read_text() == ""
         await backend.teardown()
 
     asyncio.run(scenario())

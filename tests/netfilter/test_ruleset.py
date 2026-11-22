@@ -18,6 +18,7 @@ import pytest
 from pyvpn.config.models import LeakSettings
 from pyvpn.constants import (
     FWMARK_MASK,
+    MAX_POLICIES,
     dns_stub_port,
     policy_cgroup,
     policy_mark,
@@ -225,13 +226,18 @@ def test_socket_marked_dns_is_never_redirected(name: str) -> None:
 def test_lan_exemption_comes_before_any_mark() -> None:
     out = _rules(build_ruleset(VARIANTS["multi"]), "output")
     lan = [i for i, r in enumerate(out) if r[0]["match"]["right"] in ("@lan_v4", "@lan_v6")]
-    marks = [i for i, r in enumerate(out) if any("mangle" in e or "jump" in e for e in r)]
+    marks = [
+        i
+        for i, r in enumerate(out)
+        if any("mangle" in e or ("jump" in e and e["jump"]["target"] != "check_cgroup") for e in r)
+    ]
     assert len(lan) == 2 and max(lan) < min(marks)
     assert all(out[i][-1] == {"accept": None} for i in lan)
 
 
 def test_unknown_policy_cgroups_are_rejected_before_anything_else() -> None:
-    out = _rules(build_ruleset(VARIANTS["multi"]), "output")
+    doc = build_ruleset(VARIANTS["multi"])
+    out = _rules(doc, "output")
     socket = {"socket": {"key": "cgroupv2", "level": 2}}
     assert out[0] == [
         {
@@ -241,16 +247,24 @@ def test_unknown_policy_cgroups_are_rejected_before_anything_else() -> None:
                 "right": "pyvpn.slice",
             }
         },
-        {"match": {"op": "!=", "left": socket, "right": "pyvpn.slice/p-1"}},
-        {"match": {"op": "!=", "left": socket, "right": "pyvpn.slice/p-2"}},
-        {"reject": {"type": "icmpx", "expr": "admin-prohibited"}},
+        {"jump": {"target": "check_cgroup"}},
     ]
-    # Without a policy cgroup in the plan there is nothing to compare with.
-    assert not any(
-        e.get("match", {}).get("op") == "!="
-        for r in _rules(build_ruleset(VARIANTS["dev_uids"]), "output")
-        for e in r
-    )
+    assert _rules(doc, "check_cgroup") == [
+        [{"match": {"op": "==", "left": socket, "right": "pyvpn.slice/p-1"}}, {"return": None}],
+        [{"match": {"op": "==", "left": socket, "right": "pyvpn.slice/p-2"}}, {"return": None}],
+        [{"reject": {"type": "icmpx", "expr": "admin-prohibited"}}],
+    ]
+    assert not _rules(build_ruleset(VARIANTS["dev_uids"]), "check_cgroup")
+
+
+def test_cgroup_guard_uses_bounded_rules_for_all_policy_slots() -> None:
+    slots = range(1, MAX_POLICIES + 1)
+    doc = build_ruleset(RoutingPlan(tuple(policy(i) for i in slots)))
+    *allowed, rejected = _rules(doc, "check_cgroup")
+    assert len(allowed) == MAX_POLICIES
+    assert {rule[0]["match"]["right"] for rule in allowed} == {policy_cgroup(i) for i in slots}
+    assert all(len(rule) == 2 and rule[1] == {"return": None} for rule in allowed)
+    assert "reject" in rejected[0]
 
 
 def test_tracked_flows_go_through_current_leak_rules() -> None:
