@@ -12,7 +12,7 @@ class FakeAppManager:
     """Binds each policy with apps to its ``pyvpn.slice/p-<id>`` cgroup.
 
     A destination-only policy binds ``any_process``. Its ``exclude_apps``
-    map as the real app manager must map them (PLAN.md §3.3):
+    map to binding fields (PLAN.md §3.3):
 
     - ``unit`` / ``flatpak`` / ``snap``: the app's existing cgroup, looked up
       in ``cgroups`` by ``(field, value)``; nothing is moved.
@@ -24,6 +24,11 @@ class FakeAppManager:
 
     A selector the fake cannot resolve gives no exemption (fail closed) and
     is recorded in ``unresolved``.
+
+    The real app manager supports only ``uid`` / ``user`` here for now, and
+    the daemon refuses the other kinds (``apps.exclusions``). The fake keeps
+    mapping ``unit`` / ``flatpak`` / ``snap`` so the backend's handling of
+    ``exclude_cgroup_paths`` stays covered.
     """
 
     def __init__(

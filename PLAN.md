@@ -289,14 +289,46 @@ A policy lists targets in priority order. The first *usable* one wins:
 
 * **usable = link is up and has an address** (always checked, from netlink
   events)
-* optional **reachability probe**: TCP connect to `probe_targets` through
-  that interface (socket bound with `SO_BINDTODEVICE`), for VPNs that keep
-  the interface up while the tunnel behind it is dead
+* optional **reachability probe** (`"probe": true` on the target): TCP
+  connect to `settings.probe_targets` through that interface, for VPNs that
+  keep the interface up while the tunnel behind it is dead (see below)
 * optional **exit-country check** (snake's `expected_country`, geo URL
   through the interface)
 
 Fail-back hold and the latency-based selection are ported from snake's
 `health` module, but they are opt-in. The default is plain link state.
+
+**Probe design** (`targets/health.py`, `ProbingTargetWatcher`):
+
+* The daemon probes each probed target every `settings.probe_interval`
+  seconds (default 15) while its link is usable. A probe is a TCP connect to
+  each `settings.probe_targets` endpoint in turn (IP literals only, so no DNS
+  over the default route), with a timeout of `min(3 s, interval)`; any
+  successful connect is a success.
+* The socket is bound to the target's interface (`SO_BINDTODEVICE` on Linux,
+  `platform/linux/netlink.py:tcp_connect_bound`) and is never connected if
+  the bind fails, so a probe cannot succeed over another route. It carries no
+  fwmark, so pyvpn's policy rules and egress drops don't apply to it.
+* **Fail closed:** a probed target is down until its first probe succeeds.
+  Health resets (down, "fresh") at daemon start and whenever the interface
+  appears, disappears or changes: a new name (pattern targets) or the same
+  name with a new interface index (a delete and re-create that netlink
+  coalesced into one snapshot); results of probes still
+  in flight for the old interface are dropped. A fresh target is probed at
+  once and comes up on one success, so a reconnected VPN is used quickly.
+* **Hysteresis:** once it has been up, a target goes down after 2
+  consecutive failed probes and comes back after 2 consecutive successes
+  (`PROBE_FALL`, `PROBE_RISE`). Link loss still takes it down at once.
+* Only an up/down flip changes the target's `TargetStatus` (`usable`); the
+  watcher yields a status map only when it differs from the last one, so a
+  probe that confirms the current state never triggers a reconcile.
+* A probed target that is down is treated like any unusable target: the
+  policy moves to its next target, then `on_down` (fallback or block).
+* Reload cannot change targets or `settings` (the watcher is built at
+  startup); restart the daemon instead.
+* Limitation: probing a broadcast interface relies on the main table having
+  a route through it (e.g. its own default route with a metric); without one
+  the kernel assumes the probe address is on-link.
 
 ### 3.3 Identifying apps
 
@@ -307,10 +339,25 @@ Fail-back hold and the latency-based selection are ported from snake's
 | systemd unit / slice | `unit: transmission-daemon.service` | match its existing cgroup path; nothing is moved |
 | user | `uid: 1001`, `user: torrent` | nft `meta skuid` |
 | Flatpak / Snap | `flatpak: org.mozilla.firefox` | its `app-flatpak-…scope` cgroup |
-| exclusions | `exclude_apps: [...]` | the same selectors; an excluded app never matches. `exe`/`name` are deferred for now (see below for policies without apps) |
+| exclusions | `exclude_apps: [...]` | the same selectors; an excluded app is never placed in the policy. Policies without apps support only `uid`/`user` for now (see below) |
 
 Already-open sockets keep their route; new connections follow the new
 cgroup (as in snake: "connections keep their route").
+
+**Exclusions on a policy with apps** filter placement and nothing else. The
+watcher never places a process whose `exclude_apps` match (the next
+policy whose `apps` match still takes it), and the app manager leaves the
+policy's `uid`/`user` selectors out of nft `meta skuid`, since a raw uid
+match would catch excluded apps too. The watcher places those processes.
+The watcher **never moves a process out of** a policy cgroup it inherited
+(an excluded program started from an app already in the policy). Moving it
+out would grant an exemption by executable, and Linux keeps the cgroup
+across `exec`. Whatever the process executes next would then run outside
+the policy, and its kill switch, until the watcher noticed, and nothing
+could revoke that exemption before the new program opens a socket. So
+such a process stays routed by the policy (fail closed). `pyvpn test`
+warns about this partial enforcement (`apps.exclusions.exclusion_warnings`).
+It can be lifted together with the deferred `exe`/`name` exemptions below.
 
 Exclusions on a policy with destination rules and no apps (an
 `any_process` binding) exempt processes from that policy's marking. This
@@ -321,12 +368,21 @@ the normal route instead of looping them into the target. Kernel tunnels
 socket owner (`meta skuid`), which kernel sockets lack. Exclusions travel
 in `AppBinding.exclude_cgroup_paths` and `exclude_uids`, and the backend
 skips a socket in one of those cgroups (or below it) or owned by one of
-those uids:
+those uids. The daemon (`apps.exclusions.unsupported_exclusions`, called
+from `Daemon._check_supported` at start and reload) and `pyvpn test`
+refuse every selector the app manager cannot enforce, instead of
+accepting and ignoring it:
 
-- `unit`, `flatpak`, `snap`: their existing cgroup path; nothing is moved.
-- `uid`, `user`: `exclude_uids`.
-- `exe`, `name`: **deferred.** A destination-only binding grants no
-  exemption for these selectors (the test fake records them in
+- `uid`, `user`: `exclude_uids`. A `user` that does not exist is refused.
+- `unit`, `flatpak`, `snap`: **deferred and refused.** Their cgroups come
+  and go with the app, and the backend refuses to apply (or re-apply) a
+  plan that lists a missing cgroup. A stopped VPN unit could then keep a
+  later apply, such as a target going down, from taking effect. They can
+  return once the backend skips missing exclusion cgroups and re-applies
+  when one appears. The test fake still maps them to their cgroup paths,
+  so the backend's handling of `exclude_cgroup_paths` stays covered.
+- `exe`, `name`: **deferred and refused.** A destination-only binding
+  grants no exemption for these selectors (the test fake records them in
   `unresolved`), because Linux keeps a process's cgroup across `exec`: a new
   program can open a socket before the watcher revokes the exemption, and
   that socket would then skip the policy. With `on_down: block` it would
@@ -338,10 +394,17 @@ those uids:
   handling of them are reserved for that change; nothing creates such a
   cgroup today.
 
-Only the test fake fills these fields today: the real app manager grants no
-exemption on a destination-only binding for any selector kind. That is
-fail-closed, but silent; reporting it in `pyvpn test` and `pyvpn audit` is a
-follow-up.
+The real app manager fills only `exclude_uids`, and the test fake fills
+both fields. The nft ruleset enforces `exclude_uids` by adding
+`meta skuid != <uids>` to the `any_process` selector, which both the route
+classifier and the DNS redirect use. A negated uid match is safe, unlike a
+negated `socket cgroupv2`: every packet the selector can match has a socket
+owner, so a uid outside the list stays governed. The namespace integration
+test sends from an excluded uid and from a covered one. Rendering
+`exclude_cgroup_paths` (a positive-match return) comes with the deferred
+`unit`/`flatpak`/`snap` exemptions. Until then, those paths only count as
+known cgroups for the stale-cgroup check. Ignoring them is fail-closed,
+since their processes stay governed.
 
 An `any_process` binding may also list the policy's own cgroup
 (`pyvpn.slice/p-<id>`) in `cgroup_paths`, so `pyvpn run` works for
@@ -445,7 +508,7 @@ earlier policy that routes the same address for the same process wins.
 DNS-learned drop addresses are persisted and carried over reloads like
 learned destinations. The daemon refuses snake's per-device rules (they would hide
 plain rules in the same policy), rules that do not parse and `asn:` entries
-with no cached prefixes; `pyvpn rules check` reports all of these as
+without a usable ASN cache entry (below); `pyvpn test` reports all of these as
 errors, and `pyvpn rules test` names a policy whose per-device rule hid a
 name. Rule regexes and wildcards use RE2 syntax (constructs RE2 lacks or
 reads differently, such as `\Z`, `(?x)` or `a{,3}`, are rejected with either
@@ -458,6 +521,34 @@ still work. `pyvpn rules check` parses such rules and warns. snake's
 per-device rules (`session:`, `route:`, `drop[...]:`, `if:` branches) parse
 but route nothing; only the names in an `if:` condition are routed, as in
 snake. snake's Domain VPN Routing importer is not ported (router-only).
+
+ASN prefix cache (`match/asn.py`, `pyvpn asn status|refresh`): `asn:N`
+(and `drop:asn:N`) expands to the prefixes AS N announces, read from an on-disk cache,
+`<state_dir>/asn/AS<N>.json` (`{"version": 1, "asn", "source", "fetched",
+"prefixes"}`). The source is RIPEstat's public `announced-prefixes` data call
+(prefixes RIS collectors saw the AS originate in the last two weeks). The
+root daemon never fetches: it reads the cache when it builds the matcher (on
+start and reload), once per ASN, so the checks and the installed sets see the
+same prefixes. `pyvpn asn refresh` fetches; it changes no routing and needs
+only write access to the cache directory (`sudo` for the default one), and
+writes each file atomically (temp file, fsync, rename; files 0644).
+Validation refuses answers for another AS, a non-`ok` status, entries that are
+not networks, IPv4 prefixes shorter than /8 or IPv6 shorter than /16, empty
+lists and more than 250 000 prefixes; a bad answer never replaces the cache.
+Freshness: an entry younger than 1 day is fresh (`refresh` skips it unless
+`--force`), up to 7 days it is still used, and after that (or when dated more
+than an hour in the future) it is stale. Fail closed: the matcher refuses
+missing, invalid, stale and untrusted entries (the daemon accepts only files
+owned by its own uid, root in production, in a directory and files that group
+and others cannot write, opened without following symlinks), so a config that
+needs them does not load and a reload keeps the previous config. While
+running, the daemon re-checks the cache hourly and reports stale entries in
+`status` (`last error: ASN cache: ...`); the installed prefixes stay in force
+until the next successful reload, since removing them would send those
+destinations out the default route. `pyvpn test` reports cache problems as
+errors and `pyvpn rules check FILE` as warnings. Periodic refresh is left to
+the operator (a systemd timer or cron job running `pyvpn asn refresh &&
+pyvpn reload`).
 
 ### 3.5 Per-app DNS and leaks
 
@@ -554,7 +645,8 @@ Design (implemented; `platform/linux/netns.py`, `platform/linux/isolated.py`,
   child's pidfd and waits with `wait_isolated`; it exits with the child's
   status. The app has no controlling terminal (no job control). Each running
   command holds one API connection (the server allows 64 at once).
-* **What the daemon refuses.** `isolation: netns` without backend support,
+* **What the daemon refuses.** `isolation: netns` without `apps` (drop-only
+  domains would otherwise bind every process), without backend support,
   with `domains` other than `drop:` rules (the namespace sends everything
   through the target) or with `dns_via_target: false`. `drop:` rules apply:
   `n<id>` rejects the policy's drop set first (IPv4; the namespace has no

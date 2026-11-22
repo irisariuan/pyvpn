@@ -1,4 +1,5 @@
-"""Bodies of ``pyvpn rules check/test/import/export`` (stream A wires them into the CLI).
+"""Bodies of ``pyvpn rules check/test/import/export`` and ``pyvpn asn
+status/refresh`` (stream A wires them into the CLI).
 
 Each command is pure: it takes text / config objects and returns a
 ``CommandResult`` (exit code + output). File and daemon I/O stay in the CLI.
@@ -6,13 +7,14 @@ Each command is pure: it takes text / config objects and returns a
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from pyvpn.config.models import Config, Policy
 from pyvpn.match import PolicyMatcher, PolicyRules, RuleSet
+from pyvpn.match.asn import REFRESH_HINT, AsnCache, describe_age
 from pyvpn.match.pattern import regex_engine
-from pyvpn.match.policy import NEEDS_RE2, AsnResolver, asn_problems, normalize_name
+from pyvpn.match.policy import NEEDS_RE2, AsnResolver, normalize_name, resolve_problems
 from pyvpn.match.ruleset import Result
 from pyvpn.rulefile.file import ParseResult, RuleFile, format_file, parse_text
 
@@ -29,14 +31,30 @@ def _issues(path: str, r: ParseResult) -> list[str]:
     return out
 
 
-def check(text: str, path: str = "<rules>", convert: bool = False) -> CommandResult:
-    """``pyvpn rules check FILE``: report bad lines of a ``.rules`` file."""
+def check(
+    text: str,
+    path: str = "<rules>",
+    convert: bool = False,
+    asn_prefixes: AsnResolver | None = None,
+) -> CommandResult:
+    """``pyvpn rules check FILE``: report bad lines of a ``.rules`` file.
+
+    With ``asn_prefixes`` (e.g. ``AsnCache.usable``), ``asn:`` lines whose
+    cache entry the daemon would refuse (missing, untrusted, stale) are
+    warnings: the file itself is fine, but a policy using it would not load.
+    """
     r = parse_text(text, convert=convert)
     lines = _issues(path, r)
     pr = PolicyRules.build(0, path, [*r.file.domains])
     lines += [f"{path}: warning: not supported by pyvpn yet: {u}" for u in pr.unsupported()]
     if regex_engine() != "re2":
         lines += [f"{path}: warning: {NEEDS_RE2}: {raw}" for _, raw in pr.needs_re2]
+    if asn_prefixes is not None:
+        for a in r.file.asns:
+            lines += [
+                msg.replace(f"{path}: ", f"{path}: warning: ", 1)
+                for msg in resolve_problems(path, a, asn_prefixes)
+            ]
     f = r.file
     n_rules = sum(1 for d in f.domains if not d.startswith("#"))
     summary = f"{path}: {n_rules} domain rules, {len(f.asns)} ASNs, {len(f.cidrs)} CIDRs"
@@ -51,7 +69,8 @@ def check_config(config: Config, asn_prefixes: AsnResolver | None = None) -> Com
     Rules the daemon refuses to activate are errors; regexes without RE2 are
     warnings (installing ``google-re2`` makes them activatable). ASN rules are
     checked against ``asn_prefixes`` (cached prefixes only, e.g.
-    ``AsnCache.cached``; never fetched) with the same errors as activation.
+    ``AsnCache.usable``; never fetched) with the same errors as activation:
+    a missing, untrusted or stale cache entry is an error.
     """
     lines = []
     bad = False
@@ -70,11 +89,7 @@ def check_config(config: Config, asn_prefixes: AsnResolver | None = None) -> Com
             )
         where = f"policy {p.name!r}"
         for a in pr.all_asns():
-            found = (
-                [f"{where}: asn:{a} needs the ASN cache"]
-                if asn_prefixes is None
-                else asn_problems(where, a, asn_prefixes(a))
-            )
+            found = resolve_problems(where, a, asn_prefixes)
             if found:
                 bad = True
                 lines += [msg.replace(f"{where}: ", f"{where}: error: ", 1) for msg in found]
@@ -170,3 +185,56 @@ def policy_file(policy: Policy) -> RuleFile:
 def export_policy(policy: Policy) -> CommandResult:
     """``pyvpn rules export POLICY``: a policy's rules as ``.rules`` text."""
     return CommandResult(0, format_file(policy_file(policy)))
+
+
+def config_asns(config: Config) -> list[int]:
+    """Every ASN the config's policies refer to, in order."""
+    return PolicyMatcher.from_config(config).asns()
+
+
+def asn_status(cache: AsnCache, asns: Iterable[int]) -> CommandResult:
+    """``pyvpn asn status``: each ASN's cache entry and whether the daemon
+    would route by it. Exit 1 when any entry is missing, invalid or stale."""
+    lines = [f"ASN cache: {cache.dir} (refresh after {describe_age(cache.refresh_after)}, "
+             f"refused after {describe_age(cache.max_age)})"]  # fmt: skip
+    bad = False
+    asns = list(dict.fromkeys(asns))
+    for a in asns:
+        e = cache.entry(a)
+        if e.usable:
+            assert e.age is not None
+            note = "refresh due" if e.state == "due" else "fresh"
+            lines.append(
+                f"asn:{a}: {len(e.prefixes)} prefixes, fetched {describe_age(e.age)} ago ({note})"
+            )
+        else:
+            bad = True
+            lines.append(f"asn:{a}: error: {e.state}: {e.error}")
+    if not asns:
+        lines.append("no asn: rules")
+    if bad:
+        lines.append(f"errors found; the daemon refuses these rules: {REFRESH_HINT}")
+    else:
+        lines.append("ok")
+    return CommandResult(1 if bad else 0, "\n".join(lines) + "\n")
+
+
+def asn_refresh(cache: AsnCache, asns: Iterable[int], force: bool = False) -> CommandResult:
+    """``pyvpn asn refresh``: fetch entries that are due (all with ``force``).
+    Exit 1 when any fetch failed."""
+    lines = []
+    bad = False
+    results = cache.refresh(asns, force=force)
+    for r in results:
+        if r.action == "fetched":
+            lines.append(f"asn:{r.asn}: fetched {r.prefixes} prefixes")
+        elif r.action == "skipped":
+            lines.append(f"asn:{r.asn}: fresh, skipped ({r.prefixes} prefixes)")
+        else:
+            bad = True
+            lines.append(f"asn:{r.asn}: error: {r.error}")
+    if not results:
+        lines.append("no asn: rules")
+    elif any(r.action == "fetched" for r in results):
+        lines.append("run 'sudo pyvpn reload' to route by the new prefixes")
+    return CommandResult(1 if bad else 0, "\n".join(lines) + "\n")

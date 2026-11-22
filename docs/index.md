@@ -66,7 +66,7 @@ It is the client-side counterpart of
 | **Policy** | A named rule: a set of apps, an ordered list of targets, and what to do when every target is down. |
 | **App selector** | How a policy finds its apps: launched with `pyvpn run`, executable path or name, systemd unit, uid or user, Flatpak or Snap ID. |
 | **`on_down`** | Used after every target in the list is down: `default` falls back to the normal route, `block` drops the traffic (kill switch). |
-| **Usable target** | The link is up and has an address (and, with `"gateway": "auto"`, a gateway). Reachability probes are planned. |
+| **Usable target** | The link is up and has an address (and, with `"gateway": "auto"`, a gateway). A target with `"probe": true` must also pass TCP probes sent through its interface. |
 | **Destination filter** | Optional domain, `asn:` or `cidr:` rules (snake's rule language) that limit a policy to matching destinations; `drop:` rules block a destination for the policy's apps. |
 
 ### Target types
@@ -86,7 +86,7 @@ It is the client-side counterpart of
 | systemd unit | `{"unit": "transmission-daemon.service"}` | The process watcher moves the unit's processes into the policy's cgroup. |
 | user | `{"uid": 1001}`, `{"user": "torrent"}` | nft `meta skuid`. |
 | Flatpak / Snap | `{"flatpak": "org.mozilla.firefox"}` | Its `app-flatpak-…scope` cgroup. |
-| exclusions | `"exclude_apps": [...]` | Same selectors; an excluded app never matches. Not enforced yet. |
+| exclusions | `"exclude_apps": [...]` | Same selectors; an excluded app is never placed in the policy (programs started from inside it stay routed). On a policy with only `domains`, only `uid`/`user` work. |
 
 Sockets that are already open keep their route. New connections follow the
 new policy.
@@ -140,7 +140,7 @@ name interfaces; policies map apps to an ordered list of targets. The
 |---|---|---|
 | `interface` | target | Interface name or pattern (`tun*`). |
 | `gateway` | target | An address, or `"auto"` to require a discovered next hop. |
-| `probe` | target | *Not supported yet:* a target with `true` stays unusable. |
+| `probe` | target | `true`: usable only while TCP probes to `settings.probe_targets`, sent through the interface every `settings.probe_interval` seconds, succeed (down after 2 failures in a row, up after 2 successes). |
 | `targets` | policy | Target names in priority order. The first usable one wins. |
 | `on_down` | policy | `default` or `block`. |
 | `apps` | policy | App selectors or `group:<name>`. |
@@ -160,11 +160,14 @@ pyvpn disable                              # remove all pyvpn rules and routes (
 pyvpn enable                               # reinstall them after disable (root)
 pyvpn test [config]                        # validate a config
 pyvpn rules check example.rules            # validate destination rules (snake format)
+pyvpn asn refresh                          # fetch prefixes for asn: rules (RIPEstat)
 pyvpn install --write                      # install the systemd unit for the daemon
 pyvpn desktop --policy NAME                # print or install a menu launcher
 ```
 
-`pyvpn rules` also has `test`, `import` and `export` subcommands. Put
+`pyvpn rules` also has `test`, `import` and `export` subcommands, and
+`pyvpn asn status` shows the ASN prefix cache, which the daemon reads but
+never downloads (see [the ASN prefix cache](usage.md#the-asn-prefix-cache)). Put
 `--json` before a command for machine-readable output. See the
 [usage guide](usage.md) for examples and real output.
 

@@ -187,6 +187,41 @@ def test_test_config_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
+def test_test_reports_unenforceable_exclusions(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        '{"targets":[{"name":"jp","interface":"tun0"}],'
+        '"policies":[{"name":"Corp","targets":["jp"],"domains":["cidr:203.0.113.0/24"],'
+        '"exclude_apps":[{"exe":"/usr/sbin/openvpn"},{"uid":997}]}]}',
+        encoding="utf-8",
+    )
+
+    assert main(["test", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "policy 'Corp': error: exclude_apps exe: '/usr/sbin/openvpn'" in out
+    assert "uid" not in out.split("error:")[1].split("\n")[0].split("exe")[0]
+    assert out.rstrip().endswith("errors found")
+
+
+def test_test_warns_about_app_policy_exclusions(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        '{"targets":[{"name":"jp","interface":"tun0"}],'
+        '"policies":[{"name":"All","targets":["jp"],"apps":[{"uid":1000}],'
+        '"exclude_apps":[{"name":"steam"}]}]}',
+        encoding="utf-8",
+    )
+
+    assert main(["test", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "policy 'All': warning: exclude_apps only keep matching processes" in out
+    assert out.rstrip().endswith("ok")
+
+
 def test_daemon_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["--socket", str(tmp_path / "missing.sock"), "status"]) == 1
     assert "cannot contact" in capsys.readouterr().err

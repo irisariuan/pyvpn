@@ -410,7 +410,16 @@ def _selectors(policy: PolicyPlan) -> list[Expr]:
         # kernel sockets, so a kernel tunnel's own encapsulated packets (e.g.
         # WireGuard to an endpoint inside a destination set) are never marked
         # back into the tunnel.
-        return [[_match(_meta("skuid"), 0, ">=")]]
+        selector = [_match(_meta("skuid"), 0, ">=")]
+        if apps.exclude_uids:
+            # ``exclude_apps`` by uid/user (PLAN.md §3.3). Negating ``meta
+            # skuid`` is safe, unlike a negated ``socket cgroupv2``: every
+            # packet this selector can match has a socket owner, so only the
+            # listed uids skip the policy, in routing and DNS redirection.
+            excluded = sorted(set(apps.exclude_uids))
+            uid: Any = excluded[0] if len(excluded) == 1 else {"set": excluded}
+            selector.append(_match(_meta("skuid"), uid, "!="))
+        return [selector]
     out: list[Expr] = []
     for path in apps.cgroup_paths:
         clean = path.strip("/")

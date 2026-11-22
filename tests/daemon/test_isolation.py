@@ -103,6 +103,8 @@ async def test_isolation_is_refused_without_backend_support(tmp_path: Path) -> N
     [
         ({"domains": ("example.com",), "leak": {"dns_via_target": True}}, "only drop: rules"),
         ({"domains": ("drop:ads.example", "cidr:10.0.0.0/8"), "leak": {}}, "only drop: rules"),
+        ({"domains": ("asn:13335",), "leak": {}}, "only drop: rules"),
+        ({"apps": (), "domains": ("drop:ads.example",), "leak": {}}, "needs 'apps'"),
         ({"leak": {"dns_via_target": False}}, "needs dns_via_target"),
     ],
 )
