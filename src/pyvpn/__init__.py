@@ -1,3 +1,3 @@
 """pyvpn: per-process policy routing (PyPI: snakevpn)."""
 
-__version__ = "0.0.3"
+__version__ = "0.0.4"
