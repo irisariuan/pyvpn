@@ -251,7 +251,9 @@ class _Stub(asyncio.DatagramProtocol):
         await asyncio.gather(*self._udp_tasks, *self._tcp_tasks, return_exceptions=True)
         if self._tcp is not None:
             await self._tcp.wait_closed()
-        if isinstance(udp, asyncio.DatagramTransport):
+        # Not DatagramTransport: on Python 3.11 the selector datagram
+        # transport does not subclass it.
+        if isinstance(udp, asyncio.BaseTransport):
             # ``close()`` only releases the socket on a later loop iteration.
             # Wait for it, so a restart (e.g. on a target change) can bind the
             # port again at once instead of failing with EADDRINUSE.
