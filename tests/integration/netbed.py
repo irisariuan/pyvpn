@@ -11,7 +11,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 PREFIX = "pyvpn-tb-"
@@ -46,11 +46,15 @@ class Netbed:
     ``services()`` report the source address they observed, which identifies
     the egress interface.
 
-    Nothing outside these namespaces is changed. Both are removed on
-    teardown, including when the build fails half way.
+    No network state outside these namespaces is changed. Test code still runs
+    as root in the host mount namespace: the namespaces are a network
+    boundary, not a sandbox. Both are removed on teardown, including when the
+    build fails half way.
     """
 
     tag: str
+    # Routes removed by ``down()``, keyed by interface, restored by ``up()``.
+    _saved_routes: dict[str, list[str]] = field(default_factory=dict, repr=False)
 
     @property
     def host(self) -> str:
@@ -135,7 +139,7 @@ class Netbed:
         return self._call(command, check=check, timeout=timeout, cwd=cwd)
 
     @contextlib.contextmanager
-    def services(self) -> Iterator[Services]:
+    def services(self, *, dns_port: int = DNS_PORT) -> Iterator[Services]:
         """Start the internet-side echo servers; stop them on exit."""
         work = Path(tempfile.mkdtemp(prefix="pyvpn-tb-svc-"))
         try:
@@ -157,7 +161,7 @@ class Netbed:
                         SERVICE_ADDRESS,
                         str(TCP_PORT),
                         str(UDP_PORT),
-                        str(DNS_PORT),
+                        str(dns_port),
                     ],
                     cwd=ROOT,
                     stdout=output,
@@ -240,18 +244,34 @@ class Netbed:
         return result.stdout.strip()
 
     def up(self, link: str) -> None:
-        """Bring ``"wan"`` or ``"vpn"`` back up on the host side."""
-        self._set_link(link, "up")
+        """Bring a link back up and restore the routes ``down`` removed."""
+        iface = self._iface(link)
+        self.ip("link", "set", iface, "up", ns=self.host)
+        for route in self._saved_routes.pop(iface, []):
+            self.ip("route", "replace", *route.split(), ns=self.host, check=False)
 
     def down(self, link: str) -> None:
-        """Take ``"wan"`` or ``"vpn"`` down on the host side."""
-        self._set_link(link, "down")
+        """Take a link down; the kernel drops its routes, ``up`` puts them back."""
+        iface = self._iface(link)
+        self._saved_routes[iface] = self._routes_via(iface)
+        self.ip("link", "set", iface, "down", ns=self.host)
 
-    def _set_link(self, link: str, state: str) -> None:
+    def _iface(self, link: str) -> str:
         iface = {"wan": WAN_IFACE, "vpn": VPN_IFACE}.get(link)
         if iface is None:
             raise ValueError(f"unknown link {link!r}; use 'wan' or 'vpn'")
-        self.ip("link", "set", iface, state, ns=self.host)
+        return iface
+
+    def _routes_via(self, iface: str) -> list[str]:
+        """Static routes through ``iface``, which an admin-down removes."""
+        routes = []
+        for line in self.ip("route", "show", ns=self.host).stdout.splitlines():
+            tokens = line.split()
+            if "proto" in tokens and tokens[tokens.index("proto") + 1] == "kernel":
+                continue
+            if f"dev {iface}" in line:
+                routes.append(line)
+        return routes
 
     def namespaces(self) -> set[str]:
         """Names currently registered in ``/run/netns``."""

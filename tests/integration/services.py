@@ -4,12 +4,17 @@ Started inside the "internet" namespace by ``Netbed.services()``:
 
     python -m tests.integration.services serve READY LOG ADDRESS TCP_PORT UDP_PORT DNS_PORT
 
-A TCP echo, a UDP echo and a DNS responder on one address. Each reply carries
-or implies the client address the server observed (``peer=<ip>``, or an A
-record), and every observation is appended to LOG as JSON lines. The client
-half, run inside the "host" namespace, prints that evidence: 192.0.2.2 means
-the packet left over the WAN link, 198.51.100.2 over the VPN link. No tcpdump
-and no kernel counters.
+A TCP echo, a UDP echo and an A-only DNS responder on one address. Each echo
+reply carries the client address the server observed (``peer=<ip>``) and the
+DNS query's source is recorded the same way, and every observation is appended
+to LOG as JSON lines. The client half, run inside the "host" namespace, prints
+that evidence: 192.0.2.2 means the packet left over the WAN link, 198.51.100.2
+over the VPN link. No tcpdump and no kernel counters.
+
+The responder is deliberately small: it answers A queries with one address,
+returns NOERROR/NODATA for other qtypes, never NXDOMAIN, and has no TCP
+listener. Protocol coverage (AAAA, HTTPS/SVCB, TCP fallback) belongs to the
+DNS suite's own peers (``tests/dns/test_namespace.py``).
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ import time
 from pathlib import Path
 from typing import TextIO
 
-ANSWER_ADDRESS = "203.0.113.7"
+ANSWER_ADDRESS = "203.0.113.1"  # the service address, reachable over either link
 
 
 def serve(
@@ -108,14 +113,18 @@ def _reply_dns(sock: socket.socket, log: TextIO) -> None:
 
 
 def _dns_answer(packet: bytes) -> bytes:
-    qid, question, _ = _parse_question(packet)
+    qid, question, offset = _parse_question(packet)
+    qtype = int.from_bytes(packet[offset - 4 : offset - 2], "big")
+    answers = 1 if qtype == 1 else 0  # A only; everything else is NOERROR/NODATA
     header = (
         qid.to_bytes(2, "big")
         + b"\x81\x80"  # response, recursion available, no error
         + (1).to_bytes(2, "big")  # one question
-        + (1).to_bytes(2, "big")  # one answer
+        + answers.to_bytes(2, "big")
         + b"\x00\x00\x00\x00"
     )
+    if not answers:
+        return header + question
     answer = b"\xc0\x0c\x00\x01\x00\x01" + (60).to_bytes(4, "big") + b"\x00\x04"
     return header + question + answer + socket.inet_aton(ANSWER_ADDRESS)
 

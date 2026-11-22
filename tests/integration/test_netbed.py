@@ -8,10 +8,11 @@ the host's own namespace is untouched.
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from tests.integration.netbed import (
-    PREFIX,
     SERVICE_ADDRESS,
     VPN_IFACE,
     VPN_NETWORK,
@@ -20,6 +21,7 @@ from tests.integration.netbed import (
     WAN_NETWORK,
     WAN_PEER,
     Netbed,
+    NetbedError,
 )
 
 pytestmark = pytest.mark.integration
@@ -93,7 +95,14 @@ def test_the_bed_leaves_the_root_namespace_alone(netbed: Netbed) -> None:
 
     assert netbed.namespaces() == namespaces
     assert netbed.ip("-o", "link", "show").stdout == links
-    assert {name for name in namespaces if name.startswith(PREFIX)} == {
-        netbed.host,
-        netbed.internet,
-    }
+    assert other.host not in netbed.namespaces()
+
+
+def test_destroy_reports_a_namespace_that_survives(netbed: Netbed, monkeypatch) -> None:
+    def stuck(self: Netbed, *args: str, check: bool = True):
+        return subprocess.CompletedProcess(["ip", *args], 1, "", "Device or resource busy")
+
+    monkeypatch.setattr(Netbed, "_ip", stuck)
+    monkeypatch.setattr(Netbed, "namespaces", lambda self: {self.host})
+    with pytest.raises(NetbedError, match="could not remove"):
+        netbed.destroy()

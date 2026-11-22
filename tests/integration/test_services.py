@@ -86,19 +86,45 @@ def test_a_downed_vpn_link_falls_back_to_the_wan(netbed: Netbed) -> None:
 
 
 def test_without_any_route_the_probe_fails_and_logs_nothing(netbed: Netbed) -> None:
-    # What a fail-closed policy looks like from here: the probe cannot send,
-    # and the server records no observation.
+    # A host with no route cannot send, and the server records no observation.
     with netbed.services() as services:
         netbed.down("wan")
         netbed.down("vpn")
         try:
             before = services.observed()
-            with pytest.raises(NetbedError):
+            with pytest.raises(NetbedError, match="Network is unreachable"):
                 netbed.tcp_echo(timeout=1.0)
             assert services.observed() == before
         finally:
-            netbed.up("wan")
             netbed.up("vpn")
+            netbed.up("wan")
+        # positive control: the same probe works once the routes are back
+        assert netbed.tcp_echo() == WAN_PEER
+
+
+def test_up_restores_the_routes_that_down_removed(netbed: Netbed) -> None:
+    with netbed.services() as services, route_via_vpn(netbed):
+        assert netbed.tcp_echo() == VPN_PEER
+
+        netbed.down("vpn")
+        assert netbed.tcp_echo() == WAN_PEER
+
+        netbed.up("vpn")
+        assert netbed.tcp_echo() == VPN_PEER
+        assert services.peers("tcp") == [VPN_PEER, WAN_PEER, VPN_PEER]
+
+
+def test_dns_answers_on_a_non_default_port(netbed: Netbed) -> None:
+    with netbed.services(dns_port=5353) as services:
+        assert netbed.dns_query("example.test", port=5353) == ANSWER_ADDRESS
+        assert services.peers("dns") == [WAN_PEER]
+
+
+def test_services_cleans_up_when_the_body_raises(netbed: Netbed) -> None:
+    with pytest.raises(RuntimeError), netbed.services() as services:
+        directory = services.directory
+        raise RuntimeError("boom")
+    assert not directory.exists()
 
 
 def test_services_stops_the_worker_and_removes_its_directory(netbed: Netbed) -> None:
