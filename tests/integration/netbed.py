@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TextIO
 
 PREFIX = "pyvpn-tb-"
 WAN_NETWORK = "192.0.2"  # RFC 5737 TEST-NET-1: host .2, internet .1
@@ -148,6 +149,25 @@ class Netbed:
         ``nsenter --net`` changes only the network namespace.
         """
         return ["nsenter", f"--net=/run/netns/{ns}"]
+
+    def spawn(
+        self,
+        argv: Sequence[str],
+        *,
+        ns: str | None = None,
+        stdout: int | TextIO | None = None,
+        stderr: int | TextIO | None = None,
+        cwd: Path | None = None,
+    ) -> subprocess.Popen[str]:
+        """Start a long-running program, optionally inside ``ns``."""
+        command = [*self._enter(ns), *argv] if ns else list(argv)
+        return subprocess.Popen(
+            command,
+            cwd=cwd or ROOT,
+            stdout=stdout,
+            stderr=stderr,
+            text=True,
+        )
 
     @contextlib.contextmanager
     def services(self, *, dns_port: int = DNS_PORT) -> Iterator[Services]:
