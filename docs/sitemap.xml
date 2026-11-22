@@ -2,5 +2,7 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://irisariuan.github.io/pyvpn/</loc></url>
   <url><loc>https://irisariuan.github.io/pyvpn/index.md</loc></url>
+  <url><loc>https://irisariuan.github.io/pyvpn/install.md</loc></url>
+  <url><loc>https://irisariuan.github.io/pyvpn/usage.md</loc></url>
   <url><loc>https://irisariuan.github.io/pyvpn/llms.txt</loc></url>
 </urlset>
