@@ -149,11 +149,26 @@ def test_fake_maps_each_exclusion_selector_kind() -> None:
             "system.slice/mullvad-daemon.service",
             "user.slice/app-flatpak-com.example.Vpn-1.scope",
             "system.slice/snap.examplevpn.daemon.service",
-            "pyvpn.slice/x-4",  # exe and name share the moved-process cgroup
         ),
         exclude_uids=(994, 997),
     )
-    assert apps.unresolved == []
+    assert [sel for _, sel in apps.unresolved] == [
+        AppSelector(exe="/usr/sbin/openvpn"),
+        AppSelector(name="wg"),
+    ]
+
+
+def test_fake_defers_exe_and_name_exclusions() -> None:
+    policy = Policy(
+        name="corp",
+        targets=("jp",),
+        domains=("corp.example",),
+        exclude_apps=(AppSelector(exe="/usr/sbin/openvpn"), AppSelector(uid=997)),
+    )
+    apps = FakeAppManager()
+    binding = asyncio.run(apps.bind(4, policy, ()))
+    assert binding == AppBinding(4, any_process=True, exclude_uids=(997,))
+    assert [sel for _, sel in apps.unresolved] == [AppSelector(exe="/usr/sbin/openvpn")]
 
 
 def test_fake_gives_no_exemption_for_unresolved_selectors() -> None:

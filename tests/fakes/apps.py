@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Mapping, Sequence
 
 from pyvpn.config.models import AppGroup, AppSelector, Policy
-from pyvpn.constants import excluded_cgroup, policy_cgroup
+from pyvpn.constants import policy_cgroup
 from pyvpn.state import AppBinding
 from tests.fakes._stream import Stream
 
@@ -17,10 +17,10 @@ class FakeAppManager:
     - ``unit`` / ``flatpak`` / ``snap``: the app's existing cgroup, looked up
       in ``cgroups`` by ``(field, value)``; nothing is moved.
     - ``uid``: ``exclude_uids``; ``user``: looked up in ``users``.
-    - ``exe`` / ``name``: a moved-process cgroup from ``excluded_cgroup``.
-      The fake has no processes, so it keys these by this policy alone
-      (``x-<bit of policy_id>``); the real watcher keys each process by the
-      full set of destination-only policies whose exclusions match it.
+    - ``exe`` / ``name``: deferred. A cgroup set by an executable match
+      outlives an ``exec``, so it cannot be revoked before the new program
+      opens a socket; these selectors are reported unresolved and exempt
+      nothing.
 
     A selector the fake cannot resolve gives no exemption (fail closed) and
     is recorded in ``unresolved``.
@@ -69,8 +69,11 @@ class FakeAppManager:
                     self.unresolved.append((policy_id, sel))
                 continue
             if sel.exe is not None or sel.name is not None:
-                path = excluded_cgroup((policy_id,))
-            else:
+                # Deferred: the exemption cannot be revoked before a new
+                # executable opens a socket (PLAN.md §3.3).
+                self.unresolved.append((policy_id, sel))
+                continue
+            if sel.unit is not None or sel.flatpak is not None or sel.snap is not None:
                 key = next(
                     (f, v)
                     for f in ("unit", "flatpak", "snap")
@@ -80,6 +83,9 @@ class FakeAppManager:
                 if path is None:
                     self.unresolved.append((policy_id, sel))
                     continue
+            if path is None:  # pragma: no cover - AppSelector sets one field
+                self.unresolved.append((policy_id, sel))
+                continue
             if path not in paths:
                 paths.append(path)
         return AppBinding(
