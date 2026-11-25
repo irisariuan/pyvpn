@@ -10,6 +10,8 @@ import json
 import os
 import shutil
 import stat
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import ip_network
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,7 +23,7 @@ from pyvpn.cli import main
 from pyvpn.config.models import Config
 from pyvpn.daemon.main import asn_cache_problem
 from pyvpn.match import RuleConfigError, build_matcher
-from pyvpn.match.asn import AsnCache, AsnError, parse_ripe, validate_prefixes
+from pyvpn.match.asn import AsnCache, AsnError, _http_get, parse_ripe, validate_prefixes
 from pyvpn.rulefile import commands
 
 DATA = Path(__file__).parent / "data"
@@ -235,6 +237,24 @@ def test_failed_refresh_keeps_the_old_entry_until_it_expires(cache_dir: Path) ->
     assert expired.refresh([2906])[0].action == "failed"
     with pytest.raises(AsnError, match="stale"):
         expired.usable(2906)
+
+
+def test_http_get_refuses_redirects() -> None:
+    class Redirect(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(302)
+            self.send_header("Location", "http://example.invalid/elsewhere")
+            self.end_headers()
+
+    server = HTTPServer(("127.0.0.1", 0), Redirect)
+    thread = threading.Thread(target=server.handle_request)
+    thread.start()
+    try:
+        with pytest.raises(AsnError, match="refusing redirect"):
+            _http_get(f"http://127.0.0.1:{server.server_port}/")
+    finally:
+        thread.join(5)
+        server.server_close()
 
 
 def test_bad_answer_never_replaces_the_cache(cache_dir: Path) -> None:

@@ -66,9 +66,17 @@ class AsnError(Exception):
     pass
 
 
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """treat a redirect as a failed refresh; the cache is the trusted source."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        raise AsnError(f"refusing redirect to {newurl}")
+
+
 def _http_get(url: str) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "pyvpn"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    opener = urllib.request.build_opener(_RefuseRedirect())
+    with opener.open(req, timeout=60) as resp:
         if resp.status != 200:
             raise AsnError(f"HTTP {resp.status}")
         body: bytes = resp.read(_MAX_BODY + 1)
