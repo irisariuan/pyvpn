@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Final
 
@@ -69,18 +70,42 @@ def validate_config_document(document: object, source: str = "<object>") -> Conf
         ) from exc
 
 
+def _check_root_owned(fd: int, path: Path) -> None:
+    """refuse a root-read config that another user could replace or edit."""
+    if os.geteuid() != 0:
+        return
+    info = os.fstat(fd)
+    if info.st_uid != 0:
+        raise ConfigFileError(f"configuration file must be owned by root: {path}")
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        raise ConfigFileError(f"configuration file must not be group- or world-writable: {path}")
+
+
+def _read_config(path: Path) -> str:
+    """read the config through one fd so the permission check cannot be raced."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except FileNotFoundError as exc:
+        raise ConfigFileError(f"configuration file not found: {path}") from exc
+    except PermissionError as exc:
+        raise ConfigFileError(f"cannot read configuration file: {path}") from exc
+    except OSError as exc:
+        raise ConfigFileError(f"cannot read configuration file: {path}: {exc}") from exc
+    try:
+        _check_root_owned(fd, path)
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            return handle.read()
+    except UnicodeDecodeError as exc:
+        raise ConfigFileError(f"{path}: configuration is not valid UTF-8") from exc
+    except OSError as exc:
+        raise ConfigFileError(f"cannot read configuration file: {path}: {exc}") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     """load and validate a JSON configuration file."""
     config_path = Path(path) if path is not None else default_config_path()
-    try:
-        text = config_path.read_text(encoding="utf-8")
-    except FileNotFoundError as exc:
-        raise ConfigFileError(f"configuration file not found: {config_path}") from exc
-    except PermissionError as exc:
-        raise ConfigFileError(f"cannot read configuration file: {config_path}") from exc
-    except UnicodeDecodeError as exc:
-        raise ConfigFileError(f"{config_path}: configuration is not valid UTF-8") from exc
-    except OSError as exc:
-        raise ConfigFileError(f"cannot read configuration file: {config_path}: {exc}") from exc
-
-    return load_config_text(text, str(config_path))
+    return load_config_text(_read_config(config_path), str(config_path))
