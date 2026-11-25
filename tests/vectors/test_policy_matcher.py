@@ -184,7 +184,7 @@ def test_runtime_asn_rules_use_the_cache(tmp_path: Path) -> None:
     cfg = _config({"name": "asn-only", "targets": ["jp"], "domains": ["asn:AS2906"]})
     with pytest.raises(RuleConfigError, match="asn:2906 needs the ASN cache"):
         build_matcher(cfg)
-    cache = AsnCache(tmp_path, fetch=lambda url: _ripe("198.38.96.0/19"))
+    cache = AsnCache(tmp_path, fetch=lambda url: _ripe(2906, "198.38.96.0/19"))
     factory = matcher_factory(cache)
     with pytest.raises(RuleConfigError, match="asn:2906 is not in the ASN cache"):
         factory(cfg)
@@ -240,14 +240,16 @@ def test_bad_policy_entries_are_reported() -> None:
 # --- ASN cache -----------------------------------------------------------
 
 
-def _ripe(*prefixes: str) -> bytes:
-    return json.dumps({"data": {"prefixes": [{"prefix": p} for p in prefixes]}}).encode()
+def _ripe(asn: int, *prefixes: str) -> bytes:
+    return json.dumps(
+        {"data": {"resource": f"AS{asn}", "prefixes": [{"prefix": p} for p in prefixes]}}
+    ).encode()
 
 
 def test_asn_cache(tmp_path: Path) -> None:
     now = [1000.0]
     calls: list[str] = []
-    answer = [_ripe("1.2.3.0/24", "2001:db8::/32")]
+    answer = [_ripe(2906, "1.2.3.0/24", "2001:db8::/32")]
 
     def fetch(url: str) -> bytes:
         calls.append(url)
@@ -274,7 +276,7 @@ def test_asn_cache(tmp_path: Path) -> None:
 
 def test_parse_ripe_empty() -> None:
     with pytest.raises(AsnError):
-        parse_ripe(_ripe())
+        parse_ripe(_ripe(2906))
 
 
 # --- rules commands ------------------------------------------------------
@@ -315,7 +317,7 @@ def test_import_and_export() -> None:
 def test_asn_cache_writes_atomically(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import os
 
-    c = AsnCache(tmp_path, fetch=lambda url: _ripe("1.2.3.0/24"))
+    c = AsnCache(tmp_path, fetch=lambda url: _ripe(1, "1.2.3.0/24"))
     synced: list[int] = []
     real_fsync = os.fsync
 

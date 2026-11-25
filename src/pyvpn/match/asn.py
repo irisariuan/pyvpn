@@ -6,8 +6,11 @@ prefixes RIS route collectors saw an AS originate in the last two weeks.
 
 Prefixes are cached on disk, one JSON file per ASN (``AS<n>.json``)::
 
-    {"version": 1, "asn": 2906, "source": "<url>", "fetched": <unix time>,
-     "prefixes": ["198.38.96.0/19", ...]}
+    {"version": 2, "asn": 2906, "resource": "AS2906", "source": "<url>",
+     "fetched": <unix time>, "prefixes": ["198.38.0.0/19", ...]}
+
+Version 1 files (no ``resource``) are still read, bound to the ASN in the
+filename; a refresh rewrites them as version 2.
 
 Freshness policy (PLAN.md §3.4):
 
@@ -48,7 +51,7 @@ DEFAULT_URL = (
 )
 DEFAULT_MAX_AGE = 7 * 24 * 3600.0
 DEFAULT_REFRESH_AFTER = 24 * 3600.0
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 MAX_PREFIXES = 250_000  # larger than any AS announces today
 MIN_PREFIXLEN_V4 = 8  # nothing shorter is announced; /0 would route everything
 MIN_PREFIXLEN_V6 = 16
@@ -114,7 +117,9 @@ def parse_ripe(body: bytes, asn: int | None = None) -> list[str]:
         if doc.get("status", "ok") != "ok":
             raise AsnError(f"RIPEstat status {doc.get('status')!r}")
         data = doc["data"]
-        if asn is not None and "resource" in data:
+        if asn is not None:
+            if "resource" not in data:
+                raise AsnError(f"answer does not name its AS; expected AS{asn}")
             got = str(data["resource"]).upper().removeprefix("AS")
             if got != str(asn):
                 raise AsnError(f"answer is for AS{got}, not AS{asn}")
@@ -219,11 +224,17 @@ class AsnCache:
             body = f.read(_MAX_BODY + 1)
         try:
             doc = json.loads(body)
-            version = doc.get("version", CACHE_VERSION)
-            if version != CACHE_VERSION:
+            version = doc.get("version", 1)
+            if version not in (1, CACHE_VERSION):
                 raise AsnError(f"unknown cache version {version!r}")
             if "asn" in doc and doc["asn"] != n:
                 raise AsnError(f"holds AS{doc['asn']}, not AS{n}")
+            if "resource" in doc:
+                got = str(doc["resource"]).upper().removeprefix("AS")
+                if got != str(n):
+                    raise AsnError(f"holds AS{got}, not AS{n}")
+            if version == CACHE_VERSION and "asn" not in doc:
+                raise AsnError(f"cache version {version} must name its ASN")
             raw = doc["fetched"]
             # NaN would compare false against every limit and never expire.
             if isinstance(raw, bool) or not isinstance(raw, (int, float)):
@@ -295,6 +306,7 @@ class AsnCache:
         doc = {
             "version": CACHE_VERSION,
             "asn": n,
+            "resource": f"AS{n}",
             "source": self.url.format(asn=n),
             "fetched": self._clock(),
             "prefixes": got,

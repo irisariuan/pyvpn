@@ -106,6 +106,11 @@ def test_missing_entry(tmp_path: Path) -> None:
         ({"version": 1, "asn": 2906, "fetched": FETCHED, "prefixes": []}, "no prefixes"),
         ({"version": 1, "asn": 2906, "fetched": FETCHED, "prefixes": [1]}, "not a string"),
         ({"version": 1, "asn": 1, "fetched": FETCHED, "prefixes": ["1.0.0.0/24"]}, "not AS2906"),
+        (
+            {"version": 1, "resource": "AS1", "fetched": FETCHED, "prefixes": ["1.0.0.0/24"]},
+            "not AS2906",
+        ),
+        ({"version": 2, "fetched": FETCHED, "prefixes": ["1.0.0.0/24"]}, "must name its ASN"),
         ({"version": 9, "fetched": FETCHED, "prefixes": ["1.0.0.0/24"]}, "version"),
         ({"version": 1, "prefixes": ["1.0.0.0/24"]}, "not a valid cache file"),
         (["1.0.0.0/24"], "not a valid cache file"),
@@ -124,6 +129,17 @@ def test_invalid_entries_are_refused(tmp_path: Path, doc: object, reason: str) -
         build_matcher(_config("asn:2906"), _cache(tmp_path, FETCHED))
 
 
+def test_version_1_cache_is_bound_to_its_filename(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        2906,
+        {"version": 1, "fetched": FETCHED, "prefixes": ["1.0.0.0/24"]},
+    )
+    e = _cache(tmp_path, FETCHED + HOUR).entry(2906)
+    assert e.state == "fresh" and e.usable
+    assert list(e.prefixes) == ["1.0.0.0/24"]
+
+
 def test_prefixes_are_normalized_and_deduplicated() -> None:
     assert validate_prefixes(["10.1.2.3/8", "10.0.0.0/8", " 2001:db8::1/32"]) == [
         "10.0.0.0/8",
@@ -137,6 +153,11 @@ def test_parse_ripe_fixture() -> None:
         parse_ripe(RIPE, 13335)
     with pytest.raises(AsnError, match="status"):
         parse_ripe(json.dumps({"status": "error", "data": {}}).encode())
+    with pytest.raises(AsnError, match="does not name its AS"):
+        parse_ripe(
+            json.dumps({"data": {"prefixes": [{"prefix": "1.0.0.0/24"}]}}).encode(),
+            2906,
+        )
     with pytest.raises(AsnError, match="/8"):
         parse_ripe(json.dumps({"data": {"prefixes": [{"prefix": "0.0.0.0/1"}]}}).encode())
 
@@ -190,7 +211,8 @@ def test_refresh_fetches_due_entries_and_skips_fresh_ones(tmp_path: Path) -> Non
     [r] = c.refresh([2906, 2906])
     assert (r.action, r.prefixes) == ("fetched", 3) and len(calls) == 1
     doc = json.loads((d / "AS2906.json").read_text())
-    assert doc["version"] == 1 and doc["asn"] == 2906 and doc["fetched"] == FETCHED
+    assert doc["version"] == 2 and doc["asn"] == 2906 and doc["resource"] == "AS2906"
+    assert doc["fetched"] == FETCHED
     assert doc["prefixes"] == FIXTURE_PREFIXES and "stat.ripe.net" in doc["source"]
     assert stat.S_IMODE((d / "AS2906.json").stat().st_mode) == 0o644
 
