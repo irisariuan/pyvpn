@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Sequence
 
 from pyvpn.apps.cgroups import CgroupManager
 from pyvpn.apps.exclusions import expand, unsupported_exclusions
-from pyvpn.config.models import AppGroup, Policy
+from pyvpn.config.models import AppGroup, AppSelector, Policy
 from pyvpn.constants import policy_cgroup
 from pyvpn.state import AppBinding
 
@@ -37,20 +37,16 @@ class AppManager:
             )
         else:
             self.cgroups.create(policy_id)
-            group_map = {group.name: group.apps for group in groups}
             uids: set[int] = set()
-            for ref in policy.apps:
-                selectors = (
-                    group_map.get(ref.removeprefix("group:"), ())
-                    if isinstance(ref, str)
-                    else (ref,)
-                )
-                uids.update(selector.uid for selector in selectors if selector.uid is not None)
+            for selector in expand(policy.apps, groups):
+                uid = _selector_uid(selector, policy)
+                if uid is not None:
+                    uids.add(uid)
             if policy.exclude_apps:
-                # A raw UID match would also catch excluded apps. Leave those
-                # processes to the exclusion-aware watcher, which places them
-                # in the policy cgroup individually.
-                uids.clear()
+                # Keep the raw uid match for the non-excluded uids. A uid/user
+                # exclusion is subtracted; a name/exe/... exclusion combined
+                # with a uid selector was refused above.
+                uids.difference_update(_exclude_uids(policy, groups))
             binding = AppBinding(
                 policy_id,
                 cgroup_paths=(policy_cgroup(policy_id),),
@@ -74,8 +70,22 @@ class AppManager:
         return generate()
 
 
+def _selector_uid(selector: AppSelector, policy: Policy) -> int | None:
+    """The uid a single app selector matches, resolving ``user``."""
+    if selector.uid is not None:
+        return selector.uid
+    if selector.user is not None:
+        try:
+            return pwd.getpwnam(selector.user).pw_uid
+        except KeyError:
+            raise ValueError(
+                f"policy {policy.name!r}: app user {selector.user!r} does not exist"
+            ) from None
+    return None
+
+
 def _exclude_uids(policy: Policy, groups: Sequence[AppGroup]) -> tuple[int, ...]:
-    """``exclude_uids`` for a destination-only policy (``uid`` / ``user``)."""
+    """``exclude_uids`` for a policy's ``uid`` / ``user`` exclusions."""
     uids: set[int] = set()
     for selector in expand(policy.exclude_apps, groups):
         if selector.uid is not None:

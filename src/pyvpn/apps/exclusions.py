@@ -22,6 +22,7 @@ a config, and ``pyvpn test`` reports the same problems.
 
 from __future__ import annotations
 
+import pwd
 from collections.abc import Iterable, Sequence
 
 from pyvpn.config.models import AppGroup, AppRef, AppSelector, Config, Policy
@@ -48,12 +49,34 @@ def selector_field(selector: AppSelector) -> str:
 
 def unsupported_exclusions(policy: Policy, groups: Sequence[AppGroup]) -> list[str]:
     """Why ``policy``'s ``exclude_apps`` cannot be enforced, or ``[]``."""
-    if policy.apps or not policy.exclude_apps:
+    if not policy.exclude_apps:
         return []
     problems: list[str] = []
     for selector in expand(policy.exclude_apps, groups):
+        if selector.user is not None:
+            try:
+                pwd.getpwnam(selector.user)
+            except KeyError:
+                problems.append(
+                    f"policy {policy.name!r}: exclude_apps user: {selector.user!r} does not exist"
+                )
+                continue
         field = selector_field(selector)
         if field in ANY_PROCESS_FIELDS:
+            continue
+        if policy.apps:
+            # A uid/user app selector is a raw nft skuid match. A name/exe/...
+            # exclusion cannot be subtracted from it, so refuse the combination.
+            app_selectors = expand(policy.apps, groups)
+            if not any(
+                selector_field(app_selector) in ANY_PROCESS_FIELDS for app_selector in app_selectors
+            ):
+                continue
+            value = getattr(selector, field)
+            problems.append(
+                f"policy {policy.name!r}: exclude_apps {field}: {value!r} cannot be "
+                "combined with a uid/user app selector; exclude it by uid or user"
+            )
             continue
         value = getattr(selector, field)
         problems.append(
@@ -80,5 +103,7 @@ def exclusion_warnings(config: Config) -> list[str]:
         "placed; an excluded program started from a process already in this policy "
         "stays routed by it"
         for policy in config.policies
-        if policy.apps and policy.exclude_apps
+        if policy.apps
+        and policy.exclude_apps
+        and not unsupported_exclusions(policy, config.app_groups)
     ]

@@ -211,7 +211,7 @@ def test_test_warns_about_app_policy_exclusions(
     path = tmp_path / "config.json"
     path.write_text(
         '{"targets":[{"name":"jp","interface":"tun0"}],'
-        '"policies":[{"name":"All","targets":["jp"],"apps":[{"uid":1000}],'
+        '"policies":[{"name":"All","targets":["jp"],"apps":[{"name":"firefox"}],'
         '"exclude_apps":[{"name":"steam"}]}]}',
         encoding="utf-8",
     )
@@ -220,6 +220,23 @@ def test_test_warns_about_app_policy_exclusions(
     out = capsys.readouterr().out
     assert "policy 'All': warning: exclude_apps only keep matching processes" in out
     assert out.rstrip().endswith("ok")
+
+
+def test_test_refuses_name_exclusion_with_uid_selector(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        '{"targets":[{"name":"jp","interface":"tun0"}],'
+        '"policies":[{"name":"All","targets":["jp"],"apps":[{"uid":1000}],'
+        '"exclude_apps":[{"name":"steam"}]}]}',
+        encoding="utf-8",
+    )
+
+    assert main(["test", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "cannot be combined with a uid/user app selector" in out
+    assert out.rstrip().endswith("errors found")
 
 
 def test_daemon_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

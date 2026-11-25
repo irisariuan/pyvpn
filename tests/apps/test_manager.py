@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from pyvpn.apps.cgroups import CgroupManager
 from pyvpn.apps.manager import AppManager
 from pyvpn.config.models import AppGroup, AppSelector, Policy
@@ -34,7 +36,20 @@ async def test_group_uid_is_in_binding(tmp_path: Path) -> None:
     assert binding.uids == (42,)
 
 
-async def test_exclusions_drop_raw_uid_match(tmp_path: Path) -> None:
+async def test_uid_exclusions_are_subtracted_from_the_uid_match(tmp_path: Path) -> None:
+    manager = AppManager(CgroupManager(tmp_path))
+    policy = Policy(
+        name="p",
+        targets=("t",),
+        apps=(AppSelector(uid=1001), AppSelector(uid=1002)),
+        exclude_apps=(AppSelector(uid=1001),),
+    )
+    binding = await manager.bind(1, policy, ())
+    assert binding.uids == (1002,)
+    assert binding.cgroup_paths == ("pyvpn.slice/p-1",)
+
+
+async def test_name_exclusion_with_a_uid_selector_is_refused(tmp_path: Path) -> None:
     manager = AppManager(CgroupManager(tmp_path))
     policy = Policy(
         name="p",
@@ -42,6 +57,5 @@ async def test_exclusions_drop_raw_uid_match(tmp_path: Path) -> None:
         apps=(AppSelector(uid=1001),),
         exclude_apps=(AppSelector(name="ssh"),),
     )
-    binding = await manager.bind(1, policy, ())
-    assert binding.uids == ()
-    assert binding.cgroup_paths == ("pyvpn.slice/p-1",)
+    with pytest.raises(ValueError, match="cannot be combined"):
+        await manager.bind(1, policy, ())

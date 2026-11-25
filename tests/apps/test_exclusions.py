@@ -24,6 +24,12 @@ USER_POLICY = Policy(
     exclude_apps=(AppSelector(name="steam"),),
 )
 GAMES_POLICY = Policy(name="games", targets=("t",), apps=(AppSelector(name="steam"),))
+NAME_POLICY = Policy(
+    name="vpn",
+    targets=("t",),
+    apps=(AppSelector(name="firefox"),),
+    exclude_apps=(AppSelector(name="steam"),),
+)
 
 
 def fake_process(root: Path, pid: int, name: str, *, cgroup: str = "/user.slice") -> None:
@@ -73,22 +79,49 @@ async def test_excluded_app_in_the_policy_cgroup_is_never_moved_out(tmp_path: Pa
     assert place.placed == []
 
 
-async def test_app_policy_with_exclusions_is_placed_by_the_watcher(tmp_path: Path) -> None:
-    # A raw uid match in nft would also catch the excluded apps.
-    binding = await AppManager(CgroupManager(tmp_path)).bind(1, USER_POLICY, ())
+async def test_name_app_policy_with_exclusions_is_placed_by_the_watcher(tmp_path: Path) -> None:
+    binding = await AppManager(CgroupManager(tmp_path)).bind(1, NAME_POLICY, ())
     assert binding.uids == ()
     assert binding.cgroup_paths == ("pyvpn.slice/p-1",)
     assert not (tmp_path / "pyvpn.slice/x-1").exists()
 
 
+async def test_uid_exclusion_is_subtracted_from_the_uid_match(tmp_path: Path) -> None:
+    policy = Policy(
+        name="vpn",
+        targets=("t",),
+        apps=(AppSelector(uid=1000),),
+        exclude_apps=(AppSelector(uid=1000),),
+    )
+    binding = await AppManager(CgroupManager(tmp_path)).bind(1, policy, ())
+    assert binding.uids == ()
+    assert binding.cgroup_paths == ("pyvpn.slice/p-1",)
+
+
+async def test_name_exclusion_with_a_uid_selector_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="cannot be combined"):
+        await AppManager(CgroupManager(tmp_path)).bind(1, USER_POLICY, ())
+
+
 def test_app_policy_exclusions_warn_that_they_only_filter_placement() -> None:
     config = Config(
         targets=(Target(name="t", interface="wg0"),),
-        policies=(USER_POLICY, GAMES_POLICY),
+        policies=(NAME_POLICY, GAMES_POLICY),
     )
     (warning,) = exclusion_warnings(config)
     assert warning.startswith("policy 'vpn': exclude_apps only keep matching processes")
     assert config_exclusion_problems(config) == []
+
+
+def test_unknown_user_in_exclusions_is_reported() -> None:
+    policy = Policy(
+        name="vpn",
+        targets=("t",),
+        apps=(AppSelector(name="firefox"),),
+        exclude_apps=(AppSelector(user="no-such-user-pyvpn"),),
+    )
+    (problem,) = unsupported_exclusions(policy, ())
+    assert "does not exist" in problem
 
 
 # --- policies with only domains: uid/user only -------------------------------
@@ -146,7 +179,7 @@ def test_config_problems_expand_groups_and_skip_app_policies() -> None:
         targets=(Target(name="t", interface="wg0"),),
         app_groups=(AppGroup(name="vpn", apps=(AppSelector(name="openvpn"),)),),
         policies=(
-            USER_POLICY,
+            NAME_POLICY,
             Policy(
                 name="corp",
                 targets=("t",),
