@@ -9,11 +9,14 @@ from __future__ import annotations
 import ipaddress
 import math
 from ipaddress import IPv4Address, IPv6Address
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 from pyvpn.constants import MAX_POLICIES
+
+MIN_PROBE_INTERVAL: Final = 1.0
+"""Smallest accepted probe interval; lower values only add load without failover gain."""
 
 
 class _Model(BaseModel):
@@ -175,6 +178,8 @@ class Settings(_Model):
     def _interval(self) -> Settings:
         if not math.isfinite(self.probe_interval) or self.probe_interval <= 0:
             raise ValueError("probe_interval must be a finite value greater than zero")
+        if self.probe_interval < MIN_PROBE_INTERVAL:
+            raise ValueError(f"probe_interval must be at least {MIN_PROBE_INTERVAL:g}s")
         for target in self.probe_targets:
             host, separator, port_text = target.rpartition(":")
             if not separator or not host or not port_text:

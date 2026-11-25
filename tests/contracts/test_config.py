@@ -125,6 +125,17 @@ def test_probe_interval_must_be_positive() -> None:
         )
 
 
+def test_probe_interval_has_a_floor() -> None:
+    with pytest.raises(ValidationError, match="at least 1s"):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [{"name": "p", "targets": ["vpn"], "apps": [{"name": "ssh"}]}],
+                "settings": {"probe_interval": 0.5},
+            }
+        )
+
+
 def test_kill_switch_rejects_ipv6_off() -> None:
     with pytest.raises(ValidationError, match="leaves IPv6 on the default route"):
         Config.model_validate(
