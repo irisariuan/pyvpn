@@ -125,6 +125,41 @@ def test_probe_interval_must_be_positive() -> None:
         )
 
 
+def test_kill_switch_rejects_ipv6_off() -> None:
+    with pytest.raises(ValidationError, match="leaves IPv6 on the default route"):
+        Config.model_validate(
+            {
+                "targets": [{"name": "vpn", "interface": "tun0"}],
+                "policies": [
+                    {
+                        "name": "p",
+                        "targets": ["vpn"],
+                        "on_down": "block",
+                        "apps": [{"name": "ssh"}],
+                        "leak": {"ipv6": "off"},
+                    }
+                ],
+            }
+        )
+
+
+def test_ipv6_off_is_allowed_without_a_kill_switch() -> None:
+    config = Config.model_validate(
+        {
+            "targets": [{"name": "vpn", "interface": "tun0"}],
+            "policies": [
+                {
+                    "name": "p",
+                    "targets": ["vpn"],
+                    "apps": [{"name": "ssh"}],
+                    "leak": {"ipv6": "off"},
+                }
+            ],
+        }
+    )
+    assert config.policies[0].leak.ipv6 == "off"
+
+
 def test_probe_interval_must_be_finite() -> None:
     with pytest.raises(ValidationError, match="finite"):
         Config.model_validate(

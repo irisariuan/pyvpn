@@ -152,6 +152,11 @@ class Policy(_Model):
             raise ValueError("policy name must not be empty")
         if not self.targets:
             raise ValueError(f"policy {self.name!r} needs at least one target")
+        if self.on_down == "block" and self.leak.ipv6 == "off":
+            raise ValueError(
+                f"policy {self.name!r}: leak.ipv6 'off' leaves IPv6 on the default "
+                "route while the target is up; use 'block' or 'route' with on_down 'block'"
+            )
         return self
 
 
