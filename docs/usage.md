@@ -167,9 +167,12 @@ policy.
 policies still apply to an excluded process.
 
 - **Policy with `apps`:** an excluded process is never placed in the
-  policy; if another policy's `apps` match it, that policy takes it. With
-  exclusions, the policy's `uid`/`user` app selectors are placed by the
-  process watcher instead of being matched in nftables.
+  policy; if another policy's `apps` match it, that policy takes it. The
+  policy's `uid`/`user` app selectors stay in nftables, minus the excluded
+  uids, so already-open sockets are covered. A non-uid exclusion (`exe`,
+  `name`, `unit`, `flatpak`, `snap`) that overlaps a uid selector cannot be
+  enforced without catching the whole uid: the uid match stays and the
+  excluded program stays routed. `pyvpn test` warns about that.
   **Limit:** a process is never moved *out* of the policy. An excluded
   program started from something the policy already routes (a shell, your
   desktop session, `pyvpn run`) stays routed. Moving it out would let
@@ -177,7 +180,7 @@ policies still apply to an excluded process.
   warns about this.
 
   ```json
-  {"name": "Torrents", "targets": ["jp"], "apps": [{"user": "torrent"}],
+  {"name": "Torrents", "targets": ["jp"], "apps": [{"name": "qbittorrent"}],
    "exclude_apps": [{"name": "ssh"}]}
   ```
 
@@ -390,7 +393,7 @@ doesn't change system DNS.**
 | `block_doh` | `false` | Block known DoH servers, and answer Firefox's `use-application-dns.net` canary so it keeps using the stub. |
 | `block_dot` | `false` | Block DNS over TLS (port 853). |
 | `block_quic` | `false` | Block QUIC (UDP 443). Apps fall back to TCP. |
-| `ipv6` | `"route"` | `"route"`: IPv6 also uses the target. `"block"`: the policy's IPv6 traffic is rejected (choose this if your target has no IPv6). `"off"`: pyvpn installs no IPv6 route for the policy. |
+| `ipv6` | `"route"` | `"route"`: IPv6 also uses the target. `"block"`: the policy's IPv6 traffic is rejected (choose this if your target has no IPv6). `"off"`: pyvpn installs no IPv6 route for the policy, so IPv6 uses the default route while the target is up. Refused with `on_down: "block"`; use `"block"` there. |
 
 `pyvpn audit` shows each policy's DNS state and the leak blocks it requested.
 

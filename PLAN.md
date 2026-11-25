@@ -344,11 +344,16 @@ Fail-back hold and the latency-based selection are ported from snake's
 Already-open sockets keep their route; new connections follow the new
 cgroup (as in snake: "connections keep their route").
 
-**Exclusions on a policy with apps** filter placement and nothing else. The
-watcher never places a process whose `exclude_apps` match (the next
-policy whose `apps` match still takes it), and the app manager leaves the
-policy's `uid`/`user` selectors out of nft `meta skuid`, since a raw uid
-match would catch excluded apps too. The watcher places those processes.
+**Exclusions on a policy with apps** filter placement and, for uid/user
+selectors, the packet match. The watcher never places a process whose
+`exclude_apps` match (the next policy whose `apps` match still takes it).
+The app manager keeps the policy's `uid`/`user` selectors in nft
+`meta skuid`, minus the excluded uids, so already-open sockets stay
+covered. A non-uid exclusion (`exe`, `name`, `unit`, `flatpak`, `snap`)
+that overlaps a uid selector cannot be expressed as a raw uid match: the
+uid match stays in place and the excluded program inside that uid stays
+routed. `pyvpn test` warns about that partial enforcement
+(`apps.exclusions.exclusion_warnings`).
 The watcher **never moves a process out of** a policy cgroup it inherited
 (an excluded program started from an app already in the policy). Moving it
 out would grant an exemption by executable, and Linux keeps the cgroup
