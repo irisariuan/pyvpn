@@ -9,8 +9,14 @@ default.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
-from pyvpn.platform.base import Capabilities
+from pyvpn.platform.base import (
+    Capabilities,
+    CgroupPlacer,
+    IsolatedCommand,
+    IsolatedProcess,
+)
 from pyvpn.state import DestSet, PolicyPlan, RoutingPlan
 
 log = logging.getLogger(__name__)
@@ -70,3 +76,11 @@ class DryRunBackend:
     async def teardown(self) -> None:
         self.installed = None
         log.warning("dry-run backend: teardown (nothing was installed)")
+
+    async def spawn_isolated(
+        self,
+        cgroups: CgroupPlacer,
+        command: IsolatedCommand,
+        verify_peer: Callable[[], None],
+    ) -> IsolatedProcess:
+        raise NotImplementedError("the dry-run backend does not start isolated commands")

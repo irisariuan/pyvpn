@@ -39,7 +39,7 @@ from dataclasses import replace
 from functools import partial
 from pathlib import Path
 
-from pyvpn.apps.cgroups import CgroupError, CgroupManager
+from pyvpn.apps.cgroups import CgroupError
 from pyvpn.constants import CGROUP_ROOT as CGROUP_SLICE
 from pyvpn.constants import NFT_TABLE, parse_excluded_cgroup, policy_cgroup
 from pyvpn.netfilter.render import render
@@ -51,7 +51,7 @@ from pyvpn.netfilter.ruleset import (
     build_set_update,
     build_teardown,
 )
-from pyvpn.platform.base import Capabilities, IsolatedCommand
+from pyvpn.platform.base import Capabilities, CgroupPlacer, IsolatedCommand
 from pyvpn.platform.linux.isolated import IsolatedChild, spawn_isolated
 from pyvpn.platform.linux.netns import NetnsManager
 from pyvpn.routing.apply import (
@@ -288,7 +288,7 @@ class LinuxBackend:
         await self._netns.activate(plan)
 
     async def place_policy_pid(
-        self, cgroups: CgroupManager, pid: int, policy_id: int, verify_peer: Callable[[], None]
+        self, cgroups: CgroupPlacer, pid: int, policy_id: int, verify_peer: Callable[[], None]
     ) -> None:
         """Move a PID only after its exact cgroup is governed by installed rules."""
         path = policy_cgroup(policy_id)
@@ -326,7 +326,7 @@ class LinuxBackend:
 
     async def spawn_isolated(
         self,
-        cgroups: CgroupManager,
+        cgroups: CgroupPlacer,
         command: IsolatedCommand,
         verify_peer: Callable[[], None],
     ) -> IsolatedChild:
@@ -354,7 +354,7 @@ class LinuxBackend:
 
     async def _place_isolated(
         self,
-        cgroups: CgroupManager,
+        cgroups: CgroupPlacer,
         policy_id: int,
         verify_peer: Callable[[], None],
         pid: int,

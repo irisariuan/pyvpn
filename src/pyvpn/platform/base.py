@@ -21,6 +21,14 @@ class Capabilities:
     netns: bool = False
 
 
+class CgroupPlacer(Protocol):
+    """The part of the app cgroup manager a backend needs for placement."""
+
+    def create(self, policy_id: int) -> object: ...
+
+    def place_pid(self, pid: int, policy_id: int, *, installed_id: int | None = None) -> object: ...
+
+
 class Backend(Protocol):
     @property
     def capabilities(self) -> Capabilities: ...
@@ -36,6 +44,19 @@ class Backend(Protocol):
 
     async def teardown(self) -> None:
         """Remove everything pyvpn installed."""
+
+    async def spawn_isolated(
+        self,
+        cgroups: CgroupPlacer,
+        command: IsolatedCommand,
+        verify_peer: Callable[[], None],
+    ) -> IsolatedProcess:
+        """Start ``command`` in the policy's namespace (``isolation: netns``).
+
+        A backend that advertises ``Capabilities.netns`` must implement this;
+        the daemon refuses to start isolated policies otherwise.
+        """
+        ...
 
 
 @dataclass(frozen=True, eq=False)

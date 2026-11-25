@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from pyvpn.platform.base import Capabilities
+from collections.abc import Callable
+
+from pyvpn.platform.base import (
+    Capabilities,
+    CgroupPlacer,
+    IsolatedCommand,
+    IsolatedProcess,
+)
 from pyvpn.state import DestSet, RoutingPlan
 
 
@@ -38,6 +45,14 @@ class FakeBackend:
     async def teardown(self) -> None:
         self.teardowns += 1
         self.installed = None
+
+    async def spawn_isolated(
+        self,
+        cgroups: CgroupPlacer,
+        command: IsolatedCommand,
+        verify_peer: Callable[[], None],
+    ) -> IsolatedProcess:
+        raise NotImplementedError("FakeBackend does not start isolated commands")
 
     @property
     def last(self) -> RoutingPlan:

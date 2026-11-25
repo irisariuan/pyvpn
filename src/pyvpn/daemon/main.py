@@ -244,7 +244,9 @@ def build_daemon(
 
     apps = AppManager(CgroupManager(options.resolved_cgroup_root()))
     route_and_place = getattr(backend, "place_policy_pid", None)
-    spawn_isolated = getattr(backend, "spawn_isolated", None)
+    # ``spawn_isolated`` is part of the Backend protocol; a backend that
+    # advertises ``netns`` without it fails type checking, not at runtime.
+    spawn_isolated = backend.spawn_isolated if backend.capabilities.netns else None
     targets = NetlinkTargetWatcher(config.targets, netlink, settings=config.settings)
 
     daemon: Daemon | None = None
