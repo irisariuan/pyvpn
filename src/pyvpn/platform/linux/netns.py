@@ -269,10 +269,12 @@ class DnsRelay:
         upstream: tuple[str, int],
         *,
         timeout: float = 5.0,
+        netns_inode: tuple[int, int] | None = None,
     ) -> None:
         self._udp_sock = udp
         self._tcp_sock = tcp
         self.upstream = upstream
+        self.netns_inode = netns_inode
         self._timeout = timeout
         self._udp: asyncio.DatagramTransport | None = None
         self._server: asyncio.Server | None = None
@@ -534,7 +536,15 @@ class NetnsManager:
         inode = self._sys.stat(self.path(pid))
         if marker is not None and inode is not None and marker.inode == inode:
             return True
+        if marker is not None and self._veth_matches(marker):
+            # The pair is still ours but the namespace was re-created under
+            # it (``ip netns delete`` leaves the veth on the host). Rebuild
+            # the pair rather than wedging every later apply.
+            return True
         return await self._peer_inside(ns, netns_peer_veth(pid))
+
+    def _veth_matches(self, marker: _Namespace) -> bool:
+        return marker.veth in self._sys.links() and self._sys.ifindex(marker.veth) == marker.ifindex
 
     async def _targets(self, wanted: dict[int, PolicyPlan]) -> set[str]:
         """Interfaces replies to the namespaces arrive on (forwarding must be on).
@@ -589,20 +599,42 @@ class NetnsManager:
         ns = policy_netns(pid, self._prefix)
         host, peer = netns_host_veth(pid), netns_peer_veth(pid)
         marker = self._markers().get(pid)
-        created = False
+        have_host = host in links
+        recreated = False
+        if pid in self._configured and ns in names and have_host:
+            # Configured by this daemon: nothing to verify, no subprocesses.
+            inode = self._sys.stat(self.path(pid))
+            if inode is not None and marker is not None and marker.inode == inode:
+                return
         if ns not in names:
-            self._configured.discard(pid)
+            if have_host:
+                # The pair is back in the host namespace: a leftover whose
+                # namespace is gone. Rebuild it rather than wedging the apply.
+                log.warning("deleting leftover %s: its namespace %s is gone", host, ns)
+                await self._delete_pair(host)
+                have_host = False
             await self._sys.run(["ip", "netns", "add", ns])
-            created = True
-        if host not in links:
+            recreated = True
+        elif have_host and not await self._peer_inside(ns, peer):
+            # The namespace was re-created but the old pair stayed on the
+            # host; its peer is not inside, so the pair must be rebuilt.
+            if not await self._owned(pid, ns, marker):
+                raise NetnsError(
+                    f"{ns} exists but its veth pair is not inside it; refusing to touch it"
+                )
+            await self._delete_pair(host)
+            have_host = False
+            recreated = True
+        if recreated:
             self._configured.discard(pid)
             self._ready.pop(pid, None)
-            if not created and not await self._owned(pid, ns, marker):
-                # A namespace without its veth: adopt it only when it is pyvpn's.
-                raise NetnsError(
-                    f"{ns} exists without a pyvpn veth and is not marked as pyvpn's; "
-                    "refusing to adopt it"
-                )
+        elif not have_host and not await self._owned(pid, ns, marker):
+            # A namespace without its veth: adopt it only when it is pyvpn's.
+            raise NetnsError(
+                f"{ns} exists without a pyvpn veth and is not marked as pyvpn's; "
+                "refusing to adopt it"
+            )
+        if not have_host:
             await self._sys.run(
                 ["ip", "link", "add", host, "type", "veth", "peer", "name", peer, "netns", ns]
             )
@@ -647,6 +679,10 @@ class NetnsManager:
         await run([*enter, "nft", "-f", "-"], input=render(build_netns_ruleset()))
         self._configured.add(pid)
         self._mark(pid)
+
+    async def _delete_pair(self, host: str) -> None:
+        """Delete a veth pair by its host end (the peer goes with it)."""
+        await self._sys.run(["ip", "link", "del", "dev", host])
 
     async def _owns_policy(self, pid: int) -> bool:
         """Whether the namespace/veth for ``pid`` may be deleted as pyvpn's.
@@ -818,7 +854,13 @@ class NetnsManager:
 
     async def _sync_relay(self, pid: int, stub_port: int | None) -> None:
         relay = self._relays.get(pid)
-        if relay is not None and stub_port is not None and relay.upstream[1] == stub_port:
+        inode = self._sys.stat(self.path(pid))
+        if (
+            relay is not None
+            and stub_port is not None
+            and relay.upstream[1] == stub_port
+            and relay.netns_inode == inode
+        ):
             return
         if relay is not None:
             await self._relays.pop(pid).close()
@@ -830,6 +872,6 @@ class NetnsManager:
             if exc.errno == errno.EADDRINUSE:
                 raise NetnsError(f"port 53 is already in use inside {self.path(pid)}") from exc
             raise
-        relay = DnsRelay(udp, tcp, ("127.0.0.1", stub_port))
+        relay = DnsRelay(udp, tcp, ("127.0.0.1", stub_port), netns_inode=inode)
         await relay.start()
         self._relays[pid] = relay

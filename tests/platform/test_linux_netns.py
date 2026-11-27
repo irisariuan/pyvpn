@@ -378,6 +378,46 @@ async def test_a_foreign_namespace_is_not_deleted(tmp_path: Path) -> None:
     assert "pyvpn-p7" in sys_.namespaces
 
 
+async def test_a_recreated_namespace_rebuilds_the_pair(tmp_path: Path) -> None:
+    sys_ = FakeSystem()
+    first = manager(tmp_path, sys_)
+    p = RoutingPlan((plan(2),))
+    await first.prepare(p)
+    await first.activate(p)
+    # The namespace is deleted and re-created while the host end survives.
+    sys_.namespaces.discard("pyvpn-p2")
+    sys_.peers.pop("pyvpn-p2", None)
+    sys_.inodes["pyvpn-p2"] = (1, 42)
+    sys_.namespaces.add("pyvpn-p2")
+    sys_.log.clear()
+    second = manager(tmp_path, sys_)
+    await second.prepare(p)
+    assert "ip link del dev pyvpn-h2" in sys_.log
+    assert "ip link add pyvpn-h2 type veth peer name pyvpn-n2 netns pyvpn-p2" in sys_.log
+    assert "pyvpn-n2" in sys_.peers["pyvpn-p2"]
+    await second.activate(p)
+    assert second.ready(2) is not None
+
+
+async def test_a_recreated_namespace_reopens_the_relay(tmp_path: Path) -> None:
+    sys_ = FakeSystem()
+    first = manager(tmp_path, sys_)
+    p = RoutingPlan((plan(2, dns_stub_port=dns_stub_port(2)),))
+    await first.prepare(p)
+    await first.activate(p)
+    assert len(sys_.listeners) == 1
+    # Re-create the namespace; the relay must be reopened against the new one.
+    sys_.namespaces.discard("pyvpn-p2")
+    sys_.peers.pop("pyvpn-p2", None)
+    sys_.inodes["pyvpn-p2"] = (1, 43)
+    sys_.namespaces.add("pyvpn-p2")
+    second = manager(tmp_path, sys_)
+    await second.prepare(p)
+    await second.activate(p)
+    assert len(sys_.listeners) == 2
+    await second.close()
+
+
 async def test_unrelated_namespaces_are_never_deleted(tmp_path: Path) -> None:
     sys_ = FakeSystem()
     sys_.namespaces |= {"pyvpn-tb-1234-host", "pyvpn-p", "pyvpn-p01", "other"}
