@@ -109,6 +109,12 @@ class NetnsSystem(Protocol):
     def links(self) -> set[str]:
         """Interface names in the daemon's network namespace."""
 
+    def stat(self, path: Path) -> tuple[int, int] | None:
+        """``(st_dev, st_ino)`` of a namespace handle, or None when it is gone."""
+
+    def ifindex(self, name: str) -> int | None:
+        """The index of an interface, or None when it does not exist."""
+
     def read_sysctl(self, key: str) -> str | None:
         """A ``/proc/sys`` value (``net/ipv4/...``), or None when it does not exist."""
 
@@ -156,6 +162,19 @@ class HostSystem:
 
     def links(self) -> set[str]:
         return {name for _, name in socket.if_nameindex()}
+
+    def stat(self, path: Path) -> tuple[int, int] | None:
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return (st.st_dev, st.st_ino)
+
+    def ifindex(self, name: str) -> int | None:
+        try:
+            return socket.if_nametoindex(name)
+        except OSError:
+            return None
 
     def read_sysctl(self, key: str) -> str | None:
         try:
@@ -372,6 +391,20 @@ class _IifRule:
     table: int
 
 
+@dataclass(frozen=True)
+class _Namespace:
+    """What pyvpn recorded when it created a namespace (ownership marker).
+
+    ``inode`` identifies the namespace handle; a re-created namespace has a
+    different inode, so the marker also tells a surviving pair that its
+    namespace is gone. ``ifindex`` identifies the host end of the veth.
+    """
+
+    inode: tuple[int, int]
+    veth: str
+    ifindex: int
+
+
 def veth_policy_id(name: str) -> int | None:
     """The policy id of a host-side veth name (``pyvpn-h<id>``), else None."""
     m = _VETH.fullmatch(name)
@@ -391,6 +424,7 @@ class NetnsManager:
         self._sys: NetnsSystem = system or HostSystem(proc_sys=proc_sys, netns_dir=netns_dir)
         self._netns_dir = netns_dir
         self._record = run_dir / "forwarding.json"
+        self._markers_path = run_dir / "netns.json"
         self._prefix = prefix
         self._ns_name = re.compile(re.escape(prefix) + r"([1-9][0-9]?)")
         self._configured: set[int] = set()
@@ -429,6 +463,79 @@ class NetnsManager:
         tmp.write_text(json.dumps(sorted(names)) + "\n")
         os.replace(tmp, self._record)
 
+    def _markers(self) -> dict[int, _Namespace]:
+        """The ownership markers written when pyvpn created a namespace."""
+        try:
+            doc = json.loads(self._markers_path.read_text())
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            log.warning("ignoring unreadable %s: %s", self._markers_path, exc)
+            return {}
+        entries = doc.get("namespaces") if isinstance(doc, dict) else None
+        if not isinstance(entries, dict):
+            return {}
+        out: dict[int, _Namespace] = {}
+        for key, value in entries.items():
+            try:
+                pid = int(key)
+                inode = (int(value["inode"][0]), int(value["inode"][1]))
+                veth = str(value["veth"])
+                ifindex = int(value["ifindex"])
+            except (KeyError, TypeError, ValueError, IndexError):
+                continue
+            out[pid] = _Namespace(inode, veth, ifindex)
+        return out
+
+    def _save_markers(self, markers: dict[int, _Namespace]) -> None:
+        self._markers_path.parent.mkdir(parents=True, exist_ok=True)
+        doc = {
+            "version": 1,
+            "namespaces": {
+                str(pid): {"inode": list(m.inode), "veth": m.veth, "ifindex": m.ifindex}
+                for pid, m in sorted(markers.items())
+            },
+        }
+        tmp = self._markers_path.with_name(self._markers_path.name + ".tmp")
+        tmp.write_text(json.dumps(doc, sort_keys=True) + "\n")
+        os.replace(tmp, self._markers_path)
+
+    def _mark(self, pid: int) -> None:
+        """Record that the namespace and veth for ``pid`` are pyvpn's."""
+        inode = self._sys.stat(self.path(pid))
+        ifindex = self._sys.ifindex(netns_host_veth(pid))
+        if inode is None or ifindex is None:
+            raise NetnsError(f"cannot record ownership of {self.path(pid)}")
+        markers = self._markers()
+        markers[pid] = _Namespace(inode, netns_host_veth(pid), ifindex)
+        self._save_markers(markers)
+
+    def _unmark(self, pid: int) -> None:
+        markers = self._markers()
+        if markers.pop(pid, None) is not None:
+            self._save_markers(markers)
+
+    async def _peer_inside(self, ns: str, peer: str) -> bool:
+        """Whether the veth peer link is actually in the namespace ``ns``."""
+        try:
+            await self._sys.run(["ip", "-n", ns, "link", "show", peer])
+        except NetnsError:
+            return False
+        return True
+
+    async def _owned(self, pid: int, ns: str, marker: _Namespace | None) -> bool:
+        """Whether an existing namespace/veth is pyvpn's, not a foreign one.
+
+        The marker is authoritative when its inode still matches. Without a
+        marker (an upgrade from a version that did not write one, or a crash
+        between create and mark) the strict signature is the veth peer sitting
+        inside the namespace named ``pyvpn-p<id>``.
+        """
+        inode = self._sys.stat(self.path(pid))
+        if marker is not None and inode is not None and marker.inode == inode:
+            return True
+        return await self._peer_inside(ns, netns_peer_veth(pid))
+
     async def _targets(self, wanted: dict[int, PolicyPlan]) -> set[str]:
         """Interfaces replies to the namespaces arrive on (forwarding must be on).
 
@@ -459,7 +566,7 @@ class NetnsManager:
         links = self._sys.links()
         for name in sorted(links):
             pid = veth_policy_id(name)
-            if pid is not None and pid not in wanted:
+            if pid is not None and pid not in wanted and await self._owns_policy(pid):
                 await self._cut_off(name)
                 self._ready.pop(pid, None)
                 self._configured.discard(pid)
@@ -481,12 +588,21 @@ class NetnsManager:
     async def _ensure(self, pid: int, names: set[str], links: set[str]) -> None:
         ns = policy_netns(pid, self._prefix)
         host, peer = netns_host_veth(pid), netns_peer_veth(pid)
+        marker = self._markers().get(pid)
+        created = False
         if ns not in names:
             self._configured.discard(pid)
             await self._sys.run(["ip", "netns", "add", ns])
+            created = True
         if host not in links:
             self._configured.discard(pid)
             self._ready.pop(pid, None)
+            if not created and not await self._owned(pid, ns, marker):
+                # A namespace without its veth: adopt it only when it is pyvpn's.
+                raise NetnsError(
+                    f"{ns} exists without a pyvpn veth and is not marked as pyvpn's; "
+                    "refusing to adopt it"
+                )
             await self._sys.run(
                 ["ip", "link", "add", host, "type", "veth", "peer", "name", peer, "netns", ns]
             )
@@ -530,6 +646,19 @@ class NetnsManager:
             )
         await run([*enter, "nft", "-f", "-"], input=render(build_netns_ruleset()))
         self._configured.add(pid)
+        self._mark(pid)
+
+    async def _owns_policy(self, pid: int) -> bool:
+        """Whether the namespace/veth for ``pid`` may be deleted as pyvpn's.
+
+        A matching marker or a peer inside the namespace is proof. A veth
+        whose namespace is already gone is a leftover of ours; a namespace
+        that is not ours is left alone.
+        """
+        ns = policy_netns(pid, self._prefix)
+        if ns not in self._sys.netns_names():
+            return True
+        return await self._owned(pid, ns, self._markers().get(pid))
 
     async def activate(self, plan: RoutingPlan) -> None:
         """After the nft commit: let each namespace out through its rules."""
@@ -584,10 +713,15 @@ class NetnsManager:
 
         for name in sorted(links):
             vid = veth_policy_id(name)
-            if vid is not None and vid not in wanted:
+            if vid is not None and vid not in wanted and await self._owns_policy(vid):
                 await run(["ip", "link", "del", "dev", name])
         for name in stale_ns:
-            await run(["ip", "netns", "delete", name])
+            pid = int(self._ns_name.fullmatch(name).group(1))  # type: ignore[union-attr]
+            if await self._owns_policy(pid):
+                await run(["ip", "netns", "delete", name])
+                self._unmark(pid)
+            else:
+                log.warning("leaving %s: it is not marked as pyvpn's", name)
         await self._close_relays(set(wanted))
         for pid in sorted(set(self._ready) - set(wanted)):
             del self._ready[pid]
@@ -595,7 +729,11 @@ class NetnsManager:
     async def teardown(self) -> None:
         """Delete every pyvpn veth (namespaces stay, cut off), rules and relays."""
         self._ready.clear()
-        veths = sorted(n for n in self._sys.links() if veth_policy_id(n) is not None)
+        veths = []
+        for name in sorted(self._sys.links()):
+            pid = veth_policy_id(name)
+            if pid is not None and await self._owns_policy(pid):
+                veths.append(name)
         for name in veths:
             with contextlib.suppress(OSError):
                 self._sys.write_sysctl(f"net/ipv4/conf/{name}/forwarding", "0")

@@ -29,7 +29,7 @@ from pyvpn.netfilter.render import render
 from pyvpn.netfilter.ruleset import build_netns_ruleset
 from pyvpn.platform.base import IsolatedCommand
 from pyvpn.platform.linux.isolated import client_fd, spawn_isolated, supplementary_groups
-from pyvpn.platform.linux.netns import DnsRelay, NetnsManager, veth_policy_id
+from pyvpn.platform.linux.netns import DnsRelay, NetnsError, NetnsManager, veth_policy_id
 from pyvpn.state import AppBinding, PolicyPlan, RoutingPlan
 
 NETNS_DIR = Path("/run/netns")
@@ -60,6 +60,9 @@ class FakeSystem:
     def __init__(self) -> None:
         self.log: list[str] = []
         self.namespaces: set[str] = set()
+        self.peers: dict[str, set[str]] = {}  # namespace -> peer links inside it
+        self.host_peer: dict[str, tuple[str, str]] = {}  # host link -> (namespace, peer)
+        self.inodes: dict[str, tuple[int, int]] = {}
         self.link_set: set[str] = {"lo", "eth0", "tun0"}
         self.sysctl: dict[str, str] = {
             "net/ipv6/conf/all/disable_ipv6": "0",
@@ -72,24 +75,54 @@ class FakeSystem:
         self.fail: str | None = None
 
     async def run(self, argv: Sequence[str], *, input: str | None = None) -> str:
+        from pyvpn.platform.linux.netns import NetnsError
+
         line = " ".join(argv)
         if self.fail is not None and line.startswith(self.fail):
-            from pyvpn.platform.linux.netns import NetnsError
-
             raise NetnsError(f"{line}: simulated failure")
         if argv[:4] == ["ip", "-j", "-4", "rule"]:
             return json.dumps(self.rules)
         if argv[:4] == ["ip", "-j", "-4", "route"]:
             return json.dumps(self.default_routes)
+        if (
+            len(argv) > 5
+            and argv[0] == "ip"
+            and argv[1] == "-n"
+            and argv[3] == "link"
+            and argv[4] == "show"
+        ):
+            # "ip -n NS link show PEER": a read-only probe, not a change.
+            if argv[5] not in self.peers.get(argv[2], set()):
+                raise NetnsError(f"Device {argv[5]} does not exist in {argv[2]}")
+            return ""
+        # "ip -n NS addr|route ... dev PEER" fails when the peer is not there.
+        dev = argv[7] if len(argv) > 7 and argv[3] == "addr" else None
+        dev = argv[9] if len(argv) > 9 and argv[3] == "route" else dev
+        in_netns = argv[0] == "ip" and argv[1] == "-n"
+        if dev is not None and in_netns and dev not in self.peers.get(argv[2], set()):
+            raise NetnsError(f"Cannot find device {dev}")
+        if argv[:2] == ["ip", "addr"] and argv[5] not in self.link_set:
+            raise NetnsError(f"Cannot find device {argv[5]}")
         self.log.append(line + (" <<nft" if input is not None else ""))
         if argv[:3] == ["ip", "netns", "add"]:
             self.namespaces.add(argv[3])
+            self.inodes[argv[3]] = (1, len(self.inodes) + 1)
         elif argv[:3] == ["ip", "netns", "delete"]:
             self.namespaces.discard(argv[3])
+            self.peers.pop(argv[3], None)
+            self.inodes.pop(argv[3], None)
         elif argv[:3] == ["ip", "link", "add"]:
             self.link_set.add(argv[3])
+            if "netns" in argv:
+                ns = argv[argv.index("netns") + 1]
+                peer = argv[argv.index("peer") + 2]  # "peer name <peer>"
+                self.peers.setdefault(ns, set()).add(peer)
+                self.host_peer[argv[3]] = (ns, peer)
         elif argv[:4] == ["ip", "link", "del", "dev"]:
             self.link_set.discard(argv[4])
+            if argv[4] in self.host_peer:
+                ns, peer = self.host_peer.pop(argv[4])
+                self.peers.get(ns, set()).discard(peer)
         elif argv[:4] == ["ip", "-4", "rule", "add"]:
             self.rules.append({"priority": int(argv[5]), "iif": argv[7], "table": argv[9]})
         elif argv[:4] == ["ip", "-4", "rule", "del"]:
@@ -101,6 +134,12 @@ class FakeSystem:
 
     def links(self) -> set[str]:
         return set(self.link_set)
+
+    def stat(self, path: Path) -> tuple[int, int] | None:
+        return self.inodes.get(path.name)
+
+    def ifindex(self, name: str) -> int | None:
+        return sorted(self.link_set).index(name) + 1 if name in self.link_set else None
 
     def read_sysctl(self, key: str) -> str | None:
         return self.sysctl.get(key)
@@ -303,7 +342,11 @@ async def test_a_fresh_manager_recovers_after_a_daemon_restart(tmp_path: Path) -
 
 async def test_stale_veth_from_a_crash_is_cut_off_at_startup(tmp_path: Path) -> None:
     sys_ = FakeSystem()
+    sys_.namespaces.add("pyvpn-p9")
+    sys_.inodes["pyvpn-p9"] = (1, 9)
     sys_.link_set.add("pyvpn-h9")
+    sys_.peers["pyvpn-p9"] = {"pyvpn-n9"}
+    sys_.host_peer["pyvpn-h9"] = ("pyvpn-p9", "pyvpn-n9")
     sys_.sysctl["net/ipv4/conf/pyvpn-h9/forwarding"] = "1"
     netns = manager(tmp_path, sys_)
     await netns.prepare(RoutingPlan())
@@ -311,6 +354,28 @@ async def test_stale_veth_from_a_crash_is_cut_off_at_startup(tmp_path: Path) -> 
     assert sys_.log[-1] == "ip link set dev pyvpn-h9 down"
     await netns.activate(RoutingPlan())
     assert "pyvpn-h9" not in sys_.link_set
+
+
+async def test_a_foreign_namespace_is_not_adopted(tmp_path: Path) -> None:
+    sys_ = FakeSystem()
+    # Someone else's namespace happens to use our name; no pyvpn veth inside.
+    sys_.namespaces.add("pyvpn-p1")
+    sys_.inodes["pyvpn-p1"] = (1, 1)
+    netns = manager(tmp_path, sys_)
+    with pytest.raises(NetnsError, match="refusing to adopt"):
+        await netns.prepare(RoutingPlan((plan(1),)))
+    assert "pyvpn-p1" in sys_.namespaces
+    assert "pyvpn-h1" not in sys_.link_set
+
+
+async def test_a_foreign_namespace_is_not_deleted(tmp_path: Path) -> None:
+    sys_ = FakeSystem()
+    sys_.namespaces.add("pyvpn-p7")
+    sys_.inodes["pyvpn-p7"] = (1, 7)
+    netns = manager(tmp_path, sys_)
+    await netns.prepare(RoutingPlan())
+    await netns.activate(RoutingPlan())
+    assert "pyvpn-p7" in sys_.namespaces
 
 
 async def test_unrelated_namespaces_are_never_deleted(tmp_path: Path) -> None:
